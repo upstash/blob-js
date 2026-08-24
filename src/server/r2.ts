@@ -33,8 +33,9 @@ export class R2 {
     /** The bucket password: the HMAC key for completion tokens. Never leaves the server. */
     readonly signingSecret: string,
     readonly defaultCache: CacheOption | undefined,
+    enableTelemetry = true,
   ) {
-    this.creds = new CredentialCache(token);
+    this.creds = new CredentialCache(token, enableTelemetry);
   }
 
   credentials(): Promise<TempCredentials> {

@@ -22,7 +22,10 @@ export class CredentialCache {
   private refreshAt = 0;
   private inflight: Promise<TempCredentials> | undefined;
 
-  constructor(private readonly token: string) {}
+  constructor(
+    private readonly token: string,
+    private readonly enableTelemetry = true,
+  ) {}
 
   get(): Promise<TempCredentials> {
     if (this.current && Date.now() < this.refreshAt) return Promise.resolve(this.current);
@@ -35,7 +38,7 @@ export class CredentialCache {
   private async mint(attempt = 0): Promise<TempCredentials> {
     const res = await fetch(`${AGENT_URL}/v1/credentials`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${this.token}`, ...telemetryHeaders() },
+      headers: { authorization: `Bearer ${this.token}`, ...(this.enableTelemetry ? telemetryHeaders() : {}) },
     });
 
     if ((res.status === 429 || res.status === 503) && attempt < 3) {

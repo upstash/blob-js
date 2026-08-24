@@ -92,7 +92,7 @@ const { start } = useUpload<typeof POST>({ route: '/api/upload' });
 ## Telemetry
 
 Requests to Upstash carry the SDK version, runtime, and platform. Set `UPSTASH_DISABLE_TELEMETRY`
-to turn it off.
+in the environment or pass `new Bucket({ token, enableTelemetry: false })` to turn it off.
 
 ## License
 

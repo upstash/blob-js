@@ -11,6 +11,12 @@ export interface BucketOptions {
   token: string;
   /** Default cache policy for every write; per-call `cache` overrides it. */
   cache?: CacheOption;
+  /**
+   * Send the SDK version, runtime and platform as headers on credential requests to Upstash.
+   * `UPSTASH_DISABLE_TELEMETRY` in the environment also turns it off.
+   * @default true
+   */
+  enableTelemetry?: boolean;
 }
 
 export interface PutOptions {
@@ -81,7 +87,7 @@ export class Bucket {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
     this.defaultCache = options.cache;
-    this.r2 = new R2(decoded.bucketId, options.token, decoded.password, options.cache);
+    this.r2 = new R2(decoded.bucketId, options.token, decoded.password, options.cache, options.enableTelemetry ?? true);
     INTERNALS.set(this, this.r2);
   }
 

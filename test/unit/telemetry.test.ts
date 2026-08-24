@@ -50,6 +50,10 @@ describe('telemetryHeaders', () => {
     expect(telemetryHeaders({ process: { versions: { node: '22.1.0' }, env: { UPSTASH_DISABLE_TELEMETRY: '1' } } })).toEqual({});
   });
 
+  test('vercel wins over aws when both are set', () => {
+    expect(telemetryHeaders({ process: { env: { VERCEL: '1', AWS_REGION: 'us-east-1' } } })['Upstash-Telemetry-Platform']).toBe('vercel');
+  });
+
   test('reads the real globalThis by default', () => {
     expect(telemetryHeaders()['Upstash-Telemetry-Runtime']).toStartWith('bun@');
   });
