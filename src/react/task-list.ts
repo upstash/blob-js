@@ -97,7 +97,16 @@ class ListStore<R extends ListRecord> {
 
   private settle(): void {
     for (const slot of [...this.slots, ...this.detached]) {
-      if (slot.settled || !TERMINAL.has(slot.entry.status())) continue;
+      if (!TERMINAL.has(slot.entry.status())) {
+        // retry() takes a task back out of 'error', and a slot left settled would never fire
+        // onDone/onError again nor count against the concurrency limit.
+        if (slot.settled) {
+          slot.settled = false;
+          this.running.add(slot);
+        }
+        continue;
+      }
+      if (slot.settled) continue;
       slot.settled = true;
       this.running.delete(slot);
       if (!slot.listed) {

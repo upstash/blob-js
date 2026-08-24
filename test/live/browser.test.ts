@@ -149,8 +149,13 @@ describe('upload()', () => {
     });
     const rec2 = [...memory.entries()].find(([k]) => k.includes('movie.bin'))!;
     const beginsBefore = begins;
-    // Simulate the tab dying mid-upload: drop the task on the floor without cancel.
+    // Simulate the tab dying mid-upload: drop the task on the floor without cancel. pause() drains
+    // the parts already sending, so wait for it to go quiet: two writers on one part number race.
     (second0 as any).pause();
+    for (let last = -1; last !== second0.snapshot().loaded; ) {
+      last = second0.snapshot().loaded;
+      await new Promise((r) => setTimeout(r, 750));
+    }
     memory.set(rec2[0], rec2[1]);
 
     const third = upload(file, { route: '/api/upload/large', headers });

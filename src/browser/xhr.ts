@@ -44,7 +44,13 @@ export function sendXhr(req: XhrRequest): Promise<XhrResponse> {
       resolve({
         status: xhr.status,
         statusText: xhr.statusText,
-        header: (name) => xhr.getResponseHeader(name),
+        header: (name) => {
+          try {
+            return xhr.getResponseHeader(name);
+          } catch {
+            return null;
+          }
+        },
         text: xhr.responseText,
       });
     };

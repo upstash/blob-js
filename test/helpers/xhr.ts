@@ -22,6 +22,8 @@ abstract class BaseXhr {
   headers: Record<string, string> = {};
   body: unknown = null;
   aborted = false;
+  /** Every response header this request asked for: Chrome logs an error for one CORS never exposed. */
+  asked: string[] = [];
   protected responseHeaders = new Map<string, string>();
 
   open(method: string, url: string): void {
@@ -32,6 +34,7 @@ abstract class BaseXhr {
     this.headers[k.toLowerCase()] = v;
   }
   getResponseHeader(name: string): string | null {
+    this.asked.push(name.toLowerCase());
     return this.responseHeaders.get(name.toLowerCase()) ?? null;
   }
   abstract send(body: unknown): void;
@@ -71,8 +74,11 @@ export class FetchXhr extends BaseXhr {
 
 export class ManualXhr extends BaseXhr {
   static pending: ManualXhr[] = [];
+  /** Kept after the response, so a test can prove a part that landed was never sent twice. */
+  static sentUrls: string[] = [];
   static reset(): void {
     ManualXhr.pending = [];
+    ManualXhr.sentUrls = [];
   }
   sent = false;
 
@@ -80,6 +86,7 @@ export class ManualXhr extends BaseXhr {
     this.body = body;
     this.sent = true;
     ManualXhr.pending.push(this);
+    ManualXhr.sentUrls.push(this.url);
   }
 
   override abort(): void {

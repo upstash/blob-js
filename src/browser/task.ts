@@ -2,7 +2,7 @@ import { BlobError } from '../shared/errors.ts';
 import type { BlobObject, UploadSnapshot, UploadTask, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
 import { abortError, clock } from './clock.ts';
 import { acquire } from './pool.ts';
-import { backoffMs, classify, MAX_ATTEMPTS } from './retry.ts';
+import { backoffMs, classify, MAX_ATTEMPTS, MAX_NETWORK_ATTEMPTS } from './retry.ts';
 import { clearPending, fingerprint, readPending, writePending } from './store.ts';
 import { NetworkError, sendXhr } from './xhr.ts';
 
@@ -22,6 +22,10 @@ export interface InternalTask extends UploadTask {
 
 const PARTS_IN_FLIGHT = 4;
 const ROUTE_ATTEMPTS = 3;
+// A part url is signed with the bucket's temporary credential and dies with it, ~524 s out
+// (WIRE.md), which a 5 MiB part on a slow link outruns. A 403 on a url older than this is the
+// clock however often it happens; only a url minted moments ago and refused again is the body.
+const PRESIGN_STALE_MS = 60_000;
 
 type Status = UploadSnapshot['status'];
 
@@ -51,7 +55,6 @@ function isAbort(e: unknown): boolean {
 
 class Task implements InternalTask {
   readonly id = `u${++counter}-${clock.now().toString(36)}`;
-  readonly done: Promise<BlobObject & { data: unknown }>;
 
   private status: Status = 'queued';
   private error: BlobError | undefined;
@@ -68,6 +71,7 @@ class Task implements InternalTask {
   private batch: Promise<void> | undefined;
   private inflight = new Map<number, InFlight>();
   private represigned = new Set<number>();
+  private urlsMintedAt = 0;
   private paused = false;
   private resumeWaiters: (() => void)[] = [];
   private readonly cancelController = new AbortController();
@@ -77,18 +81,28 @@ class Task implements InternalTask {
   private frameQueued = false;
   private resolveDone!: (b: BlobObject & { data: unknown }) => void;
   private rejectDone!: (e: unknown) => void;
+  private donePromise!: Promise<BlobObject & { data: unknown }>;
 
   constructor(
     readonly file: File,
     private readonly options: UploadOptions,
   ) {
     this.storeKey = fingerprint(options.route, file);
-    this.done = new Promise((resolve, reject) => {
+    this.freshDone();
+  }
+
+  /** A getter, so retry() can hand out a promise the failed attempt has not already rejected. */
+  get done(): Promise<BlobObject & { data: unknown }> {
+    return this.donePromise;
+  }
+
+  private freshDone(): void {
+    this.donePromise = new Promise((resolve, reject) => {
       this.resolveDone = resolve;
       this.rejectDone = reject;
     });
     // Nobody is required to await done; a rejection must not surface as unhandled.
-    this.done.catch(() => {});
+    this.donePromise.catch(() => {});
   }
 
   /* ------------------------------------------------------------ observe */
@@ -142,11 +156,15 @@ class Task implements InternalTask {
 
   /* ----------------------------------------------------------- controls */
 
+  // Bytes on the wire are already paid for, so pause stops the queue rather than the transfer: a
+  // part that has sent anything finishes and keeps its etag, and only a part that has sent nothing
+  // (parked on a backoff, or waiting for a pool slot) is dropped and re-queued. Aborting all four
+  // threw away up to a part each and snapped the bar to zero.
   pause(): boolean {
     if (this.kind !== 'multipart' || this.status !== 'uploading' || this.paused) return false;
     this.paused = true;
     this.status = 'paused';
-    for (const f of this.inflight.values()) f.controller.abort();
+    for (const f of this.inflight.values()) if (f.loaded === 0) f.controller.abort();
     this.notify();
     return true;
   }
@@ -159,6 +177,21 @@ class Task implements InternalTask {
     this.resumeWaiters = [];
     for (const w of waiters) w();
     this.notify();
+    return true;
+  }
+
+  // The error is terminal for the attempt, not for the upload: the multipart still exists, every
+  // landed part is still landed, and done is a fresh promise because the old one already rejected.
+  retry(): boolean {
+    if (this.status !== 'error') return false;
+    this.error = undefined;
+    this.status = 'queued';
+    this.inflight.clear();
+    this.represigned.clear();
+    this.freshDone();
+    this.started = false;
+    this.notify();
+    this.start();
     return true;
   }
 
@@ -215,7 +248,14 @@ class Task implements InternalTask {
 
   private async run(): Promise<BlobObject & { data: unknown }> {
     const signal = this.cancelController.signal;
-    if (!(await this.tryResume())) await this.begin();
+    if (this.token) {
+      // A retry of an upload that already began: its presigns are stale and its parts are the
+      // server's to report, so ask for fresh urls instead of beginning a second multipart.
+      this.urls.clear();
+      await this.fetchBatch(this.firstMissing());
+    } else if (!(await this.tryResume())) {
+      await this.begin();
+    }
     // A cancel that lands while begin is in flight still gets its token here.
     if (signal.aborted) {
       this.abortServerSide();
@@ -227,7 +267,6 @@ class Task implements InternalTask {
     let landed: WireLanded[] | undefined;
     if (this.kind === 'single') {
       await this.putWithRetry(0, this.file.size, this.file);
-      this.sent = this.file.size;
       this.notify();
     } else {
       await this.runMultipart();
@@ -254,12 +293,14 @@ class Task implements InternalTask {
     if (res.upload.kind === 'single') {
       this.kind = 'single';
       this.single = { url: res.upload.url, headers: res.upload.headers };
+      this.urlsMintedAt = clock.now();
       return;
     }
     this.kind = 'multipart';
     this.partSize = res.upload.partSize;
     this.layoutParts();
     for (const p of res.upload.parts) this.urls.set(p.n, p.url);
+    this.urlsMintedAt = clock.now();
     writePending(this.storeKey, { completionToken: this.token });
   }
 
@@ -284,6 +325,11 @@ class Task implements InternalTask {
     }
   }
 
+  private firstMissing(): number {
+    for (const p of this.parts.values()) if (!p.etag) return p.n;
+    return 1;
+  }
+
   private layoutParts(): void {
     const count = Math.max(1, Math.ceil(this.file.size / this.partSize));
     for (let n = 1; n <= count; n++) {
@@ -293,6 +339,7 @@ class Task implements InternalTask {
 
   private applyBatch(res: WirePartsResponse & { kind: 'multipart' }): void {
     for (const p of res.parts) this.urls.set(p.n, p.url);
+    this.urlsMintedAt = clock.now();
     for (const l of res.landed) {
       const p = this.parts.get(l.n);
       if (p) p.etag = l.etag;
@@ -314,8 +361,7 @@ class Task implements InternalTask {
         const n = pending.shift()!;
         const part = this.parts.get(n)!;
         try {
-          const etag = await this.putWithRetry(n, part.size, this.file.slice((n - 1) * this.partSize, (n - 1) * this.partSize + part.size));
-          part.etag = etag;
+          await this.putWithRetry(n, part.size, this.file.slice((n - 1) * this.partSize, (n - 1) * this.partSize + part.size));
           this.notify();
         } catch (e) {
           // An abort that is not the cancel is a pause, even if resume() already ran.
@@ -356,6 +402,7 @@ class Task implements InternalTask {
     const res = (await this.routeCall({ phase: 'parts', completionToken: this.token, from }, this.cancelController.signal)) as WirePartsResponse;
     if (res.kind === 'single') {
       this.single = { url: res.url, headers: res.headers };
+      this.urlsMintedAt = clock.now();
       return;
     }
     this.applyBatch(res);
@@ -382,9 +429,14 @@ class Task implements InternalTask {
     this.inflight.set(n, state);
     try {
       let lastStatus = 0;
-      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      let httpAttempts = 0;
+      let netAttempts = 0;
+      let represigns = 0;
+      let waits = 0;
+      for (;;) {
         if (ctrl.signal.aborted) throw abortError();
         const { url, headers } = await this.urlFor(n);
+        const mintedAt = this.urlsMintedAt;
         const release = await acquire(ctrl.signal);
         let status = 0;
         let retryAfter: string | null = null;
@@ -402,38 +454,58 @@ class Task implements InternalTask {
             },
           });
           status = res.status;
-          retryAfter = res.header('retry-after');
-          etag = res.header('etag');
+          // Chrome logs "Refused to get unsafe header" for any header a cross-origin response does
+          // not name in Access-Control-Expose-Headers, once per read, so R2 is asked only for the
+          // ones it answers with: the etag of a stored part, and Retry-After on the two statuses
+          // that carry one. A normal 200 must not print a console error (measured 2026-08-25).
+          if (status >= 200 && status < 300) etag = res.header('etag');
+          else if (status === 429 || status === 503 || sameOrigin(url)) retryAfter = res.header('retry-after');
         } catch (e) {
           if (!(e instanceof NetworkError)) throw e;
           status = 0;
         } finally {
           release();
         }
-        if (status >= 200 && status < 300) return etag ?? '';
+        if (status >= 200 && status < 300) {
+          // Bank the bytes before the finally drops this part from the in-flight map: a notify()
+          // between the two reads a snapshot that counts neither, and the bar dips to zero.
+          if (n === 0) this.sent = size;
+          else this.parts.get(n)!.etag = etag ?? '';
+          return etag ?? '';
+        }
 
         // In-flight bytes were never stored; the bar retreats rather than lying.
         state.loaded = 0;
         this.notify();
+        // Nothing is on the wire any more, so a pause that spared this part has nothing left to
+        // spare: hand it back to the queue rather than retrying through a pause.
+        if (this.paused) throw abortError();
         lastStatus = status;
         const verdict = classify(status);
-        if (verdict === 'fail' || (verdict === 'represign' && this.represigned.has(n))) throw putError(status, verdict === 'represign');
+        if (verdict === 'fail') throw putError(status, false);
         if (verdict === 'represign') {
+          const expired = clock.now() - mintedAt >= PRESIGN_STALE_MS;
+          if ((!expired && this.represigned.has(n)) || represigns >= MAX_ATTEMPTS) throw putError(status, true);
+          represigns++;
           this.represigned.add(n);
           await this.represign(n);
           continue;
         }
-        if (attempt === MAX_ATTEMPTS - 1) break;
+        if (status === 0 ? ++netAttempts >= MAX_NETWORK_ATTEMPTS : ++httpAttempts >= MAX_ATTEMPTS) break;
         state.backingOff = true;
         this.notify();
         try {
-          await clock.sleep(backoffMs(attempt, retryAfter), ctrl.signal);
+          await clock.sleep(backoffMs(waits++, retryAfter), ctrl.signal);
         } finally {
           state.backingOff = false;
           this.notify();
         }
       }
-      throw new BlobError('request_failed', { message: `upload failed after ${MAX_ATTEMPTS} attempts${lastStatus ? ` (last status ${lastStatus})` : ''}`, status: 503 });
+      throw new BlobError('request_failed', {
+        message: `upload failed after ${httpAttempts + netAttempts} attempts${lastStatus ? ` (last status ${lastStatus})` : ''}`,
+        status: 503,
+        hint: this.kind === 'multipart' ? 'the parts that landed are kept: task.retry(), or pick the same file again' : undefined,
+      });
     } finally {
       cancel.removeEventListener('abort', onCancel);
       this.inflight.delete(n);
@@ -477,6 +549,15 @@ class Task implements InternalTask {
       await clock.sleep(backoffMs(attempt, res.headers.get('retry-after')), signal);
     }
     throw last ?? new BlobError('request_failed');
+  }
+}
+
+function sameOrigin(url: string): boolean {
+  if (typeof location === 'undefined') return false;
+  try {
+    return new URL(url, location.href).origin === location.origin;
+  } catch {
+    return false;
   }
 }
 

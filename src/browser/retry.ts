@@ -1,6 +1,10 @@
 import { clock } from './clock.ts';
 
 export const MAX_ATTEMPTS = 8;
+// A dropped link is not a refusal. 8 attempts of jittered backoff give up ~25 s in, which a phone
+// that changed cell or a link that stalled outlives, and an upload that dies there has to re-send
+// every part it had in flight. Only a response the server actually wrote gets the smaller budget.
+export const MAX_NETWORK_ATTEMPTS = 20;
 const BASE_MS = 500;
 const CAP_MS = 15_000;
 

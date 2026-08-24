@@ -74,6 +74,7 @@ function handlers() {
         }
         return jsonResponse({ completionToken: 't', path: 'p', upload: { kind: 'single', url: 'https://r2.test/put', headers: { 'content-type': 'image/png' } } });
       }
+      if (body?.phase === 'parts') return jsonResponse({ kind: 'single', url: 'https://r2.test/put', headers: { 'content-type': 'image/png' } });
       if (body?.phase === 'end') return jsonResponse(END_BODY);
       return jsonResponse({ ok: true });
     },
@@ -339,6 +340,38 @@ test('a single PUT cannot pause, and the controls answer instead of throwing', a
   await flush(2);
   expect(hook.current.task!.status).toBe('canceled');
   expect(hook.current.task!.cancel()).toBe(false);
+});
+
+test('retry() takes a failed record out of error and finishes it', async () => {
+  const seen: string[] = [];
+  const hook = await render(() => useUpload({ route, onError: () => seen.push('error'), onDone: () => seen.push('done') }));
+  await flush();
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const put = await nextXhr();
+  await act(async () => {
+    put.respond(400);
+  });
+  await flush(2);
+  expect(hook.current.task!.status).toBe('error');
+  expect(seen).toEqual(['error']);
+
+  await act(async () => {
+    expect(hook.current.task!.retry()).toBe(true);
+  });
+  await flush(2);
+  expect(hook.current.task!.status).toBe('uploading');
+  const second = await nextXhr(1);
+  await act(async () => {
+    second.respond(200, { etag: '"x"' });
+  });
+  await flush(3);
+  expect(hook.current.task!.status).toBe('done');
+  expect(seen).toEqual(['error', 'done']);
+  // A retry asks for a fresh url rather than beginning a second upload.
+  expect(calls.filter((c) => c.body?.phase === 'begin').length).toBe(1);
+  expect(calls.filter((c) => c.body?.phase === 'parts').length).toBe(1);
 });
 
 test('unmount never cancels: the upload finishes with nothing rendering it', async () => {

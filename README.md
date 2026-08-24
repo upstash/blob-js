@@ -57,7 +57,9 @@ const blob = await task.done;
 blob.url;
 ```
 
-`task` also gives you `pause()`, `resume()`, `cancel()` and `subscribe()` for progress.
+`task` also gives you `pause()`, `resume()`, `cancel()` and `subscribe()` for progress. A failed
+upload is not lost: `task.retry()` runs it again from the parts that already landed, and so does
+picking the same file again after a reload.
 
 ## React
 

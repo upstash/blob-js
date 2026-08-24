@@ -92,6 +92,8 @@ export interface UploadTask {
   pause(): boolean;
   resume(): boolean;
   cancel(): boolean;
+  /** Only from 'error': runs the same upload again from the parts that landed. done is replaced. */
+  retry(): boolean;
 }
 
 /** Phantom types carried by a handleUpload POST handler so useUpload<typeof POST> can infer them. */

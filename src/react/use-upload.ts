@@ -16,6 +16,8 @@ export interface UploadRecordBase {
   pause(): boolean;
   resume(): boolean;
   cancel(): boolean;
+  /** Only from 'error': runs the same upload again from the parts that landed. */
+  retry(): boolean;
   loaded: number;
   total: number;
   percent: number;
@@ -113,11 +115,12 @@ function taskEntry<TData>(task: InternalTask): ListEntry<UploadRecord<TData>> {
   const pause = () => task.pause();
   const resume = () => task.resume();
   const cancel = () => task.cancel();
+  const retry = () => task.retry();
   return {
     id: task.id,
     subscribe: (onChange) => task.subscribe(onChange),
     status: () => task.snapshot().status,
-    record: () => ({ id: task.id, file: task.file, pause, resume, cancel, ...task.snapshot() }) as unknown as UploadRecord<TData>,
+    record: () => ({ id: task.id, file: task.file, pause, resume, cancel, retry, ...task.snapshot() }) as unknown as UploadRecord<TData>,
     start: () => task.start(),
   };
 }
@@ -132,6 +135,7 @@ function refusedEntry<TData>(file: File, error: BlobError): ListEntry<UploadReco
     pause: no,
     resume: no,
     cancel: no,
+    retry: no,
     loaded: 0,
     total: file.size,
     percent: 0,

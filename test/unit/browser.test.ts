@@ -242,7 +242,21 @@ describe('single PUT', () => {
     }
   });
 
-  test('gives up after 8 attempts, with no backoff after the last one', async () => {
+  test('gives up after 8 answered failures, with no backoff after the last one', async () => {
+    onPhase = defaultRoute(3);
+    const task = upload(png(), { route: '/api/upload' });
+    for (let i = 0; i < 8; i++) {
+      await settle();
+      ManualXhr.pending[0]!.respond(503);
+      await wake();
+    }
+    await expect(task.done).rejects.toMatchObject({ code: 'request_failed', status: 503 });
+    // 8 sends, 7 waits between them: the 8th failure is the answer, not another 15s.
+    expect(sleeps.length).toBe(7);
+    expect(Math.max(...sleeps)).toBeLessThanOrEqual(15_000);
+  });
+
+  test('a dropped link is not an answer: 20 network attempts, not 8', async () => {
     onPhase = defaultRoute(3);
     const task = upload(png(), { route: '/api/upload' });
     for (let i = 0; i < 8; i++) {
@@ -250,10 +264,61 @@ describe('single PUT', () => {
       ManualXhr.pending[0]!.fail();
       await wake();
     }
+    // An upload runs for minutes; giving up ~25s into an outage re-sends everything in flight.
+    expect(task.snapshot().status).toBe('uploading');
+    for (let i = 8; i < 20; i++) {
+      await settle();
+      ManualXhr.pending[0]!.fail();
+      await wake();
+    }
     await expect(task.done).rejects.toMatchObject({ code: 'request_failed', status: 503 });
-    // 8 sends, 7 waits between them: the 8th failure is the answer, not another 15s.
-    expect(sleeps.length).toBe(7);
-    expect(Math.max(...sleeps)).toBeLessThanOrEqual(15_000);
+    expect(sleeps.length).toBe(19);
+  });
+
+  test('a cross-origin 200 asks only for the etag, and retry-after only where one is carried', async () => {
+    onPhase = defaultRoute(3);
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    const throttled = ManualXhr.pending[0]!;
+    throttled.respond(429, { 'retry-after': '2' });
+    await wake();
+    expect(throttled.asked).toEqual(['retry-after']);
+    expect(sleeps).toEqual([2000]);
+    const server = ManualXhr.pending[0]!;
+    server.respond(500);
+    await tick();
+    // R2 sends no Retry-After on a 500, and Chrome logs "Refused to get unsafe header" for a read
+    // of a header the CORS response never exposed.
+    expect(server.asked).toEqual([]);
+    await wake();
+    const ok = ManualXhr.pending[0]!;
+    ok.respond(200, { etag: '"x"' });
+    await task.done;
+    expect(ok.asked).toEqual(['etag']);
+  });
+
+  test('a 403 on a presign that outlived its credential re-presigns again instead of failing', async () => {
+    onPhase = defaultRoute(3);
+    const realNow = clock.now;
+    let t = 1_000_000;
+    clock.now = () => t;
+    try {
+      const task = upload(png(), { route: '/api/upload' });
+      await settle();
+      ManualXhr.pending[0]!.respond(403);
+      await settle();
+      expect(calls.filter((c) => c.phase === 'parts').length).toBe(1);
+      // A slow link can outrun the ~524s presign more than once; only a url minted moments ago and
+      // refused again is a real signature mismatch.
+      t += 600_000;
+      ManualXhr.pending[0]!.respond(403);
+      await settle();
+      expect(calls.filter((c) => c.phase === 'parts').length).toBe(2);
+      ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+      await task.done;
+    } finally {
+      clock.now = realNow;
+    }
   });
 
   test('route errors become BlobError; begin is never retried, end is retried on 5xx', async () => {
@@ -407,31 +472,128 @@ describe('multipart', () => {
     expect(task.snapshot().percent).toBe(100);
   });
 
-  test('pause aborts in flight and retreats loaded; resume continues; cancel aborts server-side', async () => {
+  test('pause keeps the parts already sending, drops the idle ones, and never retreats loaded', async () => {
     onPhase = defaultRoute(SIZE);
     const task = upload(big(SIZE), { route: '/api/upload/large' });
     await settle();
-    ManualXhr.pending[0]!.respond(200, { etag: '"e1"' });
-    await settle();
-    ManualXhr.pending[0]!.progress(MIB);
+    const loads: number[] = [];
+    task.subscribe(() => loads.push(task.snapshot().loaded));
+    const [a, b, idle1, idle2] = [...ManualXhr.pending];
+    a!.progress(MIB);
+    b!.progress(2 * MIB);
     await tick();
-    expect(task.snapshot().loaded).toBe(5 * MIB + MIB);
-    const inflight = [...ManualXhr.pending];
+    expect(task.snapshot().loaded).toBe(3 * MIB);
+
     expect(task.pause()).toBe(true);
-    expect(inflight.every((x) => x.aborted)).toBe(true);
+    // Bytes on the wire are paid for either way, so only the two that sent nothing are dropped.
+    expect([a!.aborted, b!.aborted, idle1!.aborted, idle2!.aborted]).toEqual([false, false, true, true]);
     await tick();
-    expect(task.snapshot()).toMatchObject({ status: 'paused', loaded: 5 * MIB });
+    expect(task.snapshot()).toMatchObject({ status: 'paused', loaded: 3 * MIB });
+    a!.respond(200, { etag: '"e1"' });
+    b!.respond(200, { etag: '"e2"' });
+    await settle();
+    expect(task.snapshot()).toMatchObject({ status: 'paused', loaded: 10 * MIB });
+    // Nothing new starts while paused.
+    expect(ManualXhr.pending.length).toBe(0);
+
     expect(task.resume()).toBe(true);
     expect(task.resume()).toBe(false);
     await settle();
     expect(task.snapshot().status).toBe('uploading');
-    expect(ManualXhr.pending.map((x) => new URL(x.url).pathname).sort()).toEqual(['/part/2', '/part/3', '/part/4', '/part/5']);
+    // The two that landed are never re-sent; the two that were dropped come back.
+    expect(ManualXhr.pending.map((x) => new URL(x.url).pathname).sort()).toEqual(['/part/3', '/part/4', '/part/5', '/part/6']);
+    const paths = ManualXhr.sentUrls.map((u) => new URL(u).pathname);
+    expect(paths.filter((p) => p === '/part/1')).toEqual(['/part/1']);
+    expect(paths.filter((p) => p === '/part/2')).toEqual(['/part/2']);
+    for (let i = 1; i < loads.length; i++) expect(loads[i]!).toBeGreaterThanOrEqual(loads[i - 1]!);
+
     expect(task.cancel()).toBe(true);
     await expect(task.done).rejects.toMatchObject({ name: 'AbortError' });
     await settle();
     expect(calls.at(-1)!.body).toEqual({ phase: 'cancel', completionToken: 'tok' });
     expect(memory.size).toBe(0);
     expect(task.resume()).toBe(false);
+  });
+
+  test('a part that fails while paused is handed back to the queue instead of retrying', async () => {
+    onPhase = defaultRoute(SIZE);
+    const task = upload(big(SIZE), { route: '/api/upload/large' });
+    await settle();
+    const sending = ManualXhr.pending[0]!;
+    sending.progress(MIB);
+    await tick();
+    expect(task.pause()).toBe(true);
+    sending.respond(503);
+    await settle();
+    // Nothing is on the wire any more, so the part waits for resume rather than backing off.
+    expect(task.snapshot()).toMatchObject({ status: 'paused', stalled: false, loaded: 0 });
+    expect(sleeps).toEqual([]);
+    expect(ManualXhr.pending.length).toBe(0);
+    expect(task.resume()).toBe(true);
+    await settle();
+    expect(ManualXhr.pending.length).toBe(4);
+    task.cancel();
+    await settle();
+  });
+
+  test('retry() runs a failed upload again from the parts that landed', async () => {
+    const landed: { n: number; etag: string }[] = [];
+    onPhase = defaultRoute(SIZE, landed);
+    const task = upload(big(SIZE), { route: '/api/upload/large' });
+    await settle();
+    ManualXhr.pending[0]!.respond(200, { etag: '"e1"' });
+    await settle();
+    landed.push({ n: 1, etag: '"e1"' });
+    ManualXhr.pending[0]!.respond(400);
+    await settle();
+    expect(task.snapshot().status).toBe('error');
+    const failed = await task.done.catch((e) => e);
+    expect(failed.code).toBe('request_failed');
+    // The multipart still exists server-side: the token is not spent and the record is kept.
+    expect(calls.some((c) => c.phase === 'cancel')).toBe(false);
+    expect(memory.size).toBe(1);
+
+    expect(task.retry()).toBe(true);
+    expect(task.retry()).toBe(false);
+    await settle();
+    expect(task.snapshot().status).toBe('uploading');
+    expect(calls.filter((c) => c.phase === 'begin').length).toBe(1);
+    expect(calls.filter((c) => c.phase === 'parts').map((c) => c.body.from)).toEqual([2]);
+    let done = 0;
+    while (done < 20) {
+      const x = ManualXhr.pending[0];
+      if (!x) {
+        await settle();
+        continue;
+      }
+      x.respond(200, { etag: `"e${new URL(x.url).pathname.split('/').pop()}"` });
+      done++;
+      await settle();
+    }
+    const blob = await task.done;
+    expect((blob.data as { parts: { n: number }[] }).parts.length).toBe(21);
+    const paths = ManualXhr.sentUrls.map((u) => new URL(u).pathname);
+    expect(paths.filter((p) => p === '/part/1')).toEqual(['/part/1']);
+    expect(task.snapshot().status).toBe('done');
+    expect(memory.size).toBe(0);
+  });
+
+  test('a terminal error leaves the pending record, so picking the same file again resumes', async () => {
+    const file = big(SIZE);
+    onPhase = defaultRoute(SIZE, [{ n: 1, etag: '"e1"' }]);
+    const task = upload(file, { route: '/api/upload/large' });
+    await settle();
+    ManualXhr.pending[0]!.respond(400);
+    await settle();
+    expect(task.snapshot().status).toBe('error');
+    calls = [];
+    ManualXhr.reset();
+    const again = upload(file, { route: '/api/upload/large' });
+    await settle();
+    expect(calls.map((c) => c.phase)).toEqual(['parts']);
+    expect(again.snapshot().loaded).toBe(5 * MIB);
+    again.cancel();
+    await settle();
   });
 
   test('resumes by fingerprint: no begin, landed parts skipped, server list trusted', async () => {
