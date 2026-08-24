@@ -13,7 +13,7 @@ describe('public surface', () => {
     const _opts: PutOptions = { signal: new AbortController().signal };
     // @ts-expect-error headers is a function, re-read per call
     const _upload: UploadOptions = { route: '/x', headers: { authorization: 'x' } };
-    const bucket = new Bucket({ token: encodeToken('bucket', 'pw') });
+    const bucket = new Bucket({ token: encodeToken('bucket', 'pw', 'bdeadbeef012') });
     // @ts-expect-error the bucket id is not public
     void bucket.id;
     expect(Object.keys(bucket)).not.toContain('id');

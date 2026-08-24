@@ -4,7 +4,7 @@ import type { CacheOption } from '../shared/units.ts';
 import { CredentialCache, type TempCredentials } from './credentials.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, tag } from './keys.ts';
 import { presign, signHeaders } from './sigv4.ts';
-import { publicHostname } from './token.ts';
+import { DOMAIN_SUFFIX } from './token.ts';
 
 export interface R2RequestInit {
   method: string;
@@ -25,30 +25,32 @@ export interface ObjectHead {
 
 export class R2 {
   private readonly creds: CredentialCache;
-  private hostname: Promise<string> | undefined;
+  private readonly hostname: string;
 
   constructor(
     readonly bucketId: string,
     token: string,
+    /** The bucket's public DNS label, carried in the token. */
+    hashForDomain: string,
     /** The bucket password: the HMAC key for completion tokens. Never leaves the server. */
     readonly signingSecret: string,
     readonly defaultCache: CacheOption | undefined,
     enableTelemetry = true,
   ) {
     this.creds = new CredentialCache(token, enableTelemetry);
+    this.hostname = `${hashForDomain}.${DOMAIN_SUFFIX}`;
   }
 
   credentials(): Promise<TempCredentials> {
     return this.creds.get();
   }
 
-  async publicUrl(path: string): Promise<string> {
-    this.hostname ??= publicHostname(this.bucketId);
-    return `https://${await this.hostname}/${encodeKey(path)}`;
+  publicUrl(path: string): string {
+    return `https://${this.hostname}/${encodeKey(path)}`;
   }
 
-  async blobObject(path: string, size: number, etag: string, uploadedAt: Date): Promise<BlobObject> {
-    const url = await this.publicUrl(path);
+  blobObject(path: string, size: number, etag: string, uploadedAt: Date): BlobObject {
+    const url = this.publicUrl(path);
     return { path, url, versionedUrl: `${url}?v=${encodeURIComponent(etag)}`, size, etag, uploadedAt };
   }
 

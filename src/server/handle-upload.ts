@@ -202,7 +202,7 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
       checkContentType(head.contentType, bytes, t.allowed);
     }
 
-    const blob = await r2.blobObject(t.path, head.size, head.etag, head.uploadedAt);
+    const blob = r2.blobObject(t.path, head.size, head.etag, head.uploadedAt);
     let data: TData = undefined as TData;
     if (options.onUploadCompleted) {
       data = await options.onUploadCompleted({ request, uploadId: t.id, ...blob, contentType: head.contentType, metadata: head.metadata, context: t.ctx as TContext });

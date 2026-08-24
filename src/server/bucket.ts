@@ -87,7 +87,7 @@ export class Bucket {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
     this.defaultCache = options.cache;
-    this.r2 = new R2(decoded.bucketId, options.token, decoded.password, options.cache, options.enableTelemetry ?? true);
+    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true);
     INTERNALS.set(this, this.r2);
   }
 
@@ -166,14 +166,14 @@ export class Bucket {
     const res = await this.r2.fetch({ method: 'GET', path });
     if (!res.ok) throw await errorFromResponse(res);
     const head = headFromHeaders(res.headers);
-    const blob = await this.r2.blobObject(path, head.size, head.etag, head.uploadedAt);
+    const blob = this.r2.blobObject(path, head.size, head.etag, head.uploadedAt);
     return { ...blob, contentType: head.contentType, metadata: head.metadata, body: res.body ?? new Blob([]).stream() };
   }
 
   async info(path: string): Promise<BlobInfo> {
     const head = await this.r2.head(path);
     if (!head) throw new BlobError('not_found', { message: `${path} not found` });
-    const blob = await this.r2.blobObject(path, head.size, head.etag, head.uploadedAt);
+    const blob = this.r2.blobObject(path, head.size, head.etag, head.uploadedAt);
     return { ...blob, contentType: head.contentType, metadata: head.metadata };
   }
 
@@ -194,7 +194,7 @@ export class Bucket {
       const key = tag(b, 'Key');
       if (key === undefined) continue;
       const etag = decodeEntities(tag(b, 'ETag') ?? '');
-      blobs.push(await this.r2.blobObject(decodeEntities(key), Number(tag(b, 'Size') ?? 0), etag, new Date(tag(b, 'LastModified') ?? 0)));
+      blobs.push(this.r2.blobObject(decodeEntities(key), Number(tag(b, 'Size') ?? 0), etag, new Date(tag(b, 'LastModified') ?? 0)));
     }
     const next = tag(xml, 'NextContinuationToken');
     return { blobs, cursor: tag(xml, 'IsTruncated') === 'true' && next ? decodeEntities(next) : undefined };
