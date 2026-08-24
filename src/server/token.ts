@@ -43,8 +43,7 @@ export function encodeToken(bucketId: string, password: string, hashForDomain: s
   return toBase64Url(out);
 }
 
-// Trailing bytes mean tamper, so the length check is exact. A v1 token (no DNS label) is rejected
-// by the version byte: re-read the bucket in the console to get a v2 token for the same password.
+// Trailing bytes mean tamper, so the length check is exact.
 export function decodeToken(token: string): DecodedToken {
   let raw: Uint8Array;
   try {

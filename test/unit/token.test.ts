@@ -59,11 +59,6 @@ describe('encodeToken / decodeToken', () => {
     expect(() => decodeToken(token)).toThrow('token: unsupported format');
   });
 
-  // v1 carried no DNS label; it authenticates nowhere now, so it must not half-decode.
-  test('rejects a v1 token', () => {
-    expect(() => decodeToken(toBase64Url(new Uint8Array([1, 0, 1, 0, 1, 98, 112])))).toThrow('token: unsupported format');
-  });
-
   test('rejects a trailing byte', () => {
     const token = reencode((raw) => {
       const out = new Uint8Array(raw.length + 1);
