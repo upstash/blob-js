@@ -1,0 +1,499 @@
+import { BlobError } from '../shared/errors.ts';
+import type { BlobObject, UploadSnapshot, UploadTask, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
+import { abortError, clock } from './clock.ts';
+import { acquire } from './pool.ts';
+import { backoffMs, classify, MAX_ATTEMPTS } from './retry.ts';
+import { clearPending, fingerprint, readPending, writePending } from './store.ts';
+import { NetworkError, sendXhr } from './xhr.ts';
+
+export type HeadersProvider = () => Record<string, string> | Promise<Record<string, string>>;
+
+export interface UploadOptions<TInput = unknown> {
+  route: string;
+  /** A function is re-read per call to the route, so a rotated JWT still ends the upload. */
+  headers?: HeadersProvider;
+  input?: TInput;
+}
+
+export interface InternalTask extends UploadTask {
+  /** Runs the upload; a no-op after the first call. */
+  start(): void;
+}
+
+const PARTS_IN_FLIGHT = 4;
+const ROUTE_ATTEMPTS = 3;
+
+type Status = UploadSnapshot['status'];
+
+interface PartState {
+  n: number;
+  size: number;
+  etag?: string;
+}
+
+interface InFlight {
+  loaded: number;
+  backingOff: boolean;
+  controller: AbortController;
+}
+
+let counter = 0;
+
+export function createTask(file: File, options: UploadOptions, autoStart: boolean): InternalTask {
+  const task = new Task(file, options);
+  if (autoStart) task.start();
+  return task;
+}
+
+function isAbort(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && (e as { name?: string }).name === 'AbortError';
+}
+
+class Task implements InternalTask {
+  readonly id = `u${++counter}-${clock.now().toString(36)}`;
+  readonly done: Promise<BlobObject & { data: unknown }>;
+
+  private status: Status = 'queued';
+  private error: BlobError | undefined;
+  private blob: (BlobObject & { data: unknown }) | undefined;
+  private kind: 'single' | 'multipart' | undefined;
+  private token: string | undefined;
+  private storeKey: string;
+  private partSize = 0;
+  /** Bytes R2 has accepted on the single-PUT path; a part carries its own etag instead. */
+  private sent = 0;
+  private parts = new Map<number, PartState>();
+  private urls = new Map<number, string>();
+  private single: { url: string; headers: Record<string, string> } | undefined;
+  private batch: Promise<void> | undefined;
+  private inflight = new Map<number, InFlight>();
+  private represigned = new Set<number>();
+  private paused = false;
+  private resumeWaiters: (() => void)[] = [];
+  private readonly cancelController = new AbortController();
+  private started = false;
+  private listeners = new Set<() => void>();
+  private cached: UploadSnapshot | undefined;
+  private frameQueued = false;
+  private resolveDone!: (b: BlobObject & { data: unknown }) => void;
+  private rejectDone!: (e: unknown) => void;
+
+  constructor(
+    readonly file: File,
+    private readonly options: UploadOptions,
+  ) {
+    this.storeKey = fingerprint(options.route, file);
+    this.done = new Promise((resolve, reject) => {
+      this.resolveDone = resolve;
+      this.rejectDone = reject;
+    });
+    // Nobody is required to await done; a rejection must not surface as unhandled.
+    this.done.catch(() => {});
+  }
+
+  /* ------------------------------------------------------------ observe */
+
+  snapshot(): UploadSnapshot {
+    if (this.cached) return this.cached;
+    const total = this.file.size;
+    let loaded = this.sent;
+    for (const p of this.parts.values()) if (p.etag) loaded += p.size;
+    for (const f of this.inflight.values()) loaded += f.loaded;
+    if (this.status === 'done') loaded = total;
+    const base = {
+      loaded,
+      total,
+      percent: this.status === 'done' ? 100 : total > 0 ? Math.min(99, Math.floor((loaded / total) * 100)) : 0,
+      canPause: this.kind === 'multipart',
+      stalled: this.inflight.size > 0 && [...this.inflight.values()].every((f) => f.backingOff),
+    };
+    switch (this.status) {
+      case 'done':
+        this.cached = { ...base, status: 'done', blob: this.blob! };
+        break;
+      case 'error':
+        this.cached = { ...base, status: 'error', error: this.error! };
+        break;
+      case 'canceled':
+        this.cached = { ...base, status: 'canceled' };
+        break;
+      default:
+        this.cached = { ...base, status: this.status };
+    }
+    return this.cached;
+  }
+
+  subscribe(onChange: () => void): () => void {
+    this.listeners.add(onChange);
+    return () => {
+      this.listeners.delete(onChange);
+    };
+  }
+
+  private notify(): void {
+    this.cached = undefined;
+    if (this.frameQueued) return;
+    this.frameQueued = true;
+    clock.frame(() => {
+      this.frameQueued = false;
+      for (const l of [...this.listeners]) l();
+    });
+  }
+
+  /* ----------------------------------------------------------- controls */
+
+  pause(): boolean {
+    if (this.kind !== 'multipart' || this.status !== 'uploading' || this.paused) return false;
+    this.paused = true;
+    this.status = 'paused';
+    for (const f of this.inflight.values()) f.controller.abort();
+    this.notify();
+    return true;
+  }
+
+  resume(): boolean {
+    if (this.status !== 'paused') return false;
+    this.paused = false;
+    this.status = 'uploading';
+    const waiters = this.resumeWaiters;
+    this.resumeWaiters = [];
+    for (const w of waiters) w();
+    this.notify();
+    return true;
+  }
+
+  cancel(): boolean {
+    if (this.status === 'done' || this.status === 'error' || this.status === 'canceled') return false;
+    this.status = 'canceled';
+    this.paused = false;
+    this.cancelController.abort();
+    for (const f of this.inflight.values()) f.controller.abort();
+    const waiters = this.resumeWaiters;
+    this.resumeWaiters = [];
+    for (const w of waiters) w();
+    this.abortServerSide();
+    this.inflight.clear();
+    this.notify();
+    this.rejectDone(abortError());
+    return true;
+  }
+
+  // A multipart upload the server already created is billed storage list() cannot see, so the
+  // token must be spent on a cancel even when it arrives after the user asked for one.
+  private abortServerSide(): void {
+    clearPending(this.storeKey);
+    const token = this.token;
+    if (!token) return;
+    this.token = undefined;
+    this.routeCall({ phase: 'cancel', completionToken: token }, undefined, 1).catch(() => {});
+  }
+
+  /* ---------------------------------------------------------------- run */
+
+  start(): void {
+    if (this.started) return;
+    this.started = true;
+    this.run().then(
+      (blob) => {
+        if (this.status === 'canceled') return;
+        this.blob = blob;
+        this.status = 'done';
+        clearPending(this.storeKey);
+        this.notify();
+        this.resolveDone(blob);
+      },
+      (e) => {
+        if (this.status === 'canceled' || isAbort(e)) return;
+        this.error = BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), status: 503, cause: e });
+        this.status = 'error';
+        this.inflight.clear();
+        this.notify();
+        this.rejectDone(this.error);
+      },
+    );
+  }
+
+  private async run(): Promise<BlobObject & { data: unknown }> {
+    const signal = this.cancelController.signal;
+    if (!(await this.tryResume())) await this.begin();
+    // A cancel that lands while begin is in flight still gets its token here.
+    if (signal.aborted) {
+      this.abortServerSide();
+      throw abortError();
+    }
+    this.status = 'uploading';
+    this.notify();
+
+    let landed: WireLanded[] | undefined;
+    if (this.kind === 'single') {
+      await this.putWithRetry(0, this.file.size, this.file);
+      this.sent = this.file.size;
+      this.notify();
+    } else {
+      await this.runMultipart();
+      landed = [...this.parts.values()].map((p) => ({ n: p.n, etag: p.etag! }));
+    }
+    if (signal.aborted) throw abortError();
+
+    const end = (await this.routeCall({ phase: 'end', completionToken: this.token, parts: landed }, signal)) as WireEndResponse;
+    return { ...end.blob, uploadedAt: new Date(end.blob.uploadedAt), data: end.data };
+  }
+
+  private async begin(): Promise<void> {
+    const res = (await this.routeCall(
+      {
+        phase: 'begin',
+        file: { name: this.file.name, type: this.file.type, size: this.file.size },
+        ...(this.options.input === undefined ? {} : { input: this.options.input }),
+      },
+      this.cancelController.signal,
+      // Never retried: begin runs onBeforeUpload, which inserts the app's row.
+      1,
+    )) as WireBeginResponse;
+    this.token = res.completionToken;
+    if (res.upload.kind === 'single') {
+      this.kind = 'single';
+      this.single = { url: res.upload.url, headers: res.upload.headers };
+      return;
+    }
+    this.kind = 'multipart';
+    this.partSize = res.upload.partSize;
+    this.layoutParts();
+    for (const p of res.upload.parts) this.urls.set(p.n, p.url);
+    writePending(this.storeKey, { completionToken: this.token });
+  }
+
+  // The user picking the file again is the resume gesture: a fingerprint match asks the server,
+  // which asks R2 what landed. Anything else is a fresh upload, never an error.
+  private async tryResume(): Promise<boolean> {
+    const rec = readPending(this.storeKey);
+    if (!rec) return false;
+    try {
+      const res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal, 1)) as WirePartsResponse;
+      if (res.kind !== 'multipart' || res.size !== this.file.size) throw new Error('not resumable');
+      this.token = rec.completionToken;
+      this.kind = 'multipart';
+      this.partSize = res.partSize;
+      this.layoutParts();
+      this.applyBatch(res);
+      return true;
+    } catch (e) {
+      if (isAbort(e)) throw e;
+      clearPending(this.storeKey);
+      return false;
+    }
+  }
+
+  private layoutParts(): void {
+    const count = Math.max(1, Math.ceil(this.file.size / this.partSize));
+    for (let n = 1; n <= count; n++) {
+      this.parts.set(n, { n, size: n === count ? this.file.size - this.partSize * (count - 1) : this.partSize });
+    }
+  }
+
+  private applyBatch(res: WirePartsResponse & { kind: 'multipart' }): void {
+    for (const p of res.parts) this.urls.set(p.n, p.url);
+    for (const l of res.landed) {
+      const p = this.parts.get(l.n);
+      if (p) p.etag = l.etag;
+    }
+  }
+
+  /* ---------------------------------------------------------- multipart */
+
+  private async runMultipart(): Promise<void> {
+    const pending = [...this.parts.values()].filter((p) => !p.etag).map((p) => p.n);
+    let failure: unknown;
+    const worker = async () => {
+      while (pending.length && failure === undefined) {
+        if (this.cancelController.signal.aborted) return;
+        if (this.paused) {
+          await this.waitResume();
+          continue;
+        }
+        const n = pending.shift()!;
+        const part = this.parts.get(n)!;
+        try {
+          const etag = await this.putWithRetry(n, part.size, this.file.slice((n - 1) * this.partSize, (n - 1) * this.partSize + part.size));
+          part.etag = etag;
+          this.notify();
+        } catch (e) {
+          // An abort that is not the cancel is a pause, even if resume() already ran.
+          if (isAbort(e) && !this.cancelController.signal.aborted) {
+            pending.unshift(n);
+            continue;
+          }
+          failure ??= e;
+          for (const f of this.inflight.values()) f.controller.abort();
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: PARTS_IN_FLIGHT }, worker));
+    if (failure !== undefined) throw failure;
+    if (this.cancelController.signal.aborted) throw abortError();
+    const missing = [...this.parts.values()].filter((p) => !p.etag);
+    if (missing.length) throw new BlobError('request_failed', { message: `${missing.length} parts did not land`, status: 503 });
+  }
+
+  private waitResume(): Promise<void> {
+    return new Promise((resolve) => this.resumeWaiters.push(resolve));
+  }
+
+  private async urlFor(n: number): Promise<{ url: string; headers: Record<string, string> }> {
+    if (n === 0) return this.single!;
+    const cached = this.urls.get(n);
+    if (cached) return { url: cached, headers: {} };
+    this.batch ??= this.fetchBatch(n).finally(() => {
+      this.batch = undefined;
+    });
+    await this.batch;
+    const url = this.urls.get(n);
+    if (!url) return this.urlFor(n);
+    return { url, headers: {} };
+  }
+
+  private async fetchBatch(from: number): Promise<void> {
+    const res = (await this.routeCall({ phase: 'parts', completionToken: this.token, from }, this.cancelController.signal)) as WirePartsResponse;
+    if (res.kind === 'single') {
+      this.single = { url: res.url, headers: res.headers };
+      return;
+    }
+    this.applyBatch(res);
+  }
+
+  private async represign(n: number): Promise<void> {
+    if (n === 0) {
+      await this.fetchBatch(1);
+      return;
+    }
+    // Every url from the same batch expires together, so drop them all.
+    this.urls.clear();
+    await this.fetchBatch(n);
+  }
+
+  /* ------------------------------------------------------------ one PUT */
+
+  private async putWithRetry(n: number, size: number, body: Blob): Promise<string> {
+    const ctrl = new AbortController();
+    const cancel = this.cancelController.signal;
+    const onCancel = () => ctrl.abort();
+    cancel.addEventListener('abort', onCancel, { once: true });
+    const state: InFlight = { loaded: 0, backingOff: false, controller: ctrl };
+    this.inflight.set(n, state);
+    try {
+      let lastStatus = 0;
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        if (ctrl.signal.aborted) throw abortError();
+        const { url, headers } = await this.urlFor(n);
+        const release = await acquire(ctrl.signal);
+        let status = 0;
+        let retryAfter: string | null = null;
+        let etag: string | null = null;
+        try {
+          const res = await sendXhr({
+            method: 'PUT',
+            url,
+            headers,
+            body,
+            signal: ctrl.signal,
+            onUploadProgress: (loaded) => {
+              state.loaded = Math.min(loaded, size);
+              this.notify();
+            },
+          });
+          status = res.status;
+          retryAfter = res.header('retry-after');
+          etag = res.header('etag');
+        } catch (e) {
+          if (!(e instanceof NetworkError)) throw e;
+          status = 0;
+        } finally {
+          release();
+        }
+        if (status >= 200 && status < 300) return etag ?? '';
+
+        // In-flight bytes were never stored; the bar retreats rather than lying.
+        state.loaded = 0;
+        this.notify();
+        lastStatus = status;
+        const verdict = classify(status);
+        if (verdict === 'fail' || (verdict === 'represign' && this.represigned.has(n))) throw putError(status, verdict === 'represign');
+        if (verdict === 'represign') {
+          this.represigned.add(n);
+          await this.represign(n);
+          continue;
+        }
+        if (attempt === MAX_ATTEMPTS - 1) break;
+        state.backingOff = true;
+        this.notify();
+        try {
+          await clock.sleep(backoffMs(attempt, retryAfter), ctrl.signal);
+        } finally {
+          state.backingOff = false;
+          this.notify();
+        }
+      }
+      throw new BlobError('request_failed', { message: `upload failed after ${MAX_ATTEMPTS} attempts${lastStatus ? ` (last status ${lastStatus})` : ''}`, status: 503 });
+    } finally {
+      cancel.removeEventListener('abort', onCancel);
+      this.inflight.delete(n);
+      this.notify();
+    }
+  }
+
+  /* -------------------------------------------------------------- route */
+
+  private async routeCall(body: Record<string, unknown>, signal: AbortSignal | undefined, attempts = ROUTE_ATTEMPTS): Promise<unknown> {
+    let last: BlobError | undefined;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (signal?.aborted) throw abortError();
+      let res: Response;
+      try {
+        res = await fetch(this.options.route, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(await resolveHeaders(this.options.headers)) },
+          body: JSON.stringify(body),
+          signal,
+        });
+      } catch (e) {
+        if (isAbort(e) || signal?.aborted) throw abortError();
+        last = new BlobError('request_failed', { message: 'could not reach the upload route', status: 503, cause: e });
+        if (attempt === attempts - 1) break;
+        await clock.sleep(backoffMs(attempt), signal);
+        continue;
+      }
+      const text = await res.text();
+      let json: unknown;
+      try {
+        json = text ? JSON.parse(text) : undefined;
+      } catch {
+        json = undefined;
+      }
+      if (res.ok) return json;
+      const err = BlobError.fromJSON(json, res.status) ?? new BlobError('request_failed', { message: routeMessage(json, res), status: res.status });
+      if (classify(res.status) !== 'retry') throw err;
+      last = err;
+      if (attempt === attempts - 1) break;
+      await clock.sleep(backoffMs(attempt, res.headers.get('retry-after')), signal);
+    }
+    throw last ?? new BlobError('request_failed');
+  }
+}
+
+function putError(status: number, afterRepresign: boolean): BlobError {
+  if (afterRepresign) return new BlobError('signature_mismatch');
+  if (status === 413) return new BlobError('too_large', { message: 'storage refused the body as too large' });
+  return new BlobError('request_failed', { message: `storage responded ${status}`, status: status || 503 });
+}
+
+export function routeMessage(json: unknown, res: { status: number; statusText: string }): string {
+  const err = (json as { error?: unknown } | undefined)?.error;
+  if (typeof err === 'string' && err) return err;
+  if (typeof (json as { message?: unknown } | undefined)?.message === 'string') return (json as { message: string }).message;
+  return res.statusText || `request failed with ${res.status}`;
+}
+
+export async function resolveHeaders(h: HeadersProvider | undefined): Promise<Record<string, string>> {
+  if (!h) return {};
+  return await h();
+}

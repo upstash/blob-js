@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+  schedule:
+    - cron: "0 0 * * *" # daily
+
+# A new push to a PR makes the in-flight run pointless; main and tags run to completion.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yaml
+    secrets: inherit
+
+  # Gates the publish on the same suite a PR runs: a tag can point at any commit,
+  # including one that never passed CI.
+  release:
+    if: github.event_name == 'release'
+    needs: tests
+    uses: ./.github/workflows/release.yml
+    with:
+      prerelease: ${{ github.event.release.prerelease }}
+    secrets: inherit

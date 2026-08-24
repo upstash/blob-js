@@ -1,0 +1,115 @@
+name: Tests
+
+on:
+  workflow_call:
+
+jobs:
+  static:
+    name: Typecheck, lint, build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup repo
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Build
+        run: bun run build
+
+      - name: Check published types and package
+        run: bun run check:pack
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup repo
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run unit tests
+        run: bun run test:unit
+
+  live:
+    name: Live tests
+    # Live tests hit a real bucket, so they'd fail on forks where secrets are unavailable.
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      UPSTASH_BLOB_PUBLIC_TOKEN: ${{ secrets.UPSTASH_BLOB_PUBLIC_TOKEN }}
+      UPSTASH_BLOB_PRIVATE_TOKEN: ${{ secrets.UPSTASH_BLOB_PRIVATE_TOKEN }}
+    steps:
+      - name: Setup repo
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run live tests
+        run: bun run test:live
+
+  node:
+    name: Node ${{ matrix.node }} import
+    needs: static
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 20, 22, 24]
+    steps:
+      - name: Setup repo
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build
+        run: bun run build
+
+      # Catches a dist that only loads under a bundler: bad extensions, a stray
+      # `.ts` import, or ESM/CJS interop that breaks on plain node. Every published
+      # entrypoint, so a react-only or browser-only break can't hide behind the root.
+      - name: Import ESM build
+        run: |
+          node -e "import('@upstash/blob').then(m => { if (!m.Bucket) throw new Error('no Bucket'); })"
+          node -e "import('@upstash/blob/browser').then(m => { if (!m.upload) throw new Error('no upload'); })"
+          node -e "import('@upstash/blob/react').then(m => { if (!m.useUpload) throw new Error('no useUpload'); })"
+
+      - name: Require CJS build
+        run: |
+          node -e "if (!require('@upstash/blob').Bucket) throw new Error('no Bucket');"
+          node -e "if (!require('@upstash/blob/browser').upload) throw new Error('no upload');"
+          node -e "if (!require('@upstash/blob/react').useUpload) throw new Error('no useUpload');"

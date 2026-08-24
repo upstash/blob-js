@@ -1,0 +1,31 @@
+name: Bug report
+description: Something in @upstash/blob is not working
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Smallest snippet that shows the problem.
+      render: typescript
+  - type: input
+    id: version
+    attributes:
+      label: SDK version
+      placeholder: "@upstash/blob@0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime
+      placeholder: "node 22 / bun 1.2 / Cloudflare Workers / browser"
+    validations:
+      required: true
