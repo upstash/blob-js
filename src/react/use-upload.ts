@@ -255,13 +255,15 @@ function deferredEntry(file: File | null, make: () => Promise<ListEntry<AnyRecor
     // The list keys on the id it was handed, so the inner task's own id must not replace it.
     record: () => (inner ? { ...inner.record(), id } : waiting()),
     start: () => {
-      void make().then((entry) => {
-        if (canceled) return;
-        inner = entry;
-        detach = entry.subscribe(notify);
-        notify();
-        entry.start();
-      });
+      void make()
+        .catch((e: unknown) => refusedEntry(file, BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), status: 400, cause: e })))
+        .then((entry) => {
+          if (canceled) return;
+          inner = entry;
+          detach = entry.subscribe(notify);
+          notify();
+          entry.start();
+        });
     },
   };
 }
@@ -272,21 +274,22 @@ interface ProxyPayload {
   total: number;
 }
 
-// fetch's body rule, not an encoding option: a File is a raw body, a FormData is multipart.
+// fetch's body rule, not an encoding option: `start({ body })` goes as it stands, even when the body
+// is a File; `start({ file })` goes as multipart under `field`.
 function proxyPayload(file: File | null, body: File | Blob | FormData | null | undefined, input: unknown, field: string): ProxyPayload | null {
-  if (file) {
-    const form = new FormData();
-    form.append(field, file);
-    // A form field cannot carry an object, so input crosses as JSON beside the file.
-    if (input !== undefined) form.append('input', JSON.stringify(input));
-    return { body: form, file, total: file.size };
+  if (body) {
+    if (body instanceof FormData) {
+      if (input !== undefined) body.append('input', JSON.stringify(input));
+      return { body, file: null, total: 0 };
+    }
+    return { body, file, total: body.size };
   }
-  if (!body) return null;
-  if (body instanceof FormData) {
-    if (input !== undefined) body.append('input', JSON.stringify(input));
-    return { body, file: null, total: 0 };
-  }
-  return { body, file: body instanceof File ? body : null, total: body.size };
+  if (!file) return null;
+  const form = new FormData();
+  form.append(field, file);
+  // A form field cannot carry an object, so input crosses as JSON beside the file.
+  if (input !== undefined) form.append('input', JSON.stringify(input));
+  return { body: form, file, total: file.size };
 }
 
 /**
@@ -310,8 +313,6 @@ export function useUpload(routeOrOptions: any, maybeOptions?: any): any {
   handlers.current = options;
 
   const { limitsRef, transportRef, accept, load } = useLimits(url, options.headers);
-  const loadRef = useRef(load);
-  loadRef.current = load;
 
   const { uploads, task, add, clear } = useTaskList<AnyRecord>({
     concurrency: options.concurrency,
@@ -343,7 +344,13 @@ export function useUpload(routeOrOptions: any, maybeOptions?: any): any {
       const make = (file: File | null, body?: File | Blob | FormData | null): ListEntry<AnyRecord> => {
         const transport = transportRef.current;
         if (transport) return build(transport, file, body);
-        return deferredEntry(file, async () => build((await loadRef.current()).transport, file, body));
+        return deferredEntry(file, async () => {
+          const facts = await load();
+          // The route never said which transport it speaks, so nothing is guessed: the upload fails
+          // with why, and the next start() asks again.
+          if (!facts.transport) return refusedEntry(file, facts.error ?? new BlobError('request_failed', { message: 'could not reach the route', status: 503 }));
+          return build(facts.transport, file, body);
+        });
       };
 
       if ('files' in args) return add(args.files ? Array.from(args.files).map((file) => make(file)) : []);
@@ -355,7 +362,7 @@ export function useUpload(routeOrOptions: any, maybeOptions?: any): any {
       if (!file) return null;
       return add([make(file)])[0] ?? null;
     },
-    [add, url, limitsRef, transportRef],
+    [add, url, limitsRef, transportRef, load],
   );
 
   return { start, uploads, upload: task, task, clear, accept };

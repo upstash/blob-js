@@ -203,6 +203,11 @@ interface Slot {
   seen?: boolean;
 }
 
+/** With a `context`, `routes` must be the function form: the plain object cannot see `ctx`. */
+export function uploadRouter<TCtx, TRoutes extends Record<string, unknown>>(
+  options: UploadRouterOptions<TCtx, TRoutes> & { context: (request: Request) => TCtx; routes: (upload: UploadBuilder<Awaited<TCtx>>) => TRoutes },
+): UploadRouter<TRoutes>;
+export function uploadRouter<TRoutes extends Record<string, unknown>>(options: UploadRouterOptions<undefined, TRoutes> & { context?: undefined }): UploadRouter<TRoutes>;
 export function uploadRouter<TCtx = undefined, TRoutes extends Record<string, unknown> = Record<string, never>>(options: UploadRouterOptions<TCtx, TRoutes>): UploadRouter<TRoutes> {
   const definitions = (typeof options.routes === 'function' ? (options.routes as (u: UploadBuilder<any>) => TRoutes)(upload as UploadBuilder<any>) : options.routes) as unknown as Record<string, Definition>;
 

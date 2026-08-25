@@ -221,14 +221,14 @@ describe('context', () => {
       context: () => {
         throw new BlobError('unauthorized');
       },
-      routes: {
+      routes: (upload) => ({
         attachment: upload({
           onBeforeUpload: () => {
             reached = true;
             return { path: 'x' };
           },
         }),
-      },
+      }),
     });
     const res = await post(uploads, 'attachment', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } });
     expect(res.status).toBe(401);

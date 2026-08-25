@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import * as z from 'zod';
-import { handleProxyUpload, handleUpload, uploadRouter, type Bucket } from '../../src/index.ts';
+import { handleProxyUpload, handleUpload, upload, uploadRouter, type Bucket } from '../../src/index.ts';
 import { createUploadHooks, type RoutesOf } from '../../src/react/index.ts';
 
 // Compile-only. Nothing below the router definitions ever runs: the @ts-expect-error lines are the
@@ -43,6 +43,24 @@ function _uploads(bucket: Bucket) {
 type Uploads = ReturnType<typeof _uploads>;
 
 const { useUpload, useUploadProxy } = createUploadHooks<Uploads>({ headers: () => ({ authorization: 'x' }) });
+
+/* ------------------------------------------------------------------ forms -- */
+
+function _forms() {
+  // No context: the plain object form, with `upload` imported, and ctx typed undefined.
+  uploadRouter({ bucket, routes: { a: upload({ onBeforeUpload: ({ ctx }) => ({ path: String(ctx satisfies undefined) }) }) } });
+  // With a context the object form cannot see ctx, so it is refused rather than typing ctx as undefined.
+  // @ts-expect-error a router with a context takes the function form of routes
+  uploadRouter({
+    bucket,
+    context: () => ({ id: 'x' }),
+    routes: { a: upload({ onBeforeUpload: () => ({ path: 'x' }) }) },
+  });
+  // The deprecated object form of the bound hook is still checked against the map.
+  useUpload({ route: 'attachment', onDone: (u) => void (u.blob.data.rowId as string) });
+  // @ts-expect-error a typo is a typo in the object form too
+  useUpload({ route: 'attachmnt' });
+}
 
 /* ------------------------------------------------------------------ names -- */
 

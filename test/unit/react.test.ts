@@ -1006,3 +1006,94 @@ test('cancel before the route answers never sends the file', async () => {
   expect(xhrs).toHaveLength(0);
   expect(hook.current.upload!.status).toBe('canceled');
 });
+
+test('start({ body: file }) on a proxy route sends the file as the body, not as a form', async () => {
+  const { endpoint } = mountRouter('proxy', 'avatar');
+  const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint });
+  const hook = await render(() => bound('avatar'));
+  await flush();
+  const file = png();
+  await act(async () => {
+    hook.current.start({ body: file });
+  });
+  const xhr = await nextXhr();
+  expect(xhr.body).toBe(file as any);
+  expect(hook.current.upload!.file).toBe(file);
+});
+
+test('a route that cannot be reached fails the upload with why, and is asked again next time', async () => {
+  const endpoint = `/api/router/${++routeId}`;
+  const url = `${endpoint}?route=avatar`;
+  let reachable = false;
+  restore.push(
+    installRouter({
+      [url]: {
+        GET: async () => {
+          if (!reachable) throw new TypeError('fetch failed');
+          return jsonResponse({ limits: LIMITS, transport: 'proxy' });
+        },
+        POST: async () => jsonResponse(END_BODY),
+      },
+    }),
+  );
+  const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint });
+  const hook = await render(() => bound('avatar'));
+  await flush();
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  await flush(3);
+  // Nothing was guessed: a presign sent to a proxy route would be a JSON body it stores.
+  expect(xhrs).toHaveLength(0);
+  const first = hook.current.upload!;
+  expect(first.status).toBe('error');
+  expect(first.status === 'error' && first.error.code).toBe('request_failed');
+
+  reachable = true;
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const xhr = await nextXhr();
+  expect(xhr.method).toBe('POST');
+  expect(xhr.body).toBeInstanceOf(FormData);
+});
+
+test('a route whose GET refuses hands the upload that refusal', async () => {
+  const endpoint = `/api/router/${++routeId}`;
+  const url = `${endpoint}?route=doc`;
+  restore.push(installRouter({ [url]: { GET: async () => jsonResponse(new BlobError('unauthorized').toJSON(), 401), POST: async () => jsonResponse(END_BODY) } }));
+  const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint });
+  const hook = await render(() => bound('doc'));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  await flush(3);
+  expect(xhrs).toHaveLength(0);
+  const upload = hook.current.upload!;
+  expect(upload.status === 'error' && upload.error.code).toBe('unauthorized');
+});
+
+test('a route with no GET half is a direct one, as every handleUpload route was', async () => {
+  const endpoint = `/api/router/${++routeId}`;
+  const url = `${endpoint}?route=doc`;
+  restore.push(
+    installRouter({
+      [url]: {
+        POST: async (request) => {
+          const body = (await request.json()) as any;
+          calls.push({ url, method: 'POST', body, auth: null });
+          if (body?.phase === 'begin') return jsonResponse({ completionToken: 't', path: 'p', upload: { kind: 'single', url: 'https://r2.test/put', headers: {} } });
+          return jsonResponse(END_BODY);
+        },
+      },
+    }),
+  );
+  const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint });
+  const hook = await render(() => bound('doc'));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const put = await nextXhr();
+  expect(put.method).toBe('PUT');
+  expect(calls.some((c) => c.url === url && c.body?.phase === 'begin')).toBe(true);
+});

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { clock } from '../browser/clock.ts';
 import { resolveHeaders, type HeadersProvider } from '../browser/task.ts';
 import { BlobError } from '../shared/errors.ts';
@@ -21,14 +21,17 @@ const inFlight = new Map<string, Promise<RouteFacts>>();
 /** What a route says about itself. `transport` decides which upload one hook runs for it. */
 export interface RouteFacts {
   limits: WireLimits | undefined;
-  transport: 'direct' | 'proxy';
+  /**
+   * Undefined when the route could not be asked -- the network failed, or it answered an error --
+   * and is not cached then, so the next start() asks again. Never guessed: a presign sent to a
+   * proxy route is a JSON body it would store.
+   */
+  transport: 'direct' | 'proxy' | undefined;
+  /** Why the route could not be asked, for the upload that was waiting on it. */
+  error?: BlobError;
 }
 
 export function cachedFacts(route: string): RouteFacts | undefined {
-  return fresh(route);
-}
-
-function fresh(route: string): (RouteFacts & { at: number }) | undefined {
   const entry = cache.get(route);
   if (!entry) return undefined;
   if (clock.now() - entry.at > LIMITS_TTL_MS) {
@@ -39,33 +42,57 @@ function fresh(route: string): (RouteFacts & { at: number }) | undefined {
 }
 
 export function loadFacts(route: string, headers: HeadersProvider | undefined): Promise<RouteFacts> {
-  const hit = fresh(route);
+  const hit = cachedFacts(route);
   if (hit) return Promise.resolve(hit);
   let pending = inFlight.get(route);
   if (!pending) {
-    pending = (async () => {
-      let limits: WireLimits | undefined;
-      // A route that never answers is a route the SDK presigns against, which is what every
-      // handleUpload route did before the proxy transport existed.
-      let transport: 'direct' | 'proxy' = 'direct';
-      try {
-        const res = await fetch(route, { headers: await resolveHeaders(headers) });
-        if (res.ok) {
-          const body = (await res.json()) as WireLimitsResponse | undefined;
-          if (body?.limits && typeof body.limits === 'object') limits = body.limits;
-          if (body?.transport === 'proxy') transport = 'proxy';
-        }
-      } catch {
-        // A route that will not say what it allows still uploads; the picker just has no accept.
-      } finally {
-        inFlight.delete(route);
-      }
-      cache.set(route, { limits, transport, at: clock.now() });
-      return { limits, transport };
-    })();
+    pending = fetchFacts(route, headers).finally(() => inFlight.delete(route));
     inFlight.set(route, pending);
   }
   return pending;
+}
+
+async function fetchFacts(route: string, headers: HeadersProvider | undefined): Promise<RouteFacts> {
+  let authored: Record<string, string>;
+  try {
+    // The app's own hook. A throw from it is the app refusing the upload, and reaches it as thrown.
+    authored = await resolveHeaders(headers);
+  } catch (e) {
+    return { limits: undefined, transport: undefined, error: BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), status: 400, cause: e }) };
+  }
+  let res: Response;
+  try {
+    res = await fetch(route, { headers: authored });
+  } catch (e) {
+    return { limits: undefined, transport: undefined, error: new BlobError('request_failed', { message: 'could not reach the route', status: 503, cause: e }) };
+  }
+  // A route with no GET half is one the SDK presigns against: every handleUpload route did before
+  // the proxy transport existed. Any other refusal is the route's own, and the upload carries it.
+  if (res.status === 404 || res.status === 405) return remember(route, { limits: undefined, transport: 'direct' });
+  if (!res.ok) {
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = undefined;
+    }
+    return { limits: undefined, transport: undefined, error: BlobError.fromJSON(body, res.status) ?? BlobError.fromStatus(res.status) };
+  }
+  let limits: WireLimits | undefined;
+  let transport: 'direct' | 'proxy' = 'direct';
+  try {
+    const body = (await res.json()) as WireLimitsResponse | undefined;
+    if (body?.limits && typeof body.limits === 'object') limits = body.limits;
+    if (body?.transport === 'proxy') transport = 'proxy';
+  } catch {
+    // Not the limits document: a route that will not say what it allows still uploads.
+  }
+  return remember(route, { limits, transport });
+}
+
+function remember(route: string, facts: RouteFacts): RouteFacts {
+  cache.set(route, { ...facts, at: clock.now() });
+  return facts;
 }
 
 export function acceptOf(limits: WireLimits | undefined): string {
@@ -87,10 +114,22 @@ export function deny(file: File, limits: WireLimits | undefined): BlobError | un
 export function useLimits(route: string, headers: HeadersProvider | undefined) {
   const headersRef = useRef<HeadersProvider | undefined>(headers);
   headersRef.current = headers;
+  const routeRef = useRef(route);
+  routeRef.current = route;
 
   const limitsRef = useRef<WireLimits | undefined>(cachedFacts(route)?.limits);
   const transportRef = useRef<'direct' | 'proxy' | undefined>(cachedFacts(route)?.transport);
   const [accept, setAccept] = useState(() => acceptOf(cachedFacts(route)?.limits));
+
+  /** Resolves once the route has said what it is, so a file picked before the GET lands still waits. */
+  const load = useCallback(async (): Promise<RouteFacts> => {
+    const facts = await loadFacts(route, headersRef.current);
+    if (routeRef.current === route) {
+      limitsRef.current = facts.limits;
+      transportRef.current = facts.transport;
+    }
+    return facts;
+  }, [route]);
 
   useEffect(() => {
     let alive = true;
@@ -98,26 +137,13 @@ export function useLimits(route: string, headers: HeadersProvider | undefined) {
     limitsRef.current = hit?.limits;
     transportRef.current = hit?.transport;
     setAccept(acceptOf(limitsRef.current));
-    void loadFacts(route, headersRef.current).then((facts) => {
-      if (!alive) return;
-      limitsRef.current = facts.limits;
-      transportRef.current = facts.transport;
-      setAccept(acceptOf(facts.limits));
+    void load().then((facts) => {
+      if (alive) setAccept(acceptOf(facts.limits));
     });
     return () => {
       alive = false;
     };
-  }, [route]);
-
-  /** Resolves once the route has said what it is, so a file picked before the GET lands still waits. */
-  const load = (): Promise<RouteFacts> => {
-    const facts = loadFacts(route, headersRef.current);
-    void facts.then((f) => {
-      limitsRef.current = f.limits;
-      transportRef.current = f.transport;
-    });
-    return facts;
-  };
+  }, [route, load]);
 
   return { limitsRef, transportRef, accept, load };
 }

@@ -179,9 +179,12 @@ export default function Page() {
   a file picker is filled from the same list that does the refusing and a deploy that widens the
   limits reaches it.
 - **`proxy: true`** is the only difference between the two transports on the client: the browser
-  learns which one to run from the route's own GET, so a page names a route and never a strategy.
+  learns which one to run from the route's own GET, so a page names a route and never a strategy. A
+  file picked before that GET has answered waits for it as `queued`; if the GET cannot be reached or
+  refuses, the upload fails with that error rather than guessing a transport.
 - **`context`** runs once per request, before the route. It does not run for GET, which serves a
-  public, cacheable document and reads nothing.
+  public, cacheable document and reads nothing. With a `context`, `routes` must be the function form
+  so `upload` sees `ctx`; without one the plain object form and the exported `upload` are fine.
 - **Per-route callbacks** are `onBeforeUpload` (required), `onBeforeUploadFailed`,
   `onUploadCompleted` and `onError`, and all of them get `ctx`. What `onUploadCompleted` returns is
   `upload.blob.data` in the browser, typed. `onBeforeUpload` returns `{ path, metadata?, limits?,
@@ -337,7 +340,7 @@ function Uploader() {
 const { start, upload } = useUpload('avatar');
 
 start({ file }); // multipart, under `field`
-start({ body: blob }); // the request body as it stands
+start({ body: blob }); // the request body as it stands, a File included
 
 if (upload?.status === 'done') {
   upload.blob.url; // where it landed
