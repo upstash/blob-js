@@ -286,7 +286,7 @@ describe('bucket guards', () => {
   test('a private bucket has no public url', async () => {
     resetCredentialCaches();
     r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
-    const blob = await new Bucket({ token: TOKEN, visibility: 'private' }).put('a.txt', 'x');
+    const blob = await new Bucket({ token: TOKEN, private: true }).put('a.txt', 'x');
     expect(blob.url).toBeUndefined();
     expect(blob.versionedUrl).toBeUndefined();
     expect(blob.path).toBe('a.txt');
@@ -294,7 +294,7 @@ describe('bucket guards', () => {
     resetCredentialCaches();
     mintResponse = () => Response.json(creds({ visibility: 'private' }));
     // The credentials response wins over the option: the bucket knows what it is.
-    const declaredPublic = await new Bucket({ token: TOKEN, visibility: 'public' }).put('a.txt', 'x');
+    const declaredPublic = await new Bucket({ token: TOKEN, private: false }).put('a.txt', 'x');
     expect(declaredPublic.url).toBeUndefined();
   });
 });

@@ -13,11 +13,11 @@ export type { MultipartUpload };
 export interface BucketOptions {
   token: string;
   /**
-   * 'private' drops `url` and `versionedUrl` from every BlobObject: nothing serves a private
-   * bucket over the public host, so a url there is a link that 404s. A `visibility` in the
-   * credentials response wins over this.
+   * Drops `url` and `versionedUrl` from every BlobObject: nothing serves a private bucket over
+   * the public host, so a url there is a link that 404s. A visibility in the credentials response
+   * wins over this.
    */
-  visibility?: 'public' | 'private';
+  private?: boolean;
   /** Default cache policy for every write; per-call `cache` overrides it. */
   cache?: CacheOption;
   /**
@@ -132,7 +132,7 @@ export class Bucket {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
     this.defaultCache = options.cache;
-    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true, options.visibility);
+    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true, options.private === undefined ? undefined : options.private ? 'private' : 'public');
     INTERNALS.set(this, this.r2);
   }
 

@@ -56,7 +56,7 @@ anywhere from ~30 s to ~10 min (measured 2026-08-25: a fresh mint came back with
 
 ### Private buckets
 
-`new Bucket({ token, visibility: 'private' })` drops `url` and `versionedUrl` from every
+`new Bucket({ token, private: true })` drops `url` and `versionedUrl` from every
 `BlobObject`: nothing serves a private bucket over the public host, so a url there is a link that
 404s. Reads go through `signedRead()`. If the credential service reports the visibility itself, that
 wins over the option.
