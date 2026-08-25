@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { cacheControl, formatSize, parseDuration, parseSize } from '../../src/shared/units.ts';
+import { cacheControl, formatBytes, parseDuration, parseSize } from '../../src/shared/units.ts';
 
 describe('parseSize', () => {
   test('is decimal, the way storage is billed', () => {
@@ -85,18 +85,24 @@ describe('cacheControl', () => {
 });
 
 test('sizes are formatted the decimal way they are parsed', () => {
-  expect(formatSize(0)).toBe('0B');
-  expect(formatSize(999)).toBe('999B');
-  expect(formatSize(1500)).toBe('1.5kB');
-  expect(formatSize(parseSize('2mb'))).toBe('2MB');
-  expect(formatSize(3_145_728)).toBe('3.1MB');
-  expect(formatSize(parseSize('5gb'))).toBe('5GB');
+  expect(formatBytes(0)).toBe('0 B');
+  expect(formatBytes(512)).toBe('512 B');
+  expect(formatBytes(999)).toBe('999 B');
+  expect(formatBytes(1500)).toBe('1.5 KB');
+  expect(formatBytes(parseSize('2mb'))).toBe('2 MB');
+  expect(formatBytes(3_145_728)).toBe('3.1 MB');
+  expect(formatBytes(parseSize('20mb'))).toBe('20 MB');
+  expect(formatBytes(parseSize('1.5gb'))).toBe('1.5 GB');
+  expect(formatBytes(parseSize('5gb'))).toBe('5 GB');
+  expect(formatBytes(parseSize('3tb'))).toBe('3 TB');
+  // Past ten of a unit the decimal is noise.
+  expect(formatBytes(20_971_520)).toBe('21 MB');
 });
 
 // Rounding both sides independently produced refusals reading "1MB, over the 1MB limit".
 test('a size just over a limit does not format as the limit', () => {
-  expect(formatSize(1_049_999)).not.toBe(formatSize(1_000_000));
-  expect(formatSize(1_049_999)).toBe('1.0MB');
-  expect(formatSize(999_999)).toBe('1.0MB');
-  expect(formatSize(1_000_000)).toBe('1MB');
+  expect(formatBytes(1_049_999)).not.toBe(formatBytes(1_000_000));
+  expect(formatBytes(1_049_999)).toBe('1.0 MB');
+  expect(formatBytes(999_999)).toBe('1.0 MB');
+  expect(formatBytes(1_000_000)).toBe('1 MB');
 });

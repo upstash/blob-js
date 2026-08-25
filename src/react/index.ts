@@ -26,6 +26,8 @@ export type { BoundUseUpload, BoundUseUploadProxy, FailedAnyUpload, UnboundUploa
 export type { AnyUploadRoute, AnyUploadRouter, IsProxyRoute, RouteAt, RouteKey, RoutesOf } from './routes.ts';
 export type { ProxySnapshot } from './proxy-task.ts';
 export { BlobError } from '../shared/errors.ts';
+export { formatBytes } from '../shared/units.ts';
+export type { Size } from '../shared/units.ts';
 export type { BlobErrorCode } from '../shared/errors.ts';
 export type { BlobObject, UploadFile, UploadSnapshot, UploadTask, WireLimits } from '../shared/types.ts';
 export type { HeadersProvider } from '../browser/task.ts';

@@ -1,6 +1,6 @@
 import { BlobError } from '../shared/errors.ts';
 import type { BlobObject, ProxyUploadResponse, UploadFile, UploadRoute, WireLimits } from '../shared/types.ts';
-import { formatSize, type CacheOption, type Size } from '../shared/units.ts';
+import { formatBytes, type CacheOption, type Size } from '../shared/units.ts';
 import { type Bucket } from './bucket.ts';
 import { answerError, enforce, limitsEndpoint, resolveLimits, stateOf, validateInput, type StandardSchema, type UploadLimits } from './handle-upload.ts';
 
@@ -111,7 +111,7 @@ export function handleProxyUpload<TSchema extends StandardSchema<any, any> | und
       const declared = Number(request.headers.get('content-length'));
       const ceiling = routeLimits.maxBytes === undefined ? undefined : routeLimits.maxBytes + (isMultipart(request) ? ENVELOPE_SLACK : 0);
       if (ceiling !== undefined && Number.isFinite(declared) && declared > ceiling) {
-        throw new BlobError('too_large', { message: `the request body is ${formatSize(declared)}, over the ${formatSize(routeLimits.maxBytes!)} limit` });
+        throw new BlobError('too_large', { message: `the request body is ${formatBytes(declared)}, over the ${formatBytes(routeLimits.maxBytes!)} limit` });
       }
 
       const body = await readBody(request, field, routeLimits.maxBytes);

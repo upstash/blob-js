@@ -25,22 +25,22 @@ export function parseSize(input: Size, what = 'size'): number {
 }
 
 /**
- * Decimal, the same way parseSize reads them, so a limit written '2mb' is refused as "2MB". The
- * decimal is kept whenever the byte count is not an exact multiple of the unit, because rounding
- * both sides independently produced refusals reading "1MB, over the 1MB limit".
+ * Decimal, the same way parseSize reads them, so a limit written '2mb' is refused as "2 MB". An
+ * exact multiple of the unit prints whole and anything else keeps a decimal, because rounding both
+ * sides independently produced refusals reading "1MB, over the 1MB limit"; past 10 of a unit the
+ * decimal is noise and is dropped.
  */
-export function formatSize(bytes: number): string {
-  if (!Number.isFinite(bytes)) return `${bytes}B`;
-  if (bytes < 1000) return `${bytes}B`;
-  const units = ['kB', 'MB', 'GB', 'TB'];
-  let n = bytes / 1000;
-  let i = 0;
-  // >= 999.95 and not 1000: at one decimal it would print as "1000kB", which is a megabyte.
-  while (n >= 999.95 && i < units.length - 1) {
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes)) return `${bytes} B`;
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let n = bytes;
+  let unit = 0;
+  // >= 999.95 and not 1000: at one decimal it would print as "1000 KB", which is a megabyte.
+  while (n >= 999.95 && unit < units.length - 1) {
     n /= 1000;
-    i++;
+    unit++;
   }
-  return `${Number.isInteger(n) ? n : n.toFixed(1)}${units[i]}`;
+  return `${Number.isInteger(n) ? n : n.toFixed(n < 10 ? 1 : 0)} ${units[unit]}`;
 }
 
 const DURATION_UNITS: Record<string, number> = {

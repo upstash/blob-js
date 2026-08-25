@@ -1,6 +1,6 @@
 import { BlobError } from '../shared/errors.ts';
 import type { BlobObject, UploadFile, UploadRoute, WireBeginResponse, WireEndResponse, WireLanded, WireLimits, WireLimitsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
-import { cacheControl, formatSize, parseSize, type CacheOption, type Size } from '../shared/units.ts';
+import { cacheControl, formatBytes, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
 import { signToken, verifyToken, type TokenPayload } from './completion-token.ts';
 import { encodeKey, metaHeaders } from './keys.ts';
@@ -407,7 +407,7 @@ export function resolveLimits(limits: UploadLimits | undefined): ResolvedLimits 
 
 export function enforce(limits: ResolvedLimits, file: UploadFile): void {
   if (limits.maxBytes !== undefined && file.size > limits.maxBytes) {
-    throw new BlobError('too_large', { message: `${file.name} is ${formatSize(file.size)}, over the ${formatSize(limits.maxBytes)} limit` });
+    throw new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(limits.maxBytes)} limit` });
   }
   if (limits.allowedContentTypes) checkContentType(file.type, undefined, limits.allowedContentTypes);
 }
