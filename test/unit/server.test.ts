@@ -426,7 +426,7 @@ describe('handleUpload', () => {
     });
     const res = await post(statusy, { phase: 'begin', file: { name: 'a', type: '', size: 1 } });
     expect(res.status).toBe(402);
-    expect(await res.json()).toMatchObject({ code: 'request_failed', message: 'no seats left', status: 402 });
+    expect(await res.json()).toMatchObject({ code: 'request_failed', message: 'No seats left', status: 402 });
 
     const mapped = handleUpload({
       bucket: b,
@@ -440,7 +440,7 @@ describe('handleUpload', () => {
     });
     const res2 = await post(mapped, { phase: 'begin', file: { name: 'a', type: '', size: 1 } });
     expect(res2.status).toBe(503);
-    expect(await res2.json()).toMatchObject({ code: 'not_ready', message: 'db down' });
+    expect(await res2.json()).toMatchObject({ code: 'not_ready', message: 'Db down' });
 
     const responder = handleUpload({
       bucket: b,
@@ -686,7 +686,7 @@ describe('handleProxyUpload', () => {
     expect((await r.POST(new Request('https://app.test/api/avatar', { method: 'POST', body }))).status).toBe(200);
     const wrong = await r.POST(form(png()));
     expect(wrong.status).toBe(400);
-    expect((await wrong.json()).message).toBe('the request needs a avatar field holding the file');
+    expect((await wrong.json()).message).toBe('The request needs a avatar field holding the file');
   });
 
   // A TypeError, and it is rethrown rather than answered: widening is the app's bug, not the

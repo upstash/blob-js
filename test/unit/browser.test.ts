@@ -402,7 +402,7 @@ describe('single PUT', () => {
     onPhase = () => Response.json(new BlobError('forbidden').toJSON(), { status: 403 });
     await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'forbidden', status: 403 });
     onPhase = () => Response.json({ error: 'nope' }, { status: 418 });
-    await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'request_failed', status: 418, message: 'nope' });
+    await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'request_failed', status: 418, message: 'Nope' });
   });
 
   test('the controls answer false instead of throwing when they cannot act', async () => {

@@ -123,7 +123,7 @@ describe('dispatch', () => {
     const body = await res.json();
     expect(res.status).toBe(404);
     expect(body.code).toBe('not_found');
-    expect(body.message).toBe('unknown upload route');
+    expect(body.message).toBe('Unknown upload route');
     expect(JSON.stringify(body)).not.toContain('attachment');
   });
 
@@ -426,7 +426,7 @@ describe('proxy routes', () => {
     expect((await uploads.POST(form(png(), 'avatar', 'avatar'))).status).toBe(200);
     const wrong = await uploads.POST(form(png(), 'avatar', 'file'));
     expect(wrong.status).toBe(400);
-    expect((await wrong.json()).message).toBe('the request needs a avatar field holding the file');
+    expect((await wrong.json()).message).toBe('The request needs a avatar field holding the file');
   });
 });
 

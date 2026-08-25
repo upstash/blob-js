@@ -550,7 +550,7 @@ test('proxy 500 with an error string becomes request_failed carrying it', async 
   await flush();
   const task = hook.current.task!;
   expect(task.status === 'error' && task.error.code).toBe('request_failed');
-  expect(task.status === 'error' && task.error.message).toBe('nope');
+  expect(task.status === 'error' && task.error.message).toBe('Nope');
   expect(task.status === 'error' && task.error.status).toBe(500);
   expect(errors).toHaveLength(1);
 });
@@ -690,7 +690,7 @@ test('a proxy route answering with BlobError.toJSON keeps its code', async () =>
   const task = hook.current.task!;
   // Before this, every non-2xx arrived as request_failed and the caller had to read the status.
   expect(task.status === 'error' && task.error.code).toBe('unauthorized');
-  expect(task.status === 'error' && task.error.message).toBe('session expired');
+  expect(task.status === 'error' && task.error.message).toBe('Session expired');
   expect(task.status === 'error' && task.error.status).toBe(401);
 });
 
@@ -743,7 +743,7 @@ test('a throw from headers ends a direct upload without retrying the route', asy
   await flush(3);
   const task = hook.current.task!;
   expect(task.status === 'error' && task.error.code).toBe('unauthorized');
-  expect(task.status === 'error' && task.error.message).toBe('no session');
+  expect(task.status === 'error' && task.error.message).toBe('No session');
   // Not reworded as a network fault, and begin was never attempted three times.
   expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0);
 });

@@ -49,7 +49,7 @@ describe('message folds the hint in', () => {
   test('so e.message is the whole display text', () => {
     const e = new BlobError('length_required');
     expect(e.hint).toBe('pass { size } or { maxBytes } so the length is known before the first byte');
-    expect(e.message).toBe(`length required (${e.hint})`);
+    expect(e.message).toBe(`Length required (${e.hint})`);
   });
 
   test('a caller hint folds into a caller message', () => {
@@ -59,17 +59,53 @@ describe('message folds the hint in', () => {
 
   test('a message that already carries the hint is not doubled', () => {
     const e = new BlobError('length_required', { message: 'pass { size } or { maxBytes } so the length is known before the first byte' });
-    expect(e.message).toBe('pass { size } or { maxBytes } so the length is known before the first byte');
+    expect(e.message).toBe('Pass { size } or { maxBytes } so the length is known before the first byte');
   });
 
   test('a bare string is the message', () => {
-    expect(new BlobError('forbidden', 'not your thread').message).toBe('not your thread');
+    expect(new BlobError('forbidden', 'not your thread').message).toBe('Not your thread');
   });
 
   test('maxBytes rejections do not carry the platform body cap hint', () => {
     const e = new BlobError('too_large', { message: 'body is 3000 bytes, over maxBytes (2000)' });
     expect(e.hint).toBeUndefined();
-    expect(e.message).toBe('body is 3000 bytes, over maxBytes (2000)');
+    expect(e.message).toBe('Body is 3000 bytes, over maxBytes (2000)');
+  });
+});
+
+describe('sentence case', () => {
+  test('every default message reads as a sentence, so an app prints it as it stands', () => {
+    for (const code of Object.keys(TABLE) as BlobErrorCode[]) {
+      expect(new BlobError(code).message[0]).toBe(new BlobError(code).message[0]!.toUpperCase());
+    }
+    expect(new BlobError('not_found').message).toBe('Not found');
+    expect(new BlobError('conflict').message).toBe('The object changed since it was read');
+  });
+
+  test('a caller message is raised too, and the hint it folds in is not', () => {
+    expect(new BlobError('forbidden', 'not your thread').message).toBe('Not your thread');
+    expect(new BlobError('length_required').message).toBe('Length required (pass { size } or { maxBytes } so the length is known before the first byte)');
+  });
+
+  test('an identifier at the start keeps its case', () => {
+    expect(new BlobError('content_type_not_allowed', 'text/html is not allowed').message).toBe('text/html is not allowed');
+    expect(new BlobError('content_type_not_allowed', 'image/svg+xml is not allowed').message).toBe('image/svg+xml is not allowed');
+    expect(new BlobError('too_large', 'cat.png is 3.1 MB, over the 2 MB limit').message).toBe('cat.png is 3.1 MB, over the 2 MB limit');
+    expect(new BlobError('invalid_input', 'metadata.note has characters storage does not carry back').message).toBe(
+      'metadata.note has characters storage does not carry back',
+    );
+  });
+
+  test('nothing to raise is left alone', () => {
+    expect(new BlobError('partial_delete', '2 of 3 paths were not deleted').message).toBe('2 of 3 paths were not deleted');
+    expect(new BlobError('request_failed', '').message).toBe('');
+  });
+
+  test('the wire round trip does not raise it twice', () => {
+    const e = new BlobError('forbidden', 'not your thread');
+    const back = BlobError.fromJSON(JSON.parse(JSON.stringify(e.toJSON())))!;
+    expect(e.toJSON().message).toBe('Not your thread');
+    expect(back.message).toBe('Not your thread');
   });
 });
 
@@ -141,7 +177,7 @@ test('a bare status gets the code that status means', () => {
   expect(BlobError.fromStatus(401).code).toBe('unauthorized');
   expect(BlobError.fromStatus(403, { message: 'nope' }).code).toBe('forbidden');
   expect(BlobError.fromStatus(413).code).toBe('too_large');
-  expect(BlobError.fromStatus(401, { message: 'session expired' }).message).toBe('session expired');
+  expect(BlobError.fromStatus(401, { message: 'session expired' }).message).toBe('Session expired');
   // Nothing sensible to say about a 500 or a 502 beyond that the request failed.
   expect(BlobError.fromStatus(500).code).toBe('request_failed');
   expect(BlobError.fromStatus(502).status).toBe(502);

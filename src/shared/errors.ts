@@ -103,6 +103,20 @@ export interface BlobErrorOptions {
 
 const MARK = Symbol.for('@upstash/blob/BlobError');
 
+/**
+ * Messages are written lowercase here and read by people there: an app prints e.message straight
+ * into its error line, and every app doing that wrote its own capitalize() first. A message that
+ * opens with an identifier -- a MIME type, a file name, a metadata key -- keeps its case, because
+ * 'Image/png is not allowed' names a type that does not exist and 'Cat.png' is not the file the
+ * user picked.
+ */
+const OPENS_WITH_IDENTIFIER = /^[a-z][\w+*-]*[./][\w.+*/-]*/;
+
+function sentenceCase(message: string): string {
+  if (OPENS_WITH_IDENTIFIER.test(message)) return message;
+  return message.charAt(0).toUpperCase() + message.slice(1);
+}
+
 // e.message never carries a credential, a token, or an internal path. Every message assembled
 // here comes from a code, a caller-supplied string, or an HTTP status.
 export class BlobError extends Error {
@@ -117,9 +131,12 @@ export class BlobError extends Error {
 
   constructor(code: BlobErrorCode, options: BlobErrorOptions | string = {}) {
     const o = typeof options === 'string' ? { message: options } : options;
-    const base = o.message ?? DEFAULT_MESSAGE[code];
+    const raw = o.message ?? DEFAULT_MESSAGE[code];
     const hint = o.hint ?? DEFAULT_HINT[code];
-    super(hint && !base.includes(hint) ? `${base} (${hint})` : base, o.cause === undefined ? undefined : { cause: o.cause });
+    // The fold is decided on the message as written: the hint is lowercase, and a message that
+    // already carries it has just had its own first letter raised.
+    const base = sentenceCase(raw);
+    super(hint && !raw.includes(hint) ? `${base} (${hint})` : base, o.cause === undefined ? undefined : { cause: o.cause });
     this.name = 'BlobError';
     this.code = code;
     this.status = o.status ?? STATUS[code];
