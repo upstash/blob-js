@@ -3,6 +3,7 @@ import type { BlobObject } from '../shared/types.ts';
 import { cacheControl, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
+import { MULTIPART_THRESHOLD, partCount, partSizeFor } from './multipart.ts';
 import { errorFromBody, errorFromResponse, headFromHeaders, R2, type MultipartUpload } from './r2.ts';
 
 export type { MultipartUpload };
@@ -39,6 +40,12 @@ export interface PutOptions {
   overwrite?: boolean;
   /** An etag: If-Match, so the write fails with 'conflict' if the object changed. */
   ifUnchanged?: string;
+  /**
+   * Force or forbid the multipart path. The default is by size: a body over 16 MB goes up in parts,
+   * which is the only way past R2's ~5 GiB single-PUT cap and the only way a failed chunk can be
+   * retried. `overwrite: false` and `ifUnchanged` are single-PUT only, so they turn it off.
+   */
+  multipart?: boolean;
 }
 
 export interface ListOptions {
@@ -168,12 +175,22 @@ export class Bucket {
     // A zero-length body goes out as bytes, so the peeked stream has to be released rather than left open.
     if (size === 0) await stream.cancel();
 
-    const headers: Record<string, string> = {
+    const objectHeaders: Record<string, string> = {
       'content-type': contentType,
-      'content-length': String(size),
       'cache-control': cacheControl(options.cache ?? this.defaultCache),
       ...metaHeaders(options.metadata),
     };
+
+    const conditional = options.overwrite === false || options.ifUnchanged !== undefined;
+    if (options.multipart === true && conditional) {
+      throw new BlobError('invalid_input', { message: 'multipart: overwrite:false and ifUnchanged are single-PUT only' });
+    }
+    // A zero-byte multipart upload is not a thing, and its stream has already been released.
+    if (size > 0 && (options.multipart ?? (size > MULTIPART_THRESHOLD && !conditional))) {
+      return this.putMultipart(path, stream, size, objectHeaders, contentType);
+    }
+
+    const headers: Record<string, string> = { ...objectHeaders, 'content-length': String(size) };
     if (options.overwrite === false) headers['if-none-match'] = '*';
     if (options.ifUnchanged !== undefined) headers['if-match'] = options.ifUnchanged;
 
@@ -196,6 +213,75 @@ export class Bucket {
     if (!res.ok) throw await errorFromResponse(res);
     await res.body?.cancel();
     return { ...this.r2.blobObject(path, size, res.headers.get('etag') ?? '', new Date()), contentType };
+  }
+
+  /**
+   * One part at a time: a part is buffered whole so it can be retried, and holding several of them
+   * would multiply that by the concurrency. An error anywhere aborts the upload rather than leaving
+   * parts behind that nothing can see.
+   */
+  private async putMultipart(path: string, stream: ReadableStream<Uint8Array>, size: number, headers: Record<string, string>, contentType: string): Promise<PutResult> {
+    const partSize = partSizeFor(size);
+    const expected = partCount(size, partSize);
+    const uploadId = await this.r2.createMultipart(path, headers);
+    try {
+      const reader = stream.getReader();
+      const parts: { n: number; etag: string }[] = [];
+      let pending: Uint8Array[] = [];
+      let pendingBytes = 0;
+      let sent = 0;
+
+      const sendPart = async (length: number): Promise<void> => {
+        const chunk = new Uint8Array(length);
+        let filled = 0;
+        while (filled < length) {
+          const head = pending[0]!;
+          const take = Math.min(head.byteLength, length - filled);
+          chunk.set(head.subarray(0, take), filled);
+          filled += take;
+          if (take === head.byteLength) pending.shift();
+          else pending[0] = head.subarray(take);
+        }
+        pendingBytes -= length;
+        const n = parts.length + 1;
+        if (n > expected) throw new BlobError('invalid_input', { message: `body is longer than the declared ${size} bytes` });
+        const res = await this.r2.fetch({
+          method: 'PUT',
+          path,
+          query: { partNumber: String(n), uploadId },
+          headers: { 'content-length': String(length) },
+          body: chunk,
+        });
+        if (!res.ok) throw errorFromBody(res.status, await res.text());
+        await res.body?.cancel();
+        const etag = res.headers.get('etag');
+        if (!etag) throw new BlobError('request_failed', { message: `part ${n} landed without an etag`, status: 502 });
+        parts.push({ n, etag });
+        sent += length;
+      };
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (value && value.byteLength) {
+          pending.push(value);
+          pendingBytes += value.byteLength;
+        }
+        while (pendingBytes >= partSize) await sendPart(partSize);
+        if (done) break;
+      }
+      if (pendingBytes > 0) await sendPart(pendingBytes);
+      pending = [];
+      if (sent !== size) throw new BlobError('invalid_input', { message: `body was ${sent} bytes, ${size} were declared` });
+
+      const etag = await this.r2.completeMultipart(path, uploadId, parts);
+      return { ...this.r2.blobObject(path, size, etag, new Date()), contentType };
+    } catch (e) {
+      // Nothing lists an incomplete upload, so a failure that left one behind is invisible billing.
+      await this.r2.abortMultipart(path, uploadId).catch(() => {});
+      if (BlobError.is(e)) throw e;
+      if (e && typeof e === 'object' && BlobError.is((e as { cause?: unknown }).cause)) throw (e as { cause: BlobError }).cause;
+      throw e;
+    }
   }
 
   /* ----------------------------------------------------------------- read */

@@ -156,6 +156,28 @@ describe('read', () => {
   });
 });
 
+describe('large put', () => {
+  test('a body over 16MB goes up in parts and leaves no incomplete upload behind', async () => {
+    const size = 17_000_000;
+    const data = bytes(size, 21);
+    const blob = await priv.put(p('multipart/big.bin'), data, { contentType: 'application/octet-stream' });
+    expect(blob.size).toBe(size);
+    // A multipart etag names its part count; a single PUT's is a plain md5.
+    expect(blob.etag).toMatch(/-4"$/);
+    expect(await priv.listMultipartUploads({ prefix: p('multipart/') })).toEqual([]);
+    const back = new Uint8Array(await new Response((await priv.get(p('multipart/big.bin'))).body).arrayBuffer());
+    expect(back.byteLength).toBe(size);
+    expect(back.subarray(0, 64)).toEqual(data.subarray(0, 64));
+    expect(back.subarray(size - 64)).toEqual(data.subarray(size - 64));
+    expect((await priv.info(p('multipart/big.bin'))).contentType).toBe('application/octet-stream');
+
+    // A conditional write cannot be multipart, so it stays one PUT and still enforces the condition.
+    const once = await priv.put(p('multipart/cond.bin'), data, { overwrite: false });
+    expect(once.etag).not.toMatch(/-\d+"$/);
+    await expect(priv.put(p('multipart/cond.bin'), data, { overwrite: false })).rejects.toMatchObject({ code: 'already_exists' });
+  }, 300_000);
+});
+
 describe('metadata and guards', () => {
   test('metadata storage would not hand back unchanged is refused before the request', async () => {
     for (const note of ['done ✅', 'café']) {

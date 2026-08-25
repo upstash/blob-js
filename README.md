@@ -23,7 +23,15 @@ await bucket.list({ prefix: 'avatars/' });
 await bucket.del('avatars/me.png');
 ```
 
-`Bucket.fromEnv(name?, options?)` takes the same options as the constructor.
+`Bucket.fromEnv(name?, options?)` takes the same options as the constructor. Credentials are cached
+per token for the whole process, so calling it per request does not mint one per request. If the
+credential service asks for a backoff longer than a request can sit through, the call fails with
+`mint_backoff` carrying `retryAfter` rather than blocking on it.
+
+A body over 16 MB goes up as a multipart upload: that is the only way past R2's ~5 GiB single-PUT
+cap, and a part that fails can be retried on its own. `{ multipart: false }` forces one PUT, and
+`overwrite: false` / `ifUnchanged` are single-PUT only, so they turn it off by themselves. A
+multipart put that fails aborts itself rather than leaving parts behind.
 
 Object metadata is printable ASCII: R2 hands anything else back re-encoded (`café` reads as
 `=?utf-8?Q?caf=C3=A9?=`), so the SDK refuses it with `invalid_input` rather than storing a value you

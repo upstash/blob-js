@@ -279,6 +279,62 @@ describe('bucket guards', () => {
   });
 });
 
+describe('multipart put', () => {
+  const CREATED = '<InitiateMultipartUploadResult><UploadId>up-1</UploadId></InitiateMultipartUploadResult>';
+  const COMPLETED = '<CompleteMultipartUploadResult><ETag>"done-4"</ETag></CompleteMultipartUploadResult>';
+
+  function scriptMultipart(failPart?: number): { parts: string[] } {
+    const parts: string[] = [];
+    r2Handler = (call) => {
+      const u = new URL(call.url);
+      if (u.searchParams.has('uploads')) return new Response(CREATED, { status: 200 });
+      const n = u.searchParams.get('partNumber');
+      if (n) {
+        parts.push(n);
+        if (Number(n) === failPart) return new Response('<Error><Code>InvalidPart</Code></Error>', { status: 400 });
+        return new Response('', { status: 200, headers: { etag: `"p${n}"` } });
+      }
+      if (call.method === 'POST') return new Response(COMPLETED, { status: 200 });
+      return new Response('', { status: 200, headers: { etag: '"single"' } });
+    };
+    return { parts };
+  }
+
+  test('a body over the threshold goes up in parts', async () => {
+    resetCredentialCaches();
+    const script = scriptMultipart();
+    const blob = await bucket().put('big.bin', new Uint8Array(17_000_000), { contentType: 'application/octet-stream' });
+    expect(script.parts).toEqual(['1', '2', '3', '4']);
+    expect(blob.etag).toBe('"done-4"');
+    expect(blob.size).toBe(17_000_000);
+    expect(blob.contentType).toBe('application/octet-stream');
+    // Every part carried its own length, so a failed one is the only thing that has to be re-sent.
+    expect(r2Calls().filter((c) => c.url.includes('partNumber=1'))[0]!.headers.get('content-length')).toBe(String(5 * 1024 * 1024));
+  });
+
+  test('a part that fails takes the upload with it rather than leaving parts nothing can see', async () => {
+    resetCredentialCaches();
+    scriptMultipart(2);
+    await expect(bucket().put('big.bin', new Uint8Array(17_000_000))).rejects.toMatchObject({ code: 'request_failed' });
+    const abort = r2Calls().find((c) => c.method === 'DELETE');
+    expect(abort).toBeDefined();
+    expect(abort!.url).toContain('uploadId=up-1');
+  });
+
+  test('a conditional write stays a single PUT, and asking for both is refused', async () => {
+    resetCredentialCaches();
+    const script = scriptMultipart();
+    const blob = await bucket().put('big.bin', new Uint8Array(17_000_000), { overwrite: false });
+    expect(script.parts).toEqual([]);
+    expect(blob.etag).toBe('"single"');
+    await expect(bucket().put('big.bin', 'x', { multipart: true, ifUnchanged: '"e"' })).rejects.toMatchObject({ code: 'invalid_input' });
+    // Small bodies stay one request unless asked otherwise.
+    scriptMultipart();
+    expect((await bucket().put('small.bin', 'x')).etag).toBe('"single"');
+    expect((await bucket().put('small.bin', 'x', { multipart: true })).etag).toBe('"done-4"');
+  });
+});
+
 describe('handleUpload', () => {
   const post = (route: { POST: (r: Request) => Promise<Response> }, body: unknown) =>
     route.POST(new Request('https://app.test/api/upload', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }));
