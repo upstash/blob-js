@@ -40,6 +40,12 @@ const RETRY_ATTEMPTS = 3;
 // R2 answers a temporary credential that has expired with a 403 naming it, which is indistinguishable
 // from a signature error unless the body is read.
 const CREDENTIAL_REJECTED = /ExpiredToken|InvalidAccessKeyId|TokenRefreshRequired/;
+// What a read link is signed for when the caller does not say. Shorter than the cap on purpose: an
+// ask at the cap re-mints, and the cap moves with whatever the agent had left.
+const DEFAULT_READ_SECONDS = 300;
+// A credential this much older than it was minted might be replaced by a newer one; a fresher one
+// would only come back identical.
+const WORTH_REMINTING_S = 30;
 
 export class R2 {
   private readonly creds: CredentialCache;
@@ -158,26 +164,29 @@ export class R2 {
   }
 
   /**
-   * A read link that lives for the full `expiresIn`, minting a fresh credential when the cached one
-   * cannot cover it, rather than silently handing back a link that dies in seconds. `signing` in the
-   * credentials response, when the backend ships one, raises the cap and removes the re-mint.
+   * A read link that lives as long as it says it does. The cap is what the signing credential has
+   * left, which moves: the agent serves one credential until it is nearly out, so a fresh mint can
+   * come back with anything from a minute to ten. Omitting `expiresIn` asks for the shorter of five
+   * minutes and the cap and therefore never throws; naming one that is over the cap does, unless
+   * `clamp`. `signing` in the credentials response, when the backend ships one, raises the cap and
+   * removes the re-mint entirely.
    */
-  async presignRead(init: { path: string; query?: Record<string, string>; expiresIn: number; clamp?: boolean }): Promise<PresignedRead> {
+  async presignRead(init: { path: string; query?: Record<string, string>; expiresIn?: number; clamp?: boolean }): Promise<PresignedRead> {
     let c = await this.creds.get();
-    let seconds = Math.max(1, Math.floor(init.expiresIn));
-    const cap = capOf(c);
+    let cap = capOf(c);
+    let seconds = init.expiresIn === undefined ? Math.min(cap, DEFAULT_READ_SECONDS) : Math.max(1, Math.floor(init.expiresIn));
+    if (seconds > cap && worthReminting(c)) {
+      c = await this.creds.get(seconds);
+      cap = capOf(c);
+    }
     if (seconds > cap) {
       if (!init.clamp) {
         throw new BlobError('invalid_input', {
-          message: `expiresIn: ${seconds}s is over the ${cap}s a signed read can live for`,
-          hint: 'pass { clamp: true } to shorten it to the cap instead',
+          message: `expiresIn: ${seconds}s is over the ${cap}s this credential can sign for`,
+          hint: 'pass { clamp: true } to take the cap instead, and read expiresAt for what you got',
         });
       }
       seconds = cap;
-    }
-    if (remainingOf(c) < seconds) {
-      c = await this.creds.get(seconds);
-      seconds = Math.min(seconds, capOf(c));
     }
     const signer = c.signing ?? c;
     const url = await this.objectUrl(init.path, init.query);
@@ -280,14 +289,13 @@ export class R2 {
   }
 }
 
-function remainingOf(c: TempCredentials): number {
-  const now = Date.now() / 1000;
-  return Math.floor((c.signing ? c.signing.expiresAt : c.expiresAt) - now);
+/** What the credential that will sign has left: no link can outlive it, whatever was asked for. */
+function capOf(c: TempCredentials): number {
+  return Math.max(1, Math.floor((c.signing ? c.signing.expiresAt : c.expiresAt) - Date.now() / 1000));
 }
 
-function capOf(c: TempCredentials): number {
-  if (c.signing) return Math.max(1, Math.floor(c.signing.expiresAt - Date.now() / 1000));
-  return Math.max(1, c.lifetime);
+function worthReminting(c: TempCredentials): boolean {
+  return !c.signing && capOf(c) < c.lifetime - WORTH_REMINTING_S;
 }
 
 function sleep(ms: number): Promise<void> {

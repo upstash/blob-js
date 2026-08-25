@@ -166,27 +166,44 @@ describe('signedRead', () => {
     expect(read.url).toContain('X-Amz-Expires=120');
     expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + 110_000);
     expect(read.expiresAt.getTime()).toBeLessThan(Date.now() + 130_000);
-    expect(await b.signedReadCap()).toBe(600);
+    const cap = await b.signedReadCap();
+    expect(cap).toBeGreaterThanOrEqual(595);
+    expect(cap).toBeLessThanOrEqual(600);
     expect(mints).toBe(1);
 
     const e = await b.signedRead('secret.txt', { expiresIn: '1h' }).catch((x) => x);
     expect(BlobError.is(e)).toBe(true);
     expect(e.code).toBe('invalid_input');
-    expect(e.message).toContain('over the 600s');
+    expect(e.message).toMatch(/over the \d+s this credential can sign for/);
     const clamped = await b.signedRead('secret.txt', { expiresIn: '1h', clamp: true });
-    expect(clamped.url).toContain('X-Amz-Expires=600');
+    expect(Number(new URL(clamped.url).searchParams.get('X-Amz-Expires'))).toBeGreaterThanOrEqual(cap - 2);
+    // No expiresIn is the shorter of five minutes and the cap, so it never throws.
     expect(await b.signedReadUrl('secret.txt')).toContain('X-Amz-Expires=300');
   });
 
-  test('re-mints rather than handing back a link that dies in seconds', async () => {
+  test('an aged credential is re-minted before signing, but not once per call', async () => {
     resetCredentialCaches();
-    mintResponse = () => Response.json(creds({}, 31));
+    // A credential the agent handed over with most of its life already spent.
+    let expiresAt = Math.floor(Date.now() / 1000) + 600;
+    mintResponse = () => Response.json({ ...creds(), expiresAt, lifetime: undefined });
     const b = bucket();
     await b.exists('a');
     expect(mints).toBe(1);
-    // The cached credential cannot cover the full ask, so a fresh one is minted before signing.
-    await b.signedRead('a', { expiresIn: 31 });
-    expect(mints).toBeGreaterThan(1);
+    // Pretend the clock moved: the cached credential now has 100 s left of the 600 it was minted with.
+    const cache = (await import('../../src/server/credentials.ts')).credentialCacheFor(TOKEN, true);
+    const held = cache.peek()!;
+    held.expiresAt = Math.floor(Date.now() / 1000) + 100;
+    const asked = await b.signedRead('a', { expiresIn: 200, clamp: true });
+    expect(mints).toBe(2);
+    expect(Number(new URL(asked.url).searchParams.get('X-Amz-Expires'))).toBe(200);
+    // The agent answered with the same credential, so asking again straight away would only spend
+    // the mint budget: it does not.
+    expiresAt = Math.floor(Date.now() / 1000) + 100;
+    cache.peek()!.expiresAt = expiresAt;
+    cache.peek()!.lifetime = 600;
+    await b.signedRead('a', { expiresIn: 200, clamp: true });
+    await b.signedRead('a', { expiresIn: 200, clamp: true });
+    expect(mints).toBe(3);
   });
 
   test('a signing credential in the mint response raises the cap and removes the re-mint', async () => {
@@ -221,10 +238,11 @@ describe('bucket guards', () => {
     expect(e.status).toBe(400);
     expect(e.message).toContain('metadata.note');
     await expect(b.put('a.txt', 'x', { metadata: { 'bad name': 'v' } })).rejects.toMatchObject({ code: 'invalid_input' });
-    // Latin-1 is what a header can carry, so it goes through.
+    // R2 re-encodes anything above ASCII, so it is refused too rather than handed back changed.
+    await expect(b.put('a.txt', 'x', { metadata: { note: 'café' } })).rejects.toMatchObject({ code: 'invalid_input' });
     r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
-    await b.put('a.txt', 'x', { metadata: { note: 'café' } });
-    expect(r2Calls()[0]!.headers.get('x-amz-meta-note')).toBe('café');
+    await b.put('a.txt', 'x', { metadata: { note: encodeURIComponent('café') } });
+    expect(r2Calls()[0]!.headers.get('x-amz-meta-note')).toBe('caf%C3%A9');
   });
 
   test("del({ prefix: '' }) has to say it means the whole bucket", async () => {

@@ -35,10 +35,15 @@ const MINT_TIMEOUT_MS = 10_000;
 // A Retry-After longer than this is the agent asking for a pause no request can wait out: the caller
 // is told to come back rather than blocked for the whole of it.
 const MAX_MINT_WAIT_S = 10;
+// The agent hands back its own cached credential until ~60 s of it is left (measured 2026-08-25: a
+// fresh mint came back with 199 s on it), so a re-mint asking for more life often returns exactly
+// what we already had. Do not ask again straight away: mints are an account-wide budget.
+const NO_BETTER_MS = 30_000;
 
 export class CredentialCache {
   private current: TempCredentials | undefined;
   private refreshAt = 0;
+  private noBetterUntil = 0;
   private inflight: Promise<TempCredentials> | undefined;
 
   constructor(
@@ -51,7 +56,8 @@ export class CredentialCache {
    * presigned url gets the lifetime it asked for rather than whatever happened to be left.
    */
   get(minRemainingSeconds = 0): Promise<TempCredentials> {
-    if (this.current && Date.now() < this.refreshAt && this.remaining() >= minRemainingSeconds) return Promise.resolve(this.current);
+    const usable = this.current && Date.now() < this.refreshAt;
+    if (usable && (this.remaining() >= minRemainingSeconds || Date.now() < this.noBetterUntil)) return Promise.resolve(this.current!);
     this.inflight ??= this.mint().finally(() => {
       this.inflight = undefined;
     });
@@ -67,6 +73,7 @@ export class CredentialCache {
   invalidate(): void {
     this.current = undefined;
     this.refreshAt = 0;
+    this.noBetterUntil = 0;
   }
 
   private remaining(): number {
@@ -113,6 +120,7 @@ export class CredentialCache {
     }
 
     creds.lifetime = Math.max(1, Math.ceil(creds.expiresAt - Date.now() / 1000));
+    this.noBetterUntil = this.current && creds.expiresAt <= this.current.expiresAt ? Date.now() + NO_BETTER_MS : 0;
     if (!validSigning(creds.signing)) delete creds.signing;
     if (creds.visibility !== 'public' && creds.visibility !== 'private') delete creds.visibility;
     this.refreshAt = Math.max(Date.now(), creds.expiresAt * 1000 - REFRESH_MARGIN_MS);

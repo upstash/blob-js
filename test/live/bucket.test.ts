@@ -120,18 +120,70 @@ describe('read', () => {
     expect(page2.cursor).toBeUndefined();
   });
 
-  test('signedReadUrl serves the private object with a download name', async () => {
+  test('signedRead serves the private object, with a download name and an expiry it can prove', async () => {
     await priv.put(p('secret.txt'), 'shh', { contentType: 'text/plain' });
-    const url = await priv.signedReadUrl(p('secret.txt'), { expiresIn: '15m', downloadName: 'Report Q3.txt' });
-    const res = await fetch(url);
+    // Measured 2026-08-25: the agent serves one credential until it is nearly out, so the cap is
+    // anywhere from ~30 s to ~10 min. Ask for something it can cover.
+    const cap = await priv.signedReadCap();
+    expect(cap).toBeGreaterThanOrEqual(30);
+    const asked = Math.min(120, cap);
+    const read = await priv.signedRead(p('secret.txt'), { expiresIn: asked, downloadName: 'Report Q3.txt' });
+    expect(Number(new URL(read.url).searchParams.get('X-Amz-Expires'))).toBe(asked);
+    // The old signedReadUrl clamped to whatever the credential had left, so a link could come back
+    // already dead. expiresAt is the truth now, and it is never later than the credential.
+    expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + (asked - 10) * 1000);
+    const res = await fetch(read.url);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('shh');
     expect(res.headers.get('content-disposition')).toContain('Report Q3.txt');
     const plain = await fetch(await priv.signedReadUrl(p('secret.txt')));
     expect(plain.status).toBe(200);
     expect(plain.headers.get('content-disposition')).toBeNull();
-    const tampered = await fetch(url.replace('secret.txt', 'other.txt'));
+    const tampered = await fetch(read.url.replace('secret.txt', 'other.txt'));
     expect(tampered.status).toBe(403);
+  });
+
+  test('an expiresIn the backend cannot sign is refused, or clamped when asked', async () => {
+    await priv.put(p('capped.txt'), 'shh', { contentType: 'text/plain' });
+    const cap = await priv.signedReadCap();
+    const e = await priv.signedRead(p('capped.txt'), { expiresIn: '1h' }).catch((x) => x);
+    expect(BlobError.is(e)).toBe(true);
+    expect(e.code).toBe('invalid_input');
+    expect(e.message).toMatch(/over the \d+s this credential can sign for/);
+    const clamped = await priv.signedRead(p('capped.txt'), { expiresIn: '1h', clamp: true });
+    expect(Number(new URL(clamped.url).searchParams.get('X-Amz-Expires'))).toBeLessThanOrEqual(cap + 2);
+    expect((await fetch(clamped.url)).status).toBe(200);
+  });
+});
+
+describe('metadata and guards', () => {
+  test('metadata storage would not hand back unchanged is refused before the request', async () => {
+    for (const note of ['done ✅', 'café']) {
+      const e = await pub.put(p('meta-bad.txt'), 'x', { metadata: { note } }).catch((x) => x);
+      expect(BlobError.is(e)).toBe(true);
+      expect(e.code).toBe('invalid_input');
+      expect(e.status).toBe(400);
+      expect(await pub.exists(p('meta-bad.txt'))).toBe(false);
+    }
+    // Percent-encoding is the documented way through, and it round trips exactly.
+    const blob = await pub.put(p('meta-ok.txt'), 'x', { contentType: 'text/plain', metadata: { note: encodeURIComponent('café') } });
+    expect(blob.contentType).toBe('text/plain');
+    expect(decodeURIComponent((await pub.info(p('meta-ok.txt'))).metadata.note!)).toBe('café');
+  });
+
+  test("del({ prefix: '' }) refuses to mean the whole bucket by accident", async () => {
+    const e = await pub.del({ prefix: '' }).catch((x) => x);
+    expect(BlobError.is(e)).toBe(true);
+    expect(e.code).toBe('invalid_input');
+    // The objects this run wrote are still there.
+    expect((await pub.list({ prefix: root })).blobs.length).toBeGreaterThan(0);
+  });
+
+  test('put answers the content type it stored', async () => {
+    const png = await pub.put(p('typed.png'), PNG as BlobPart, { contentType: 'image/png' });
+    expect(png.contentType).toBe('image/png');
+    expect((await pub.info(p('typed.png'))).contentType).toBe('image/png');
+    expect((await pub.put(p('typed.bin'), 'x')).contentType).toBe('application/octet-stream');
   });
 });
 

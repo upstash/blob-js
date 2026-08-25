@@ -68,9 +68,10 @@ export interface BlobBody extends BlobInfo {
 
 export interface SignedReadUrlOptions {
   /**
-   * How long the link lives. Capped by the credential the SDK can sign with (~10 minutes today);
-   * over that it throws unless `clamp` is set. Default 5m, which is under the cap on purpose: an
-   * `expiresIn` close to it mints a fresh credential on nearly every call.
+   * How long the link lives. Capped by what the signing credential has left, which is at most ten
+   * minutes and often less (measured 2026-08-25: a fresh mint came back with 199 s on it), so an
+   * `expiresIn` over the cap throws unless `clamp` is set. Omit it for the shorter of 5m and the
+   * cap, which never throws; `expiresAt` says what you got either way.
    */
   expiresIn?: Duration;
   downloadName?: string;
@@ -106,10 +107,6 @@ export interface UpdateOptions {
   cache?: CacheOption;
   metadata?: Record<string, string>;
 }
-
-// Under the cap on purpose: an expiresIn near it re-mints a credential on nearly every call, and
-// mints are the account-wide budget the whole product shares.
-const DEFAULT_SIGNED_READ = '5m';
 
 const INTERNALS = new WeakMap<Bucket, R2>();
 
@@ -243,7 +240,7 @@ export class Bucket {
 
   /** The link and when it dies, so a caller can cache it until then rather than guess. */
   async signedRead(path: string, options: SignedReadUrlOptions = {}): Promise<SignedRead> {
-    const expiresIn = Math.max(1, Math.floor(parseDuration(options.expiresIn ?? DEFAULT_SIGNED_READ, 'expiresIn') / 1000));
+    const expiresIn = options.expiresIn === undefined ? undefined : Math.max(1, Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000));
     const query: Record<string, string> = {};
     if (options.downloadName !== undefined) {
       const ascii = options.downloadName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
