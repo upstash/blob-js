@@ -5,10 +5,10 @@ import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
 import { MULTIPART_THRESHOLD, partCount, partSizeFor } from './multipart.ts';
 import { errorFromBody, errorFromResponse, headFromHeaders, R2, type MultipartUpload } from './r2.ts';
-
-export type { MultipartUpload };
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
+
+export type { MultipartUpload };
 
 export interface BucketOptions {
   token: string;
