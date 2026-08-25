@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { cacheControl, parseDuration, parseSize } from '../../src/shared/units.ts';
+import { cacheControl, formatSize, parseDuration, parseSize } from '../../src/shared/units.ts';
 
 describe('parseSize', () => {
   test('is decimal, the way storage is billed', () => {
@@ -82,4 +82,13 @@ describe('cacheControl', () => {
     expect(cacheControl('immutable')).toBe('public, max-age=31536000, immutable');
     expect(cacheControl('no-store')).toBe('no-store');
   });
+});
+
+test('sizes are formatted the decimal way they are parsed', () => {
+  expect(formatSize(0)).toBe('0B');
+  expect(formatSize(999)).toBe('999B');
+  expect(formatSize(1500)).toBe('1.5kB');
+  expect(formatSize(parseSize('2mb'))).toBe('2MB');
+  expect(formatSize(3_145_728)).toBe('3.1MB');
+  expect(formatSize(parseSize('5gb'))).toBe('5GB');
 });

@@ -26,3 +26,4 @@ export { BlobError } from './shared/errors.ts';
 export type { BlobErrorCode, BlobErrorOptions } from './shared/errors.ts';
 export type { BlobObject, UploadRoute, WireLimits } from './shared/types.ts';
 export type { CacheOption, Size, Duration } from './shared/units.ts';
+export { formatSize } from './shared/units.ts';

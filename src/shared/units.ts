@@ -24,6 +24,19 @@ export function parseSize(input: Size, what = 'size'): number {
   return Math.floor(Number(m[1]) * mult);
 }
 
+/** Decimal, the same way parseSize reads them, so a limit written '2mb' is refused as "2MB". */
+export function formatSize(bytes: number): string {
+  if (bytes < 1000) return `${bytes}B`;
+  const units = ['kB', 'MB', 'GB', 'TB'];
+  let n = bytes / 1000;
+  let i = 0;
+  while (n >= 1000 && i < units.length - 1) {
+    n /= 1000;
+    i++;
+  }
+  return `${Number.isInteger(n) ? n : Number(n.toFixed(1))}${units[i]}`;
+}
+
 const DURATION_UNITS: Record<string, number> = {
   ms: 1,
   s: 1000,

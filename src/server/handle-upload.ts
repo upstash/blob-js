@@ -1,6 +1,6 @@
 import { BlobError } from '../shared/errors.ts';
 import type { BlobObject, UploadRoute, WireBeginResponse, WireEndResponse, WireFile, WireLanded, WireLimits, WirePart, WirePartsResponse } from '../shared/types.ts';
-import { cacheControl, parseSize, type CacheOption, type Size } from '../shared/units.ts';
+import { cacheControl, formatSize, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
 import { signToken, verifyToken, type TokenPayload } from './completion-token.ts';
 import { encodeKey, metaHeaders } from './keys.ts';
@@ -344,7 +344,9 @@ export async function answerError(e: unknown, request: Request, onError: ((error
   }
   const status = statusOf(e);
   if (status !== undefined) {
-    const err = new BlobError('request_failed', { message: messageOf(e), status });
+    // An auth check that threw its own 401 reaches the browser as code 'unauthorized', so a caller
+    // can tell a dead session from a rejected file without reading status numbers.
+    const err = BlobError.fromStatus(status, { message: messageOf(e) });
     return Response.json(err.toJSON(), { status });
   }
   // Anything else is the app's bug: let the framework log it rather than mask it as a 500.
@@ -383,7 +385,7 @@ export function resolveLimits(limits: UploadLimits | undefined): ResolvedLimits 
 
 export function enforce(limits: ResolvedLimits, file: WireFile): void {
   if (limits.maxBytes !== undefined && file.size > limits.maxBytes) {
-    throw new BlobError('too_large', { message: `${file.name} is ${file.size} bytes, over the limit of ${limits.maxBytes}` });
+    throw new BlobError('too_large', { message: `${file.name} is ${formatSize(file.size)}, over the ${formatSize(limits.maxBytes)} limit` });
   }
   if (limits.allowedContentTypes) checkContentType(file.type, undefined, limits.allowedContentTypes);
 }

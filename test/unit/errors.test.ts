@@ -136,3 +136,13 @@ describe('toJSON / fromJSON', () => {
     expect(BlobError.fromJSON({ code: 'made_up' })).toBeUndefined();
   });
 });
+
+test('a bare status gets the code that status means', () => {
+  expect(BlobError.fromStatus(401).code).toBe('unauthorized');
+  expect(BlobError.fromStatus(403, { message: 'nope' }).code).toBe('forbidden');
+  expect(BlobError.fromStatus(413).code).toBe('too_large');
+  expect(BlobError.fromStatus(401, { message: 'session expired' }).message).toBe('session expired');
+  // Nothing sensible to say about a 500 or a 502 beyond that the request failed.
+  expect(BlobError.fromStatus(500).code).toBe('request_failed');
+  expect(BlobError.fromStatus(502).status).toBe(502);
+});

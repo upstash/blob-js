@@ -1,6 +1,6 @@
 import { BlobError } from '../shared/errors.ts';
 import type { BlobObject, UploadRoute, WireEndResponse, WireFile, WireLimits } from '../shared/types.ts';
-import type { CacheOption, Size } from '../shared/units.ts';
+import { formatSize, type CacheOption, type Size } from '../shared/units.ts';
 import { type Bucket } from './bucket.ts';
 import { answerError, enforce, limitsEndpoint, resolveLimits, type UploadLimits } from './handle-upload.ts';
 
@@ -81,7 +81,7 @@ export function handleProxyUpload<TContext = undefined, TData = void, TPath exte
       // than after your function has held all of it in memory.
       const declared = Number(request.headers.get('content-length'));
       if (routeLimits.maxBytes !== undefined && Number.isFinite(declared) && declared > routeLimits.maxBytes) {
-        throw new BlobError('too_large', { message: `the request body is ${declared} bytes, over the limit of ${routeLimits.maxBytes}` });
+        throw new BlobError('too_large', { message: `the request body is ${formatSize(declared)}, over the ${formatSize(routeLimits.maxBytes)} limit` });
       }
 
       const body = await readBody(request, field);

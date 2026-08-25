@@ -556,7 +556,7 @@ class Task implements InternalTask {
         json = undefined;
       }
       if (res.ok) return json;
-      const err = BlobError.fromJSON(json, res.status) ?? new BlobError('request_failed', { message: routeMessage(json, res), status: res.status });
+      const err = BlobError.fromJSON(json, res.status) ?? BlobError.fromStatus(res.status, { message: routeMessage(json, res) });
       if (classify(res.status) !== 'retry') throw err;
       last = err;
       if (attempt === attempts - 1) break;

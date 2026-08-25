@@ -176,7 +176,8 @@ export class ProxyTask<TResponse = unknown> {
       this.fail(new BlobError('too_large', { hint: PLATFORM_BODY_CAP_HINT }));
       return;
     }
-    this.fail(new BlobError('request_failed', { message: routeMessage(json, res), status: res.status }));
+    // A route that answered with a plain status still gets the code that status means.
+    this.fail(BlobError.fromStatus(res.status, { message: routeMessage(json, res) }));
   }
 
   private isCanceled(): boolean {

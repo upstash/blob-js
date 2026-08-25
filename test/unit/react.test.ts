@@ -681,6 +681,21 @@ test('a proxy route answering with BlobError.toJSON keeps its code', async () =>
   expect(task.status === 'error' && task.error.status).toBe(401);
 });
 
+test('a route that answered a plain 401 still arrives as unauthorized', async () => {
+  const hook = await render(() => useUploadProxy({ route: '/api/avatar' }));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const xhr = await nextXhr();
+  // No code in the body: the shape an ordinary auth wrapper answers with.
+  await act(async () => {
+    xhr.respond(401, { 'content-type': 'application/json' }, JSON.stringify({ error: 'unauthorized' }));
+  });
+  await flush();
+  const task = hook.current.task!;
+  expect(task.status === 'error' && task.error.code).toBe('unauthorized');
+});
+
 test('a proxy route reviving its blob gives the same shape a direct upload does', async () => {
   const hook = await render(() => useUploadProxy({ route: '/api/avatar' }));
   await act(async () => {

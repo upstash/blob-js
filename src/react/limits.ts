@@ -3,6 +3,7 @@ import { clock } from '../browser/clock.ts';
 import { resolveHeaders, type HeadersProvider } from '../browser/task.ts';
 import { BlobError } from '../shared/errors.ts';
 import type { WireLimits } from '../shared/types.ts';
+import { formatSize } from '../shared/units.ts';
 
 /**
  * What a route says it accepts, fetched from its own GET. Shared by both hooks so a proxied upload
@@ -61,7 +62,7 @@ export function acceptOf(limits: WireLimits | undefined): string {
  */
 export function deny(file: File, limits: WireLimits | undefined): BlobError | undefined {
   if (limits?.maxBytes !== undefined && file.size > limits.maxBytes) {
-    return new BlobError('too_large', { message: `${file.name} is ${file.size} bytes, over the limit of ${limits.maxBytes}` });
+    return new BlobError('too_large', { message: `${file.name} is ${formatSize(file.size)}, over the ${formatSize(limits.maxBytes)} limit` });
   }
   return undefined;
 }

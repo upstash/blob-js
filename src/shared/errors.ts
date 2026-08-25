@@ -71,6 +71,22 @@ const DEFAULT_HINT: Partial<Record<BlobErrorCode, string>> = {
  */
 export const PLATFORM_BODY_CAP_HINT = 'Vercel caps a serverless request body at 4.5MB, AWS Lambda at 6MB, Cloudflare at 100MB on the free plan';
 
+/**
+ * The code a bare HTTP status means, for a route that answered with a status and no code of its own:
+ * an auth check that threw its own 401, a platform that refused the body at 413. Without it every
+ * such answer arrives as request_failed and the caller has to read status numbers to tell a dead
+ * session from a rejected file.
+ */
+const CODE_FOR_STATUS: Partial<Record<number, BlobErrorCode>> = {
+  401: 'unauthorized',
+  403: 'forbidden',
+  404: 'not_found',
+  409: 'conflict',
+  411: 'length_required',
+  413: 'too_large',
+  429: 'rate_limited',
+};
+
 export interface BlobErrorOptions {
   message?: string;
   hint?: string;
@@ -112,6 +128,11 @@ export class BlobError extends Error {
     this.etag = o.etag;
     this.size = o.size;
     this.retryAfter = o.retryAfter;
+  }
+
+  /** The best code for a status that arrived without one, falling back to request_failed. */
+  static fromStatus(status: number, options: BlobErrorOptions = {}): BlobError {
+    return new BlobError(CODE_FOR_STATUS[status] ?? 'request_failed', { ...options, status });
   }
 
   // is(), not instanceof: an ESM and a CJS copy of this class are two classes.
