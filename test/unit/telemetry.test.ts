@@ -50,6 +50,15 @@ describe('telemetryHeaders', () => {
     expect(telemetryHeaders({ process: { versions: { node: '22.1.0' }, env: { UPSTASH_DISABLE_TELEMETRY: '1' } } })).toEqual({});
   });
 
+  test('a variable that says false and means true is a trap, so falsey spellings leave it on', () => {
+    for (const v of ['false', 'FALSE', '0', 'no', 'off', '', '  ']) {
+      expect(telemetryHeaders({ process: { env: { UPSTASH_DISABLE_TELEMETRY: v } } })).toHaveProperty('Upstash-Telemetry-Sdk');
+    }
+    for (const v of ['1', 'true', 'yes', ' on ']) {
+      expect(telemetryHeaders({ process: { env: { UPSTASH_DISABLE_TELEMETRY: v } } })).toEqual({});
+    }
+  });
+
   test('vercel wins over aws when both are set', () => {
     expect(telemetryHeaders({ process: { env: { VERCEL: '1', AWS_REGION: 'us-east-1' } } })['Upstash-Telemetry-Platform']).toBe('vercel');
   });
