@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import * as z from 'zod';
-import { handleProxyUpload, handleUpload, upload, uploadRouter, type Bucket } from '../../src/index.ts';
+import { handleProxyUpload, handleUpload, upload, uploadRouter, type Bucket, type RouteBeforeUploadArgs, type RouteUploadCompletedArgs, type UploadContext, type UploadFile } from '../../src/index.ts';
 import { createUploadHooks, type RoutesOf } from '../../src/react/index.ts';
 
 // Compile-only. Nothing below the router definitions ever runs: the @ts-expect-error lines are the
@@ -144,6 +144,77 @@ function _transports() {
   // The File is optional on a proxy record, because start({ body }) has none.
   const named: File | null | undefined = proxy.upload?.file;
   void named;
+}
+
+/* --------------------------------------------------------------- shared -- */
+
+interface Session {
+  id: string;
+}
+/** What onBeforeUpload hands the completion: the picked name, which the stored object drops. */
+interface Reserved {
+  name: string;
+}
+interface Row {
+  id: string;
+  ready: boolean;
+}
+
+/**
+ * The callback pair two routes share, written once and outside any `upload({ ... })`. The ctx is
+ * named once, the transport is not named at all, and both routes below still infer their own state
+ * and their own data from it.
+ */
+const stored = (prefix: string) => ({
+  onBeforeUpload: ({ ctx, file: picked }: RouteBeforeUploadArgs<Session>) => ({ path: `${prefix}/${ctx.id}/${picked.name}`, state: { name: picked.name } }),
+  onUploadCompleted: ({ ctx, state, size }: RouteUploadCompletedArgs<Session, Reserved>): Row => ({ id: `${ctx.id}/${state.name}/${size}`, ready: true }),
+});
+
+function _shared(b: Bucket) {
+  return uploadRouter({
+    bucket: b,
+    context: (): Session => ({ id: 'demo' }),
+    routes: (upload) => ({
+      note: upload({ ...stored('note') }),
+      // The same pair on the other transport: the proxy route writes only what is its own.
+      avatar: upload({
+        proxy: true,
+        ...stored('avatar'),
+        onBeforeUpload: ({ ctx, file: picked }) => ({ path: `avatar/${ctx.id}`, cache: '1m' as const, state: { name: picked.name } }),
+      }),
+    }),
+  });
+}
+
+type Shared = ReturnType<typeof _shared>;
+
+function _sharedTypes() {
+  // The router carries what its `context` returned, so a helper in another file names it once.
+  const session: UploadContext<Shared> = { id: 'demo' };
+  // @ts-expect-error ctx is the session the router's context returned, not anything
+  const wrong: UploadContext<Shared> = { nope: true };
+  // A ctx type passes straight through, which is what a helper written beside the router uses.
+  const same: UploadContext<Session> = session;
+  const audit = ({ ctx, file: picked }: RouteBeforeUploadArgs<Shared>) => `${ctx.id}:${picked.name}`;
+  const picked: UploadFile = { name: 'a.png', type: 'image/png', size: 10 };
+  void [session, wrong, same, audit, picked];
+
+  const hooks = createUploadHooks<Shared>({});
+  const note = hooks.useUpload('note');
+  if (note.upload?.status === 'done') {
+    const ready: boolean = note.upload.blob.data.ready;
+    void ready;
+    // @ts-expect-error the shared pair's data is a Row and nothing else
+    void note.upload.blob.data.nope;
+  }
+  // The proxied route spread the same pair, so its data is the same Row.
+  const avatar = hooks.useUpload('avatar');
+  if (avatar.upload?.status === 'done') void (avatar.upload.blob.data.id as string);
+
+  // maxBytes as the route serves it, so a page states the cap instead of repeating a constant.
+  const cap: number | undefined = note.limits?.maxBytes;
+  const types: readonly string[] | undefined = note.limits?.allowedContentTypes;
+  void [cap, types];
 }
 
 /* --------------------------------------------------- handlers in the map -- */

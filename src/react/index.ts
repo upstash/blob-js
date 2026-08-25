@@ -27,5 +27,5 @@ export type { AnyUploadRoute, AnyUploadRouter, IsProxyRoute, RouteAt, RouteKey, 
 export type { ProxySnapshot } from './proxy-task.ts';
 export { BlobError } from '../shared/errors.ts';
 export type { BlobErrorCode } from '../shared/errors.ts';
-export type { BlobObject, UploadSnapshot, UploadTask } from '../shared/types.ts';
+export type { BlobObject, UploadFile, UploadSnapshot, UploadTask, WireLimits } from '../shared/types.ts';
 export type { HeadersProvider } from '../browser/task.ts';

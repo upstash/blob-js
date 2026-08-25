@@ -2,7 +2,7 @@ import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
 import type { HeadersProvider } from '../browser/task.ts';
 import type { BlobError } from '../shared/errors.ts';
-import type { ProxyUploadResponse, UploadRouteTypes } from '../shared/types.ts';
+import type { ProxyUploadResponse, UploadRouteTypes, WireLimits } from '../shared/types.ts';
 import { deny, useLimits } from './limits.ts';
 import { ProxyTask } from './proxy-task.ts';
 import { resolveRouteUrl } from './routes.ts';
@@ -67,6 +67,11 @@ export interface UseUploadProxyResult<R> {
   clear(id?: string): void;
   /** The route's allowedContentTypes, joined. Empty until GET lands, or when it serves none. */
   accept: string;
+  /**
+   * What the route says it accepts, its own numbers. Undefined until its GET answers, and for a
+   * route this SDK did not write, which serves no limits document at all.
+   */
+  limits: WireLimits | undefined;
 }
 
 interface Payload {
@@ -143,7 +148,7 @@ export function useUploadProxy(routeOrOptions: any, maybeOptions?: any): any {
 
   // Empty unless the route is a handleProxyUpload one, which serves its limits from GET like every
   // other upload route: the picker is filled from the same list that does the refusing.
-  const { limitsRef, accept } = useLimits(route, options.headers);
+  const { limitsRef, limits, accept } = useLimits(route, options.headers);
 
   const { uploads, task, add, clear } = useTaskList<ProxyRecord<TResponse>>({
     concurrency: options.concurrency,
@@ -166,5 +171,5 @@ export function useUploadProxy(routeOrOptions: any, maybeOptions?: any): any {
     [add, route, limitsRef],
   );
 
-  return { start, uploads, upload: task, task, clear, accept };
+  return { start, uploads, upload: task, task, clear, accept, limits };
 }

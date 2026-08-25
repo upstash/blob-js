@@ -1,5 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
-import type { BlobObject, ProxyUploadResponse, UploadRoute, WireFile, WireLimits } from '../shared/types.ts';
+import type { BlobObject, ProxyUploadResponse, UploadFile, UploadRoute, WireLimits } from '../shared/types.ts';
 import { formatSize, type CacheOption, type Size } from '../shared/units.ts';
 import { type Bucket } from './bucket.ts';
 import { answerError, enforce, limitsEndpoint, resolveLimits, stateOf, validateInput, type StandardSchema, type UploadLimits } from './handle-upload.ts';
@@ -26,7 +26,7 @@ type ProxyInput<TSchema> = TSchema extends StandardSchema<any, any> ? InferOutpu
 
 export interface ProxyBeforeUploadArgs<TInput = undefined> {
   request: Request;
-  file: WireFile;
+  file: UploadFile;
   /** The `input` form field, parsed as JSON and validated. `undefined` on a route with no schema. */
   input: TInput;
 }
@@ -115,7 +115,7 @@ export function handleProxyUpload<TSchema extends StandardSchema<any, any> | und
       }
 
       const body = await readBody(request, field, routeLimits.maxBytes);
-      const file: WireFile = { name: body.name, type: normalizeType(body.type), size: body.size };
+      const file: UploadFile = { name: body.name, type: normalizeType(body.type), size: body.size };
       enforce(routeLimits, file);
 
       const input = (await validateInput(options.input, body.input)) as ProxyInput<TSchema>;

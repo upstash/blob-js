@@ -158,6 +158,21 @@ test('accept lands from the route GET', async () => {
   expect(calls[0]).toMatchObject({ url: route, method: 'GET' });
 });
 
+test('limits land from the route GET, so a page can state the cap it enforces', async () => {
+  const seen: (number | undefined)[] = [];
+  const hook = await render(() => {
+    const result = useUpload({ route });
+    seen.push(result.limits?.maxBytes);
+    return result;
+  });
+  // Undefined until the GET answers: nothing is guessed, so a page renders no number rather than a
+  // wrong one.
+  expect(seen[0]).toBeUndefined();
+  await flush();
+  expect(hook.current.limits).toEqual(LIMITS);
+  expect(hook.current.limits?.maxBytes).toBe(1000);
+});
+
 test('the cached limits expire, so a deploy that widens them reaches the picker', async () => {
   const realNow = clock.now;
   let t = 1_000_000;
