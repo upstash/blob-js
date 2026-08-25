@@ -72,6 +72,8 @@ class Task implements InternalTask {
   private inflight = new Map<number, InFlight>();
   private represigned = new Set<number>();
   private urlsMintedAt = 0;
+  /** Set for the stretch between the last byte and the answer from phase 'end'. */
+  private finishing = false;
   private paused = false;
   private resumeWaiters: (() => void)[] = [];
   private readonly cancelController = new AbortController();
@@ -119,6 +121,7 @@ class Task implements InternalTask {
       total,
       percent: this.status === 'done' ? 100 : total > 0 ? Math.min(99, Math.floor((loaded / total) * 100)) : 0,
       canPause: this.kind === 'multipart',
+      finishing: this.finishing && this.status === 'uploading',
       stalled: this.inflight.size > 0 && [...this.inflight.values()].every((f) => f.backingOff),
     };
     switch (this.status) {
@@ -248,6 +251,7 @@ class Task implements InternalTask {
 
   private async run(): Promise<BlobObject & { data: unknown }> {
     const signal = this.cancelController.signal;
+    this.finishing = false;
     if (this.token) {
       // A retry of an upload that already began: its presigns are stale and its parts are the
       // server's to report, so ask for fresh urls instead of beginning a second multipart.
@@ -274,6 +278,8 @@ class Task implements InternalTask {
     }
     if (signal.aborted) throw abortError();
 
+    this.finishing = true;
+    this.notify();
     const end = (await this.routeCall({ phase: 'end', completionToken: this.token, parts: landed }, signal)) as WireEndResponse;
     return { ...end.blob, uploadedAt: new Date(end.blob.uploadedAt), data: end.data };
   }
@@ -522,11 +528,16 @@ class Task implements InternalTask {
     let last: BlobError | undefined;
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (signal?.aborted) throw abortError();
+      // Outside the try on purpose. headers() is the app's own hook and is re-read per attempt, so a
+      // throw from it is how an app refuses its own upload -- a token it could not refresh, a
+      // precondition that failed. Caught below it would be reworded as a network fault and retried
+      // three times; here it ends the upload immediately carrying the app's error.
+      const authored = await resolveHeaders(this.options.headers);
       let res: Response;
       try {
         res = await fetch(this.options.route, {
           method: 'POST',
-          headers: { 'content-type': 'application/json', ...(await resolveHeaders(this.options.headers)) },
+          headers: { 'content-type': 'application/json', ...authored },
           body: JSON.stringify(body),
           signal,
         });

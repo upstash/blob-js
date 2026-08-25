@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { Bucket, BlobError, handleUpload } from '../../src/index.ts';
+import { Bucket, BlobError, handleProxyUpload, handleUpload } from '../../src/index.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { deriveRouteId } from '../../src/server/handle-upload.ts';
 import { encodeToken } from '../../src/server/token.ts';
@@ -492,5 +492,116 @@ describe('handleUpload', () => {
     expect(end.status).toBe(403);
     expect((await end.json()).code).toBe('signature_mismatch');
     expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'DELETE']);
+  });
+});
+
+describe('handleProxyUpload', () => {
+  // A real header: the magic, the IHDR length, then IHDR. put() sniffs, so 'looks like a png' is not enough.
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  const png = (name = 'a.png', bytes: Uint8Array = PNG) => new File([bytes as BlobPart], name, { type: 'image/png' });
+
+  function form(file: File): Request {
+    const body = new FormData();
+    body.append('file', file);
+    return new Request('https://app.test/api/avatar', { method: 'POST', body });
+  }
+
+  function route(extra: Record<string, unknown> = {}) {
+    return handleProxyUpload({
+      bucket: bucket(),
+      path: '/api/avatar',
+      limits: { allowedContentTypes: ['image/png'], maxBytes: '1mb' },
+      onBeforeUpload: () => ({ path: 'avatar/demo', metadata: { owner: 'demo' } }),
+      onUploadCompleted: ({ path, contentType, size }) => ({ row: path, contentType, size }),
+      ...extra,
+    });
+  }
+
+  test('it serves the same limits document a direct route does', async () => {
+    resetCredentialCaches();
+    const res = await route().GET(new Request('https://app.test/api/avatar'));
+    expect(await res.json()).toEqual({ limits: { allowedContentTypes: ['image/png'], maxBytes: 1_000_000 } });
+    expect(res.headers.get('cache-control')).toBe('public, max-age=60');
+  });
+
+  test('it stores the file and answers the envelope phase end answers with', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
+    const res = await route().POST(form(png()));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.blob.path).toBe('avatar/demo');
+    expect(typeof body.blob.uploadedAt).toBe('string');
+    expect(body.data).toEqual({ row: 'avatar/demo', contentType: 'image/png', size: PNG.byteLength });
+    expect(r2Calls().some((c) => c.method === 'PUT')).toBe(true);
+  });
+
+  test('bytes that do not prove their type are refused before anything is stored', async () => {
+    resetCredentialCaches();
+    const html = new File([new TextEncoder().encode('<html><script>x</script>') as BlobPart], 'a.png', { type: 'image/png' });
+    const res = await route().POST(form(html));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('content_type_not_allowed');
+    // The whole reason this handler exists: a stable path is not overwritten by a file it refused.
+    expect(r2Calls().some((c) => c.method === 'PUT')).toBe(false);
+  });
+
+  test('a declared content-length over the limit is refused before the body is read', async () => {
+    resetCredentialCaches();
+    const req = new Request('https://app.test/api/avatar', { method: 'POST', body: 'x', headers: { 'content-length': '9999999' } });
+    const res = await route().POST(req);
+    expect(res.status).toBe(413);
+    expect((await res.json()).code).toBe('too_large');
+  });
+
+  test('a file over the limit is refused on its own size', async () => {
+    resetCredentialCaches();
+    const big = new File([new Uint8Array(20) as BlobPart], 'a.png', { type: 'image/png' });
+    const res = await route({ limits: { allowedContentTypes: ['image/png'], maxBytes: 10 } }).POST(form(big));
+    expect(res.status).toBe(413);
+    expect((await res.json()).code).toBe('too_large');
+  });
+
+  test('a missing file field is invalid_input, not a 500', async () => {
+    resetCredentialCaches();
+    const res = await route().POST(new Request('https://app.test/api/avatar', { method: 'POST', body: new FormData() }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('invalid_input');
+  });
+
+  test('a raw body is accepted too, named from Content-Disposition', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
+    let seen: { name: string; type: string; size: number } | undefined;
+    const res = await handleProxyUpload({
+      bucket: bucket(),
+      limits: { allowedContentTypes: ['image/png'] },
+      onBeforeUpload: ({ file }) => {
+        seen = file;
+        return { path: 'avatar/raw' };
+      },
+    }).POST(
+      new Request('https://app.test/api/avatar', {
+        method: 'POST',
+        body: PNG as BlobPart,
+        headers: { 'content-type': 'image/png', 'content-disposition': 'attachment; filename="shot.png"' },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(seen).toEqual({ name: 'shot.png', type: 'image/png', size: PNG.byteLength });
+  });
+
+  // A TypeError, and it is rethrown rather than answered: widening is the app's bug, not the
+  // caller's, so the framework logs it instead of it becoming a 500 the browser has to interpret.
+  test('onBeforeUpload cannot widen the route limits', async () => {
+    resetCredentialCaches();
+    const widened = route({ onBeforeUpload: () => ({ path: 'avatar/demo', limits: { maxBytes: '5mb' } }) });
+    expect(widened.POST(form(png()))).rejects.toThrow(/widened maxBytes/);
+  });
+
+  test('the path separates two routes that declare identical limits', () => {
+    expect(deriveRouteId({ allowedContentTypes: undefined, maxBytes: 1 }, false, '/api/a')).not.toBe(
+      deriveRouteId({ allowedContentTypes: undefined, maxBytes: 1 }, false, '/api/b'),
+    );
   });
 });

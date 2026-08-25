@@ -1,14 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
-import { createTask, resolveHeaders, type HeadersProvider, type InternalTask } from '../browser/task.ts';
-import { BlobError } from '../shared/errors.ts';
-import type { BlobObject, UploadRoute, UploadRouteTypes, WireLimits } from '../shared/types.ts';
+import { createTask, type HeadersProvider, type InternalTask } from '../browser/task.ts';
+import type { BlobError } from '../shared/errors.ts';
+import type { BlobObject, UploadRoute, UploadRouteTypes } from '../shared/types.ts';
+import { deny, useLimits } from './limits.ts';
 import { useTaskList, type ListEntry } from './task-list.ts';
 
 /** The input schema of a handleUpload POST handler, or undefined when it has none. */
 export type RouteInput<R> = R extends { readonly __types?: UploadRouteTypes<infer TInput, any> } ? TInput : undefined;
 /** What onUploadCompleted returned, which reaches the browser as blob.data. */
 export type RouteData<R> = R extends { readonly __types?: UploadRouteTypes<any, infer TData> } ? TData : unknown;
+/**
+ * The path the route was declared with, so `route` cannot name one endpoint while the handler type
+ * describes another. A route that did not declare a path types as plain string, as before.
+ */
+export type RoutePath<R> = R extends UploadRoute<any, any, infer TPath> ? (string extends TPath ? string : TPath) : string;
 
 export interface UploadRecordBase {
   readonly id: string;
@@ -22,6 +28,8 @@ export interface UploadRecordBase {
   total: number;
   percent: number;
   canPause: boolean;
+  /** Every byte is sent and the route is completing the upload. percent sits at 99 here. */
+  finishing: boolean;
   /** Every in-flight part is waiting on a backoff. */
   stalled: boolean;
 }
@@ -43,8 +51,11 @@ export interface UploadStart<TInput, TData> {
 }
 
 export interface UseUploadOptions<R> {
-  route: string;
-  /** A function is re-read per call to the route, so a rotated JWT still ends the upload. */
+  route: RoutePath<R>;
+  /**
+   * A function is re-read per call to the route, so a rotated JWT still ends the upload. A throw
+   * from it ends the upload carrying that error, which is how an app refuses its own upload.
+   */
   headers?: HeadersProvider;
   /** Files in flight. The rest queue. */
   concurrency?: number;
@@ -67,62 +78,7 @@ interface AnyStartArgs {
   input?: unknown;
 }
 
-// The route serves its limits with max-age=60. A cache that never expired outlived the deploy that
-// changed them, so the picker went on refusing files the route had started accepting.
-const LIMITS_TTL_MS = 60_000;
-const limitsCache = new Map<string, { limits: WireLimits; at: number }>();
-const limitsInFlight = new Map<string, Promise<WireLimits | undefined>>();
-
-function cachedLimits(route: string): WireLimits | undefined {
-  const entry = limitsCache.get(route);
-  if (!entry) return undefined;
-  if (clock.now() - entry.at > LIMITS_TTL_MS) {
-    limitsCache.delete(route);
-    return undefined;
-  }
-  return entry.limits;
-}
-
 let staticCounter = 0;
-
-async function loadLimits(route: string, headers: HeadersProvider | undefined): Promise<WireLimits | undefined> {
-  const cached = cachedLimits(route);
-  if (cached) return cached;
-  let pending = limitsInFlight.get(route);
-  if (!pending) {
-    pending = (async () => {
-      try {
-        const res = await fetch(route, { headers: await resolveHeaders(headers) });
-        if (!res.ok) return undefined;
-        const body = (await res.json()) as { limits?: WireLimits } | undefined;
-        const limits = body?.limits;
-        if (!limits || typeof limits !== 'object') return undefined;
-        limitsCache.set(route, { limits, at: clock.now() });
-        return limits;
-      } catch {
-        // A route that will not say what it allows still uploads; the picker just has no accept.
-        return undefined;
-      } finally {
-        limitsInFlight.delete(route);
-      }
-    })();
-    limitsInFlight.set(route, pending);
-  }
-  return pending;
-}
-
-function acceptOf(limits: WireLimits | undefined): string {
-  return limits?.allowedContentTypes?.join(',') ?? '';
-}
-
-// Size only. accept carries the types, and the route canonicalises aliases before comparing
-// (image/jpg is image/jpeg), so a type check against the served list refuses files it accepts.
-function deny(file: File, limits: WireLimits | undefined): BlobError | undefined {
-  if (limits?.maxBytes !== undefined && file.size > limits.maxBytes) {
-    return new BlobError('too_large', { message: `${file.name} is ${file.size} bytes, over the limit of ${limits.maxBytes}` });
-  }
-  return undefined;
-}
 
 function taskEntry<TData>(task: InternalTask): ListEntry<UploadRecord<TData>> {
   const pause = () => task.pause();
@@ -153,6 +109,7 @@ function refusedEntry<TData>(file: File, error: BlobError): ListEntry<UploadReco
     total: file.size,
     percent: 0,
     canPause: false,
+    finishing: false,
     stalled: false,
     status: 'error',
     error,
@@ -166,24 +123,17 @@ function refusedEntry<TData>(file: File, error: BlobError): ListEntry<UploadReco
   };
 }
 
-function entryFor<TData>(file: File, input: unknown, route: string, headers: HeadersProvider | undefined, limits: WireLimits | undefined): ListEntry<UploadRecord<TData>> {
-  const refusal = deny(file, limits);
-  if (refusal) return refusedEntry<TData>(file, refusal);
-  return taskEntry<TData>(createTask(file, { route, headers, input }, false));
-}
-
 /** Browser uploads straight to R2 through a handleUpload route. Three requests, bytes to storage. */
-export function useUpload<R extends UploadRoute<any, any> = UploadRoute<undefined, unknown>>(options: UseUploadOptions<R>): UseUploadResult<R> {
+export function useUpload<R extends UploadRoute<any, any, any> = UploadRoute<undefined, unknown>>(options: UseUploadOptions<R>): UseUploadResult<R> {
   type TData = RouteData<R>;
-  const { route } = options;
+  const route = options.route as string;
 
   const headersRef = useRef<HeadersProvider | undefined>(options.headers);
   headersRef.current = options.headers;
   const handlers = useRef(options);
   handlers.current = options;
 
-  const limitsRef = useRef<WireLimits | undefined>(cachedLimits(route));
-  const [accept, setAccept] = useState(() => acceptOf(cachedLimits(route)));
+  const { limitsRef, accept } = useLimits(route, options.headers);
 
   const { uploads, task, add, clear } = useTaskList<UploadRecord<TData>>({
     concurrency: options.concurrency,
@@ -195,30 +145,19 @@ export function useUpload<R extends UploadRoute<any, any> = UploadRoute<undefine
     },
   });
 
-  useEffect(() => {
-    let alive = true;
-    limitsRef.current = cachedLimits(route);
-    setAccept(acceptOf(limitsRef.current));
-    void loadLimits(route, headersRef.current).then((limits) => {
-      if (!alive || !limits) return;
-      limitsRef.current = limits;
-      setAccept(acceptOf(limits));
-    });
-    return () => {
-      alive = false;
-    };
-  }, [route]);
-
   const start = useCallback(
     (args: AnyStartArgs) => {
       const input = args.input;
-      const make = (file: File) => entryFor<TData>(file, input, route, headersRef.current, limitsRef.current);
+      const make = (file: File) => {
+        const refusal = deny(file, limitsRef.current);
+        return refusal ? refusedEntry<TData>(file, refusal) : taskEntry<TData>(createTask(file, { route, headers: headersRef.current, input }, false));
+      };
       if ('files' in args) return add(args.files ? Array.from(args.files).map(make) : []);
       const file = args.file;
       if (!file) return null;
       return add([make(file)])[0] ?? null;
     },
-    [add, route],
+    [add, route, limitsRef],
   ) as UploadStart<RouteInput<R>, TData>;
 
   return { start, uploads, task, clear, accept };

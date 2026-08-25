@@ -30,6 +30,17 @@ type Status = 'queued' | 'uploading' | 'done' | 'canceled' | 'error';
 
 let counter = 0;
 
+/**
+ * uploadedAt crosses the wire as an ISO string. Reviving it here is what makes a proxied upload's
+ * blob the same shape as a direct one's, so the two hooks stay interchangeable. Guarded on the exact
+ * envelope handleProxyUpload writes; any other response body is handed back untouched.
+ */
+function revive(json: unknown): unknown {
+  const body = json as { blob?: { uploadedAt?: unknown } } | null | undefined;
+  if (typeof body !== 'object' || body === null || typeof body.blob?.uploadedAt !== 'string') return json;
+  return { ...body, blob: { ...body.blob, uploadedAt: new Date(body.blob.uploadedAt) } };
+}
+
 /** One POST to a route you wrote: no begin, no end, no pause. Observable, and free of React. */
 export class ProxyTask<TResponse = unknown> {
   readonly id = `p${++counter}-${clock.now().toString(36)}`;
@@ -104,13 +115,22 @@ export class ProxyTask<TResponse = unknown> {
   private async run(): Promise<void> {
     this.status = 'uploading';
     this.notify();
+    let authored: Record<string, string>;
+    try {
+      // The app's own hook. A throw from it ends the upload carrying that error, rather than being
+      // reworded below as a route that could not be reached.
+      authored = await resolveHeaders(this.options.headers);
+    } catch (e) {
+      this.fail(BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), status: 400, cause: e }));
+      return;
+    }
     let res: XhrResponse;
     try {
       res = await sendXhr({
         method: 'POST',
         url: this.options.route,
         // No content-type: the browser writes the multipart boundary, or the Blob's own type.
-        headers: await resolveHeaders(this.options.headers),
+        headers: authored,
         body: this.options.body,
         signal: this.controller.signal,
         onUploadProgress: (loaded, total) => {
@@ -139,9 +159,16 @@ export class ProxyTask<TResponse = unknown> {
       json = undefined;
     }
     if (res.status >= 200 && res.status < 300) {
-      this.response = json as TResponse;
+      this.response = revive(json) as TResponse;
       this.status = 'done';
       this.notify();
+      return;
+    }
+    // A route that answered with BlobError.toJSON() keeps its code, so callers can switch on
+    // error.code instead of matching status numbers and message text.
+    const authoredError = BlobError.fromJSON(json, res.status);
+    if (authoredError) {
+      this.fail(authoredError);
       return;
     }
     // The platform rejected the body before your route ran, so the 413 carries no code of its own.

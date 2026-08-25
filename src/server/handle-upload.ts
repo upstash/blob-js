@@ -58,13 +58,19 @@ export interface UploadCompletedArgs<TContext> extends BlobObject {
   context: TContext;
 }
 
-export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | undefined, TContext, TData> {
+export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | undefined, TContext, TData, TPath extends string = string> {
   bucket: Bucket;
   /**
+   * The URL this route is mounted at. `route` on the hooks is typed to it, so naming one endpoint
+   * while importing another's handler type stops compiling. It also separates two routes that
+   * declare identical limits, which is what `id` otherwise has to do by hand.
+   */
+  path?: TPath;
+  /**
    * Which route a completion token belongs to. Two routes on one bucket sign with the same key, so
-   * without this a token minted by one is spendable at the other. Derived from the route's limits
-   * and whether it takes input when omitted, which collides when two routes declare the same ones:
-   * name them then.
+   * without this a token minted by one is spendable at the other. Derived from the route's path,
+   * limits and whether it takes input when omitted, which collides only when two routes declare all
+   * three the same: name them then.
    */
   id?: string;
   limits?: UploadLimits;
@@ -84,9 +90,9 @@ export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | 
   onError?: (error: unknown, request: Request) => BlobError | Response | void | Promise<BlobError | Response | void>;
 }
 
-export interface UploadHandlers<TInput, TData> {
+export interface UploadHandlers<TInput, TData, TPath extends string = string> {
   GET: (request: Request) => Promise<Response>;
-  POST: UploadRoute<TInput, TData>;
+  POST: UploadRoute<TInput, TData, TPath>;
 }
 
 const PARTS_PER_BATCH = 16;
@@ -98,25 +104,13 @@ const PRESIGN_MIN_REMAINING_SECONDS = 120;
 const TOKEN_TTL_MS = 7 * 86_400_000;
 const LIMITS_MAX_AGE = 60;
 
-export function handleUpload<TSchema extends StandardSchema<any, any> | undefined = undefined, TContext = undefined, TData = void>(
-  options: HandleUploadOptions<TSchema, TContext, TData>,
-): UploadHandlers<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : undefined, TData> {
+export function handleUpload<TSchema extends StandardSchema<any, any> | undefined = undefined, TContext = undefined, TData = void, TPath extends string = string>(
+  options: HandleUploadOptions<TSchema, TContext, TData, TPath>,
+): UploadHandlers<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : undefined, TData, TPath> {
   const r2 = r2Of(options.bucket);
   const routeLimits = resolveLimits(options.limits);
-  const wireLimits: WireLimits = {};
-  if (routeLimits.allowedContentTypes) wireLimits.allowedContentTypes = routeLimits.allowedContentTypes;
-  if (routeLimits.maxBytes !== undefined) wireLimits.maxBytes = routeLimits.maxBytes;
-  const routeId = options.id ?? deriveRouteId(routeLimits, options.input !== undefined);
-  const limitsBody = JSON.stringify({ limits: wireLimits });
-  const limitsEtag = `"${hash(limitsBody)}"`;
-
-  // Short and revalidated, not immutable: the limits are the route's own code and change with a
-  // deploy, and a client that cached them forever refuses files the route now accepts.
-  const GET = async (request: Request): Promise<Response> => {
-    const headers = { 'content-type': 'application/json', 'cache-control': `public, max-age=${LIMITS_MAX_AGE}`, etag: limitsEtag };
-    if (request?.headers?.get('if-none-match') === limitsEtag) return new Response(null, { status: 304, headers });
-    return new Response(limitsBody, { headers });
-  };
+  const routeId = options.id ?? deriveRouteId(routeLimits, options.input !== undefined, options.path);
+  const GET = limitsEndpoint(routeLimits);
 
   const POST = async (request: Request): Promise<Response> => {
     try {
@@ -135,19 +129,7 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
           throw new BlobError('invalid_input', { message: `unknown phase ${String(body.phase)}` });
       }
     } catch (e) {
-      if (BlobError.is(e)) return Response.json(e.toJSON(), { status: e.status });
-      if (options.onError) {
-        const mapped = await options.onError(e, request);
-        if (mapped instanceof Response) return mapped;
-        if (BlobError.is(mapped)) return Response.json(mapped.toJSON(), { status: mapped.status });
-      }
-      const status = statusOf(e);
-      if (status !== undefined) {
-        const err = new BlobError('request_failed', { message: messageOf(e), status });
-        return Response.json(err.toJSON(), { status });
-      }
-      // Anything else is the app's bug: let the framework log it rather than mask it as a 500.
-      throw e;
+      return await answerError(e, request, options.onError);
     }
   };
 
@@ -346,22 +328,60 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
     return out;
   }
 
-  return { GET, POST: POST as UploadRoute<any, TData> };
+  return { GET, POST: POST as UploadRoute<any, TData, TPath> };
 }
 
-interface ResolvedLimits {
+/**
+ * Every refusal leaves a route as BlobError.toJSON(), so the browser rebuilds it with its code
+ * intact and callers switch on error.code instead of reading status numbers and message text.
+ */
+export async function answerError(e: unknown, request: Request, onError: ((error: unknown, request: Request) => BlobError | Response | void | Promise<BlobError | Response | void>) | undefined): Promise<Response> {
+  if (BlobError.is(e)) return Response.json(e.toJSON(), { status: e.status });
+  if (onError) {
+    const mapped = await onError(e, request);
+    if (mapped instanceof Response) return mapped;
+    if (BlobError.is(mapped)) return Response.json(mapped.toJSON(), { status: mapped.status });
+  }
+  const status = statusOf(e);
+  if (status !== undefined) {
+    const err = new BlobError('request_failed', { message: messageOf(e), status });
+    return Response.json(err.toJSON(), { status });
+  }
+  // Anything else is the app's bug: let the framework log it rather than mask it as a 500.
+  throw e;
+}
+
+/**
+ * GET on an upload route: what it accepts, so a file picker is filled from the same list that does
+ * the refusing. Short and revalidated, not immutable -- the limits are the route's own code and
+ * change with a deploy, and a client that cached them forever refuses files the route now accepts.
+ */
+export function limitsEndpoint(routeLimits: ResolvedLimits): (request: Request) => Promise<Response> {
+  const wireLimits: WireLimits = {};
+  if (routeLimits.allowedContentTypes) wireLimits.allowedContentTypes = routeLimits.allowedContentTypes;
+  if (routeLimits.maxBytes !== undefined) wireLimits.maxBytes = routeLimits.maxBytes;
+  const body = JSON.stringify({ limits: wireLimits });
+  const etag = `"${hash(body)}"`;
+  return async (request: Request): Promise<Response> => {
+    const headers = { 'content-type': 'application/json', 'cache-control': `public, max-age=${LIMITS_MAX_AGE}`, etag };
+    if (request?.headers?.get('if-none-match') === etag) return new Response(null, { status: 304, headers });
+    return new Response(body, { headers });
+  };
+}
+
+export interface ResolvedLimits {
   allowedContentTypes: string[] | undefined;
   maxBytes: number | undefined;
 }
 
-function resolveLimits(limits: UploadLimits | undefined): ResolvedLimits {
+export function resolveLimits(limits: UploadLimits | undefined): ResolvedLimits {
   return {
     allowedContentTypes: limits?.allowedContentTypes === undefined ? undefined : expandContentTypes(limits.allowedContentTypes),
     maxBytes: limits?.maxBytes === undefined ? undefined : parseSize(limits.maxBytes, 'maxBytes'),
   };
 }
 
-function enforce(limits: ResolvedLimits, file: WireFile): void {
+export function enforce(limits: ResolvedLimits, file: WireFile): void {
   if (limits.maxBytes !== undefined && file.size > limits.maxBytes) {
     throw new BlobError('too_large', { message: `${file.name} is ${file.size} bytes, over the limit of ${limits.maxBytes}` });
   }
@@ -388,8 +408,8 @@ function messageOf(e: unknown): string {
   return typeof m === 'string' && m ? m : 'request failed';
 }
 
-export function deriveRouteId(limits: { allowedContentTypes: string[] | undefined; maxBytes: number | undefined }, hasInput: boolean): string {
-  return hash(JSON.stringify([limits.allowedContentTypes ?? null, limits.maxBytes ?? null, hasInput]));
+export function deriveRouteId(limits: { allowedContentTypes: string[] | undefined; maxBytes: number | undefined }, hasInput: boolean, path?: string): string {
+  return hash(JSON.stringify([path ?? null, limits.allowedContentTypes ?? null, limits.maxBytes ?? null, hasInput]));
 }
 
 /** FNV-1a. Not a security boundary: the token's MAC is. This only separates routes and versions a body. */

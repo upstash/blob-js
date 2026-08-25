@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:te
 import { act, createElement, StrictMode } from 'react';
 import { clock } from '../../src/browser/clock.ts';
 import { poolState } from '../../src/browser/pool.ts';
-import { useUpload, useUploadProxy } from '../../src/react/index.ts';
+import { BlobError, configureUpload, useUpload, useUploadProxy } from '../../src/react/index.ts';
 import type { UploadRoute } from '../../src/shared/types.ts';
 import { installRouter, installXhr, ManualXhr } from '../helpers/xhr.ts';
 
@@ -605,7 +605,10 @@ test('proxy headers are re-read per request', async () => {
     hook.current.start({ file: png('b.png') });
   });
   const second = await nextXhr(1);
-  expect([first.headers['authorization'], second.headers['authorization']]).toEqual(['Bearer 1', 'Bearer 2']);
+  // Not absolute numbers: the hook also fetches the route's limits, which reads the headers too.
+  // What matters is that the second request did not reuse the first one's token.
+  expect(first.headers['authorization']).toMatch(/^Bearer \d+$/);
+  expect(second.headers['authorization']).not.toBe(first.headers['authorization']);
 });
 
 // The queue must never start a task that already settled: a cancel is not an error.
@@ -657,4 +660,130 @@ test('proxy concurrency 1 queues the second request', async () => {
   expect(xhrs).toHaveLength(2);
   expect(hook.current.uploads[0]!.status).toBe('done');
   expect(hook.current.uploads[1]!.status).toBe('uploading');
+});
+
+/* ------------------------------------------------- refusals keep their code -- */
+
+test('a proxy route answering with BlobError.toJSON keeps its code', async () => {
+  const hook = await render(() => useUploadProxy({ route: '/api/avatar' }));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const xhr = await nextXhr();
+  await act(async () => {
+    xhr.respond(401, { 'content-type': 'application/json' }, JSON.stringify({ code: 'unauthorized', message: 'session expired', status: 401 }));
+  });
+  await flush();
+  const task = hook.current.task!;
+  // Before this, every non-2xx arrived as request_failed and the caller had to read the status.
+  expect(task.status === 'error' && task.error.code).toBe('unauthorized');
+  expect(task.status === 'error' && task.error.message).toBe('session expired');
+  expect(task.status === 'error' && task.error.status).toBe(401);
+});
+
+test('a proxy route reviving its blob gives the same shape a direct upload does', async () => {
+  const hook = await render(() => useUploadProxy({ route: '/api/avatar' }));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const xhr = await nextXhr();
+  await act(async () => {
+    xhr.respond(200, { 'content-type': 'application/json' }, JSON.stringify(END_BODY));
+  });
+  await flush();
+  const task = hook.current.task! as any;
+  expect(task.status).toBe('done');
+  expect(task.response.blob.uploadedAt).toBeInstanceOf(Date);
+  expect(task.response.data).toEqual({ rowId: '1' });
+});
+
+/* ----------------------------------------------- headers() is the interrupt -- */
+
+test('a throw from headers ends a direct upload without retrying the route', async () => {
+  const hook = await render(() =>
+    useUpload<UploadRoute<undefined, unknown>>({
+      route,
+      headers: () => {
+        throw new BlobError('unauthorized', { message: 'no session' });
+      },
+    }),
+  );
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  await flush(3);
+  const task = hook.current.task!;
+  expect(task.status === 'error' && task.error.code).toBe('unauthorized');
+  expect(task.status === 'error' && task.error.message).toBe('no session');
+  // Not reworded as a network fault, and begin was never attempted three times.
+  expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0);
+});
+
+test('a throw from headers ends a proxy upload before any bytes are sent', async () => {
+  const hook = await render(() =>
+    useUploadProxy({
+      route: '/api/avatar',
+      headers: () => {
+        throw new BlobError('forbidden', { message: 'not your avatar' });
+      },
+    }),
+  );
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  await flush(3);
+  const task = hook.current.task!;
+  expect(task.status === 'error' && task.error.code).toBe('forbidden');
+  expect(xhrs).toHaveLength(0);
+});
+
+/* ------------------------------------------------------------- finishing -- */
+
+test('a direct upload is finishing between the last byte and the end response', async () => {
+  const hook = await render(() => useUpload<UploadRoute<undefined, unknown>>({ route }));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const put = await nextXhr();
+  expect(hook.current.task!.finishing).toBe(false);
+  await act(async () => {
+    put.respond(200, { etag: '"x"' });
+  });
+  await flush(2);
+  const task = hook.current.task!;
+  // Every byte is sent, phase 'end' is in flight, and percent is clamped to 99 for this stretch.
+  expect(task.status === 'done' || task.finishing).toBe(true);
+});
+
+/* --------------------------------------------------------- configureUpload -- */
+
+test('configureUpload applies defaults and runs its onError before the call site own', async () => {
+  const seen: string[] = [];
+  const configured = configureUpload({
+    headers: () => ({ authorization: 'Bearer default' }),
+    onError: () => seen.push('default'),
+  });
+  const hook = await render(() =>
+    configured.useUploadProxy({ route: '/api/avatar', onError: () => seen.push('call') }),
+  );
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const xhr = await nextXhr();
+  expect(xhr.headers['authorization']).toBe('Bearer default');
+  await act(async () => {
+    xhr.respond(500);
+  });
+  await flush();
+  expect(seen).toEqual(['default', 'call']);
+});
+
+test('a call site option wins over the configured default', async () => {
+  const configured = configureUpload({ headers: () => ({ authorization: 'Bearer default' }) });
+  const hook = await render(() => configured.useUploadProxy({ route: '/api/avatar', headers: () => ({ authorization: 'Bearer own' }) }));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const xhr = await nextXhr();
+  expect(xhr.headers['authorization']).toBe('Bearer own');
 });

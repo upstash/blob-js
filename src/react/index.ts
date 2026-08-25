@@ -1,7 +1,9 @@
 export { useUpload } from './use-upload.ts';
-export type { DoneUpload, FailedUpload, RouteData, RouteInput, UploadRecord, UploadRecordBase, UploadStart, UseUploadOptions, UseUploadResult } from './use-upload.ts';
+export type { DoneUpload, FailedUpload, RouteData, RouteInput, RoutePath, UploadRecord, UploadRecordBase, UploadStart, UseUploadOptions, UseUploadResult } from './use-upload.ts';
 export { useUploadProxy } from './use-upload-proxy.ts';
-export type { DoneProxyUpload, FailedProxyUpload, ProxyRecord, ProxyRecordBase, ProxyStartArgs, UseUploadProxyOptions, UseUploadProxyResult } from './use-upload-proxy.ts';
+export type { DoneProxyUpload, FailedProxyUpload, ProxyRecord, ProxyRecordBase, ProxyResponse, ProxyStartArgs, UseUploadProxyOptions, UseUploadProxyResult } from './use-upload-proxy.ts';
+export { configureUpload } from './configure.ts';
+export type { FailedAnyUpload, UploadDefaults } from './configure.ts';
 export type { ProxySnapshot } from './proxy-task.ts';
 export { BlobError } from '../shared/errors.ts';
 export type { BlobErrorCode } from '../shared/errors.ts';

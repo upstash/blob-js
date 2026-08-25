@@ -75,6 +75,12 @@ export type UploadSnapshot = {
   total: number;
   percent: number;
   canPause: boolean;
+  /**
+   * Every byte is sent and phase 'end' is completing the upload: sniffing it, recording it, running
+   * onUploadCompleted. percent sits at 99 for exactly this stretch, and naming it is the difference
+   * between a bar that is working and one that looks stuck.
+   */
+  finishing: boolean;
   /** Every in-flight part is waiting on a backoff. */
   stalled: boolean;
 } & (
@@ -103,6 +109,11 @@ export interface UploadRouteTypes<TInput, TData> {
   data: TData;
 }
 
-export type UploadRoute<TInput = unknown, TData = unknown> = ((request: Request) => Promise<Response>) & {
+/**
+ * The route's own URL, when handleUpload was told it. `route` on the hooks is typed to this literal,
+ * so pairing one route's path with another route's handler type stops compiling.
+ */
+export type UploadRoute<TInput = unknown, TData = unknown, TPath extends string = string> = ((request: Request) => Promise<Response>) & {
   readonly __types?: UploadRouteTypes<TInput, TData>;
+  readonly __path?: TPath;
 };

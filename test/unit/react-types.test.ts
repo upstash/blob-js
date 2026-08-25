@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import * as z from 'zod';
-import { handleUpload, type Bucket } from '../../src/index.ts';
-import { useUpload, useUploadProxy } from '../../src/react/index.ts';
+import { handleProxyUpload, handleUpload, type Bucket } from '../../src/index.ts';
+import { configureUpload, useUpload, useUploadProxy } from '../../src/react/index.ts';
 
 // Compile-only. Nothing below the route definitions ever runs: the @ts-expect-error lines are the
 // assertions, and a signature that stops being wrong fails the build.
@@ -82,6 +82,65 @@ function _proxy(file: File) {
     const url: string = task.response.url;
     void url;
   }
+}
+
+/* -------------------------------------------- route strings match handlers -- */
+
+function _pathBound(bucket: Bucket) {
+  return handleUpload({
+    bucket,
+    path: '/api/upload/attachments',
+    limits: { maxBytes: '20mb' },
+    onBeforeUpload: async () => ({ path: 'a/1' }),
+    onUploadCompleted: async () => ({ rowId: 'r1' }),
+  });
+}
+type BoundPost = ReturnType<typeof _pathBound>['POST'];
+
+function _avatarRoutes(bucket: Bucket) {
+  return handleProxyUpload({
+    bucket,
+    path: '/api/avatar',
+    limits: { allowedContentTypes: ['image/png'], maxBytes: '2mb' },
+    onBeforeUpload: () => ({ path: 'avatar/demo', context: { owner: 'demo' } }),
+    onUploadCompleted: ({ context }) => ({ owner: context.owner }),
+  });
+}
+type AvatarPost = ReturnType<typeof _avatarRoutes>['POST'];
+
+function _routeStrings(file: File) {
+  useUpload<BoundPost>({ route: '/api/upload/attachments' });
+  // @ts-expect-error the handler declared a different path
+  useUpload<BoundPost>({ route: '/api/upload/large' });
+  // A route with no declared path stays a plain string, as before.
+  useUpload<LargePost>({ route: '/anything' });
+
+  const { start, task, accept } = useUploadProxy<AvatarPost>({ route: '/api/avatar' });
+  const list: string = accept;
+  void list;
+  start({ file });
+
+  // @ts-expect-error the handler declared a different path
+  useUploadProxy<AvatarPost>({ route: '/api/upload' });
+
+  if (task?.status === 'done') {
+    // The same envelope a direct upload lands in: a revived blob, plus what onUploadCompleted returned.
+    const owner: string = task.response.data.owner;
+    const size: number = task.response.blob.size;
+    const at: Date = task.response.blob.uploadedAt;
+    void [owner, size, at];
+  }
+}
+
+function _configured(file: File) {
+  const { useUpload: bound, useUploadProxy: boundProxy } = configureUpload({
+    headers: () => ({ authorization: 'Bearer x' }),
+    onError: ({ error }) => void error.code,
+  });
+  bound<BoundPost>({ route: '/api/upload/attachments' }).start({ file });
+  boundProxy<AvatarPost>({ route: '/api/avatar' }).start({ file });
+  // @ts-expect-error the wrapped hooks keep the path check
+  bound<BoundPost>({ route: '/nope' });
 }
 
 test('the react hook types compile', () => {
