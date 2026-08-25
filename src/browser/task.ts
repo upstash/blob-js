@@ -120,7 +120,7 @@ class Task implements InternalTask {
       loaded,
       total,
       percent: this.status === 'done' ? 100 : total > 0 ? Math.min(99, Math.floor((loaded / total) * 100)) : 0,
-      canPause: this.kind === 'multipart',
+      canPause: this.kind === 'multipart' && !this.finishing,
       finishing: this.finishing && this.status === 'uploading',
       stalled: this.inflight.size > 0 && [...this.inflight.values()].every((f) => f.backingOff),
     };
@@ -164,7 +164,9 @@ class Task implements InternalTask {
   // (parked on a backoff, or waiting for a pool slot) is dropped and re-queued. Aborting all four
   // threw away up to a part each and snapped the bar to zero.
   pause(): boolean {
-    if (this.kind !== 'multipart' || this.status !== 'uploading' || this.paused) return false;
+    // Not once finishing: every part has landed and phase 'end' is running, so there is nothing left
+    // to hold back. Pausing there only mislabelled an upload that went on to complete anyway.
+    if (this.kind !== 'multipart' || this.status !== 'uploading' || this.paused || this.finishing) return false;
     this.paused = true;
     this.status = 'paused';
     for (const f of this.inflight.values()) if (f.loaded === 0) f.controller.abort();

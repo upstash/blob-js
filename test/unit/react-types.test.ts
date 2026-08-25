@@ -124,10 +124,11 @@ function _routeStrings(file: File) {
   useUploadProxy<AvatarPost>({ route: '/api/upload' });
 
   if (task?.status === 'done') {
-    // The same envelope a direct upload lands in: a revived blob, plus what onUploadCompleted returned.
+    // The route's envelope: what onUploadCompleted returned, plus the stored object as JSON.
     const owner: string = task.response.data.owner;
     const size: number = task.response.blob.size;
-    const at: Date = task.response.blob.uploadedAt;
+    // A string, not a Date: this is the JSON the route wrote, handed back untouched.
+    const at: string = task.response.blob.uploadedAt;
     void [owner, size, at];
   }
 }
@@ -141,6 +142,21 @@ function _configured(file: File) {
   boundProxy<AvatarPost>({ route: '/api/avatar' }).start({ file });
   // @ts-expect-error the wrapped hooks keep the path check
   bound<BoundPost>({ route: '/nope' });
+}
+
+// A route the app wrote itself is not a handleProxyUpload route, whatever its call signature.
+async function _plainRoute(request: Request): Promise<Response> {
+  void request;
+  return Response.json({ file: { id: 'r1' } });
+}
+
+function _plainProxy() {
+  const { task } = useUploadProxy<typeof _plainRoute>({ route: '/api/whatever' });
+  if (task?.status === 'done') {
+    // Handed back as written. It must NOT be narrowed to the SDK's { blob, data } envelope.
+    const fn: typeof _plainRoute = task.response;
+    void fn;
+  }
 }
 
 test('the react hook types compile', () => {

@@ -591,6 +591,103 @@ describe('handleProxyUpload', () => {
     expect(seen).toEqual({ name: 'shot.png', type: 'image/png', size: PNG.byteLength });
   });
 
+  // The bug this replaced: narrowing only maxBytes replaced the resolved limits wholesale, so
+  // allowedContentTypes went undefined, put() skipped the sniff, and html-as-png landed at the
+  // stable avatar path with a 200.
+  test('narrowing one limit keeps the other, so the byte sniff survives', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
+    const narrowed = route({ onBeforeUpload: () => ({ path: 'avatar/demo', limits: { maxBytes: '500kb' } }) });
+    const html = new File([new TextEncoder().encode('<html><script>pwn</script>') as BlobPart], 'a.png', { type: 'image/png' });
+    const res = await narrowed.POST(form(html));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('content_type_not_allowed');
+    expect(r2Calls().some((c) => c.method === 'PUT')).toBe(false);
+    // And the narrowed maxBytes still applies.
+    const big = new File([new Uint8Array(600_000) as BlobPart], 'a.png', { type: 'image/png' });
+    expect((await narrowed.POST(form(big))).status).toBe(413);
+  });
+
+  // content-length for a multipart POST is the file plus a boundary and part headers, so comparing
+  // it to maxBytes refused a file that was exactly at the limit.
+  test('a file exactly at the limit is not refused by its multipart envelope', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
+    const exact = new Uint8Array(2000);
+    exact.set(PNG, 0);
+    const at = new File([exact as BlobPart], 'photo.png', { type: 'image/png' });
+    const req = form(at);
+    const declared = (await req.clone().arrayBuffer()).byteLength;
+    // The envelope really is bigger than the file, or this test proves nothing.
+    expect(declared).toBeGreaterThan(2000);
+    expect((await route({ limits: { allowedContentTypes: ['image/png'], maxBytes: 2000 } }).POST(req)).status).toBe(200);
+  });
+
+  test('a body over the limit even allowing for the envelope is refused before it is read', async () => {
+    resetCredentialCaches();
+    const req = new Request('https://app.test/api/avatar', {
+      method: 'POST',
+      body: 'x',
+      headers: { 'content-type': 'multipart/form-data; boundary=b', 'content-length': '9999999' },
+    });
+    expect((await route().POST(req)).status).toBe(413);
+  });
+
+  test('a percent in a raw body filename is a name, not a URIError', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
+    let seen = '';
+    const r = handleProxyUpload({
+      bucket: bucket(),
+      limits: { allowedContentTypes: ['image/png'] },
+      onBeforeUpload: ({ file }) => {
+        seen = file.name;
+        return { path: 'x/1' };
+      },
+    });
+    const res = await r.POST(
+      new Request('https://app.test/api/avatar', {
+        method: 'POST',
+        body: PNG as BlobPart,
+        headers: { 'content-type': 'image/png', 'content-disposition': 'attachment; filename="100%.png"' },
+      }),
+    );
+    // Before this it threw URIError out of the handler and the framework answered a 500.
+    expect(res.status).toBe(200);
+    expect(seen).toBe('100%.png');
+  });
+
+  test('a Multipart/Form-Data header is still a multipart body', async () => {
+    resetCredentialCaches();
+    const req = form(png());
+    const upper = new Request('https://app.test/api/avatar', {
+      method: 'POST',
+      body: req.body,
+      duplex: 'half',
+      headers: { 'content-type': req.headers.get('content-type')!.replace('multipart/form-data', 'Multipart/Form-Data') },
+    } as RequestInit);
+    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
+    const res = await route().POST(upper);
+    // It takes the multipart branch now. The runtime's own formData() is what refuses an upper-case
+    // boundary header, and being refused as a form is the point: the raw branch would have stored
+    // the whole multipart envelope, boundary and part headers included, as the object.
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('invalid_input');
+    expect(r2Calls().some((c) => c.method === 'PUT')).toBe(false);
+  });
+
+  test('the field option names the form field', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
+    const r = route({ field: 'avatar' });
+    const body = new FormData();
+    body.append('avatar', png());
+    expect((await r.POST(new Request('https://app.test/api/avatar', { method: 'POST', body }))).status).toBe(200);
+    const wrong = await r.POST(form(png()));
+    expect(wrong.status).toBe(400);
+    expect((await wrong.json()).message).toBe('the request needs a avatar field holding the file');
+  });
+
   // A TypeError, and it is rethrown rather than answered: widening is the app's bug, not the
   // caller's, so the framework logs it instead of it becoming a 500 the browser has to interpret.
   test('onBeforeUpload cannot widen the route limits', async () => {

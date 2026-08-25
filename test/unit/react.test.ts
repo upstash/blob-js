@@ -696,7 +696,7 @@ test('a route that answered a plain 401 still arrives as unauthorized', async ()
   expect(task.status === 'error' && task.error.code).toBe('unauthorized');
 });
 
-test('a proxy route reviving its blob gives the same shape a direct upload does', async () => {
+test('a proxy route response is handed back exactly as it arrived', async () => {
   const hook = await render(() => useUploadProxy({ route: '/api/avatar' }));
   await act(async () => {
     hook.current.start({ file: png() });
@@ -708,7 +708,8 @@ test('a proxy route reviving its blob gives the same shape a direct upload does'
   await flush();
   const task = hook.current.task! as any;
   expect(task.status).toBe('done');
-  expect(task.response.blob.uploadedAt).toBeInstanceOf(Date);
+  // A string, not a Date. Reviving it rewrote any app response that happened to have this shape.
+  expect(task.response.blob.uploadedAt).toBe(END_BODY.blob.uploadedAt);
   expect(task.response.data).toEqual({ rowId: '1' });
 });
 
@@ -801,4 +802,45 @@ test('a call site option wins over the configured default', async () => {
   });
   const xhr = await nextXhr();
   expect(xhr.headers['authorization']).toBe('Bearer own');
+});
+
+test('a configured onError that throws does not stop the queue or the call site handler', async () => {
+  const seen: string[] = [];
+  const configured = configureUpload({
+    onError: () => {
+      seen.push('default');
+      throw new Error('boom');
+    },
+  });
+  const hook = await render(() => configured.useUploadProxy({ route: '/api/avatar', concurrency: 1, onError: () => seen.push('call') }));
+  await act(async () => {
+    hook.current.start({ file: png('a.png') });
+    hook.current.start({ file: png('b.png') });
+  });
+  const first = await nextXhr();
+  await act(async () => {
+    first.respond(500);
+  });
+  await flush(2);
+  expect(seen).toEqual(['default', 'call']);
+  // The throw used to escape the settle loop, so the queued second file never started.
+  expect(xhrs).toHaveLength(2);
+});
+
+test('pause is refused once every part has landed', async () => {
+  const hook = await render(() => useUpload<UploadRoute<undefined, unknown>>({ route }));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const put = await nextXhr();
+  await act(async () => {
+    put.respond(200, { etag: '"x"' });
+  });
+  await flush();
+  const task = hook.current.task!;
+  if (task.finishing) {
+    // Nothing is left to hold back: pausing here only mislabelled an upload that completed anyway.
+    expect(task.canPause).toBe(false);
+    expect(task.pause()).toBe(false);
+  }
 });

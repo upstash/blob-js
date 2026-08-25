@@ -104,16 +104,24 @@ export interface UploadTask {
 }
 
 /** Phantom types carried by a handleUpload POST handler so useUpload<typeof POST> can infer them. */
-export interface UploadRouteTypes<TInput, TData> {
+export interface UploadRouteTypes<TInput, TData, TRoute extends string = string> {
   input: TInput;
   data: TData;
+  /** The url the route declared, when it declared one. `route` on the hooks is typed to it. */
+  route: TRoute;
 }
 
 /**
- * The route's own URL, when handleUpload was told it. `route` on the hooks is typed to this literal,
- * so pairing one endpoint's url with another endpoint's handler type stops compiling.
+ * A POST handler this SDK built. The brand is required and never exists at runtime: an ordinary
+ * `(request: Request) => Promise<Response>` must NOT satisfy it, because the hooks decide from this
+ * whether the route answers the SDK's envelope or whatever the app wrote itself.
  */
 export type UploadRoute<TInput = unknown, TData = unknown, TRoute extends string = string> = ((request: Request) => Promise<Response>) & {
-  readonly __types?: UploadRouteTypes<TInput, TData>;
-  readonly __route?: TRoute;
+  readonly __upstashUploadRoute: UploadRouteTypes<TInput, TData, TRoute>;
 };
+
+/** What a handleProxyUpload route answers with. JSON, so uploadedAt is the string it crossed as. */
+export interface ProxyUploadResponse<TData = unknown> {
+  blob: Omit<BlobObject, 'uploadedAt'> & { uploadedAt: string };
+  data: TData;
+}

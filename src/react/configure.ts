@@ -42,7 +42,13 @@ export function configureUpload(defaults: UploadDefaults): { useUpload: typeof u
     concurrency: options.concurrency ?? defaults.concurrency,
     onError: defaults.onError
       ? (upload: FailedAnyUpload) => {
-          defaults.onError!(upload);
+          // Isolated: this runs inside the queue's settle loop, so a throw here would skip the
+          // call site's handler and stop the tasks still waiting to start.
+          try {
+            defaults.onError!(upload);
+          } catch (e) {
+            console.error('[upstash-blob] configureUpload onError threw', e);
+          }
           options.onError?.(upload);
         }
       : options.onError,

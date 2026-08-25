@@ -92,3 +92,11 @@ test('sizes are formatted the decimal way they are parsed', () => {
   expect(formatSize(3_145_728)).toBe('3.1MB');
   expect(formatSize(parseSize('5gb'))).toBe('5GB');
 });
+
+// Rounding both sides independently produced refusals reading "1MB, over the 1MB limit".
+test('a size just over a limit does not format as the limit', () => {
+  expect(formatSize(1_049_999)).not.toBe(formatSize(1_000_000));
+  expect(formatSize(1_049_999)).toBe('1.0MB');
+  expect(formatSize(999_999)).toBe('1.0MB');
+  expect(formatSize(1_000_000)).toBe('1MB');
+});

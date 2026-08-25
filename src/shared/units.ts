@@ -24,17 +24,23 @@ export function parseSize(input: Size, what = 'size'): number {
   return Math.floor(Number(m[1]) * mult);
 }
 
-/** Decimal, the same way parseSize reads them, so a limit written '2mb' is refused as "2MB". */
+/**
+ * Decimal, the same way parseSize reads them, so a limit written '2mb' is refused as "2MB". The
+ * decimal is kept whenever the byte count is not an exact multiple of the unit, because rounding
+ * both sides independently produced refusals reading "1MB, over the 1MB limit".
+ */
 export function formatSize(bytes: number): string {
+  if (!Number.isFinite(bytes)) return `${bytes}B`;
   if (bytes < 1000) return `${bytes}B`;
   const units = ['kB', 'MB', 'GB', 'TB'];
   let n = bytes / 1000;
   let i = 0;
-  while (n >= 1000 && i < units.length - 1) {
+  // >= 999.95 and not 1000: at one decimal it would print as "1000kB", which is a megabyte.
+  while (n >= 999.95 && i < units.length - 1) {
     n /= 1000;
     i++;
   }
-  return `${Number.isInteger(n) ? n : Number(n.toFixed(1))}${units[i]}`;
+  return `${Number.isInteger(n) ? n : n.toFixed(1)}${units[i]}`;
 }
 
 const DURATION_UNITS: Record<string, number> = {

@@ -88,7 +88,7 @@ import { BlobError, Bucket, handleUpload } from '@upstash/blob';
 
 export const { GET, POST } = handleUpload({
   bucket: Bucket.fromEnv(),
-  route: '/api/upload', // where it is mounted, so the client cannot name a different route
+  route: '/api/upload', // where it is mounted; the hooks' `route` is typed to this literal
   limits: { maxBytes: '10mb', allowedContentTypes: ['image/*'] },
   onBeforeUpload: async ({ request, file }) => {
     // throw to reject the upload
@@ -105,9 +105,11 @@ export const { GET, POST } = handleUpload({
 });
 ```
 
-- **`route`** is where this route is mounted, the same string the hooks take. `route` on the hooks
-  is typed to it, so naming one endpoint while importing another's handler type stops compiling. Not
-  the `path` `onBeforeUpload` returns, which is the object's key.
+- **`route`** is where this route is mounted, the same string the hooks take. It types the hooks'
+  `route` as that string literal, so naming one endpoint while importing another's handler type
+  stops compiling. A compile-time check only: nothing binds a token to a URL at runtime, and it also
+  feeds the derived `id`, so two routes with identical limits no longer collide. Not the `path`
+  `onBeforeUpload` returns, which is the object's key.
 - **`id`** binds completion tokens to this route. Every route on one bucket signs with the same key,
   so without it a token minted by one route is spendable at another. It defaults to a hash of the
   route's url, limits and input, which collides only when two routes declare all three the same:
@@ -165,6 +167,15 @@ Every byte crosses your function, so this is bounded by the platform's request b
 anything larger. `GET` serves the same limits document, so `useUploadProxy` fills the file picker
 from the route's own list and refuses an oversize file before it is sent.
 
+- **`maxBytes` is what bounds memory.** A raw body is streamed into `put()` and cut off there, so a
+  chunked request cannot spend more than the limit. A `multipart/form-data` body is buffered by the
+  platform's own form parser before this code sees it, so for those the `Content-Length` pre-check
+  is the only guard; with no `maxBytes` at all a raw body is buffered too.
+- **`field`** is the form field the file arrives in, `'file'` by default. Pass the same string to
+  `useUploadProxy({ field })`, or a request that is not multipart is taken as the body itself.
+- `onBeforeUpload` may return `limits` to narrow the route's per user. They are merged, so narrowing
+  `maxBytes` alone keeps the route's `allowedContentTypes` and the byte sniff that goes with it.
+
 ## React
 
 ```tsx
@@ -201,8 +212,15 @@ fall out of step with the one that does the refusing. `useUploadProxy` is the sa
 
 ```tsx
 const { start, task } = useUploadProxy<typeof POST>({ route: '/api/avatar' });
-// task.response.data is what onUploadCompleted returned; task.response.blob is the stored object
+
+if (task?.status === 'done') {
+  task.response.data; // what onUploadCompleted returned
+  task.response.blob; // the stored object, as JSON: uploadedAt is an ISO string, not a Date
+}
 ```
+
+Pass your own response shape instead (`useUploadProxy<{ url: string }>`) for a route you wrote by
+hand; the body is handed back exactly as it arrived.
 
 ### Defaults
 

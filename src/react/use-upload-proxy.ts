@@ -2,18 +2,18 @@ import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
 import type { HeadersProvider } from '../browser/task.ts';
 import type { BlobError } from '../shared/errors.ts';
-import type { BlobObject } from '../shared/types.ts';
+import type { ProxyUploadResponse, UploadRouteTypes } from '../shared/types.ts';
 import { deny, useLimits } from './limits.ts';
 import { ProxyTask } from './proxy-task.ts';
 import { useTaskList, type ListEntry } from './task-list.ts';
 import type { RouteData, RoutePath } from './use-upload.ts';
 
 /**
- * What the route answers with. A handleProxyUpload handler answers the same envelope phase 'end'
- * does, so a proxied upload's blob is the same object a direct one's is; anything else is whatever
- * shape you passed, untouched.
+ * What the route answers with. A handleProxyUpload handler carries the SDK's brand and answers its
+ * envelope; anything else -- including an ordinary `(request: Request) => Promise<Response>` you
+ * wrote yourself -- is whatever shape you passed, untouched.
  */
-export type ProxyResponse<R> = R extends (request: Request) => Promise<Response> ? { blob: BlobObject; data: RouteData<R> } : R;
+export type ProxyResponse<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<any, any, any> } ? ProxyUploadResponse<RouteData<R>> : R;
 
 export interface ProxyRecordBase {
   readonly id: string;
@@ -47,6 +47,8 @@ export interface UseUploadProxyOptions<R> {
   headers?: HeadersProvider;
   /** Requests in flight. The rest queue. */
   concurrency?: number;
+  /** The multipart field `start({ file })` sends the file in. Must match the route's. Default 'file'. */
+  field?: string;
   onDone?: (upload: DoneProxyUpload<ProxyResponse<R>>) => void;
   onError?: (upload: FailedProxyUpload) => void;
 }
@@ -69,12 +71,12 @@ interface Payload {
 let staticCounter = 0;
 
 // fetch's body rule, not an encoding option: a File is a raw body, a FormData is multipart.
-function payloadOf(args: ProxyStartArgs): Payload | null {
+function payloadOf(args: ProxyStartArgs, field: string): Payload | null {
   if ('file' in args) {
     const file = args.file;
     if (!file) return null;
     const form = new FormData();
-    form.append('file', file);
+    form.append(field, file);
     return { body: form, file, total: file.size };
   }
   const body = 'body' in args ? args.body : null;
@@ -118,6 +120,8 @@ export function useUploadProxy<R = unknown>(options: UseUploadProxyOptions<R>): 
 
   const headersRef = useRef<HeadersProvider | undefined>(options.headers);
   headersRef.current = options.headers;
+  const fieldRef = useRef(options.field ?? 'file');
+  fieldRef.current = options.field ?? 'file';
   const handlers = useRef(options);
   handlers.current = options;
 
@@ -137,7 +141,7 @@ export function useUploadProxy<R = unknown>(options: UseUploadProxyOptions<R>): 
 
   const start = useCallback(
     (args: ProxyStartArgs) => {
-      const payload = payloadOf(args);
+      const payload = payloadOf(args, fieldRef.current);
       if (!payload) return null;
       const refusal = payload.file ? deny(payload.file, limitsRef.current) : undefined;
       const entry = refusal ? refusedEntry<TResponse>(payload.file!, refusal) : proxyEntry(new ProxyTask<TResponse>({ route, headers: headersRef.current, ...payload }));

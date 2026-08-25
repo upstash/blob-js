@@ -30,17 +30,6 @@ type Status = 'queued' | 'uploading' | 'done' | 'canceled' | 'error';
 
 let counter = 0;
 
-/**
- * uploadedAt crosses the wire as an ISO string. Reviving it here is what makes a proxied upload's
- * blob the same shape as a direct one's, so the two hooks stay interchangeable. Guarded on the exact
- * envelope handleProxyUpload writes; any other response body is handed back untouched.
- */
-function revive(json: unknown): unknown {
-  const body = json as { blob?: { uploadedAt?: unknown } } | null | undefined;
-  if (typeof body !== 'object' || body === null || typeof body.blob?.uploadedAt !== 'string') return json;
-  return { ...body, blob: { ...body.blob, uploadedAt: new Date(body.blob.uploadedAt) } };
-}
-
 /** One POST to a route you wrote: no begin, no end, no pause. Observable, and free of React. */
 export class ProxyTask<TResponse = unknown> {
   readonly id = `p${++counter}-${clock.now().toString(36)}`;
@@ -159,7 +148,9 @@ export class ProxyTask<TResponse = unknown> {
       json = undefined;
     }
     if (res.status >= 200 && res.status < 300) {
-      this.response = revive(json) as TResponse;
+      // Handed back exactly as it arrived. An earlier version turned a string `blob.uploadedAt`
+      // into a Date, which silently rewrote any app response that happened to have that shape.
+      this.response = json as TResponse;
       this.status = 'done';
       this.notify();
       return;

@@ -7,14 +7,14 @@ import { deny, useLimits } from './limits.ts';
 import { useTaskList, type ListEntry } from './task-list.ts';
 
 /** The input schema of a handleUpload POST handler, or undefined when it has none. */
-export type RouteInput<R> = R extends { readonly __types?: UploadRouteTypes<infer TInput, any> } ? TInput : undefined;
+export type RouteInput<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<infer TInput, any, any> } ? TInput : undefined;
 /** What onUploadCompleted returned, which reaches the browser as blob.data. */
-export type RouteData<R> = R extends { readonly __types?: UploadRouteTypes<any, infer TData> } ? TData : unknown;
+export type RouteData<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<any, infer TData, any> } ? TData : unknown;
 /**
  * The url the route was declared with, so `route` cannot name one endpoint while the handler type
  * describes another. A route that declared none types as plain string, as before.
  */
-export type RoutePath<R> = R extends UploadRoute<any, any, infer TRoute> ? (string extends TRoute ? string : TRoute) : string;
+export type RoutePath<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<any, any, infer TRoute> } ? (string extends TRoute ? string : TRoute) : string;
 
 export interface UploadRecordBase {
   readonly id: string;

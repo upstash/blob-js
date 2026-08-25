@@ -13,39 +13,45 @@ import { formatSize } from '../shared/units.ts';
 // The route serves its limits with max-age=60. A cache that never expired outlived the deploy that
 // changed them, so the picker went on refusing files the route had started accepting.
 const LIMITS_TTL_MS = 60_000;
-const cache = new Map<string, { limits: WireLimits; at: number }>();
+// A route with no GET half answers 404/405 forever. Caching that too is what keeps every mount of
+// every component on a plain POST-only route from re-asking.
+const cache = new Map<string, { limits: WireLimits | undefined; at: number }>();
 const inFlight = new Map<string, Promise<WireLimits | undefined>>();
 
 export function cachedLimits(route: string): WireLimits | undefined {
+  return fresh(route)?.limits;
+}
+
+function fresh(route: string): { limits: WireLimits | undefined } | undefined {
   const entry = cache.get(route);
   if (!entry) return undefined;
   if (clock.now() - entry.at > LIMITS_TTL_MS) {
     cache.delete(route);
     return undefined;
   }
-  return entry.limits;
+  return entry;
 }
 
 async function loadLimits(route: string, headers: HeadersProvider | undefined): Promise<WireLimits | undefined> {
-  const hit = cachedLimits(route);
-  if (hit) return hit;
+  const hit = fresh(route);
+  if (hit) return hit.limits;
   let pending = inFlight.get(route);
   if (!pending) {
     pending = (async () => {
+      let limits: WireLimits | undefined;
       try {
         const res = await fetch(route, { headers: await resolveHeaders(headers) });
-        if (!res.ok) return undefined;
-        const body = (await res.json()) as { limits?: WireLimits } | undefined;
-        const limits = body?.limits;
-        if (!limits || typeof limits !== 'object') return undefined;
-        cache.set(route, { limits, at: clock.now() });
-        return limits;
+        if (res.ok) {
+          const body = (await res.json()) as { limits?: WireLimits } | undefined;
+          if (body?.limits && typeof body.limits === 'object') limits = body.limits;
+        }
       } catch {
         // A route that will not say what it allows still uploads; the picker just has no accept.
-        return undefined;
       } finally {
         inFlight.delete(route);
       }
+      cache.set(route, { limits, at: clock.now() });
+      return limits;
     })();
     inFlight.set(route, pending);
   }
