@@ -5,6 +5,13 @@ export const MAX_ATTEMPTS = 8;
 // that changed cell or a link that stalled outlives, and an upload that dies there has to re-send
 // every part it had in flight. Only a response the server actually wrote gets the smaller budget.
 export const MAX_NETWORK_ATTEMPTS = 20;
+// A request that failed without putting a byte on the wire is not a dropped link: it is almost
+// always CORS, which no amount of retrying fixes. Say so after three attempts instead of after ~4.5
+// minutes of backoff.
+export const NO_BYTES_NETWORK_ATTEMPTS = 3;
+// Silence, not duration: a 5 MiB part on a slow link legitimately takes minutes, but it never goes
+// a minute without an upload progress event, and neither does a response that is coming.
+export const STALL_TIMEOUT_MS = 60_000;
 const BASE_MS = 500;
 const CAP_MS = 15_000;
 

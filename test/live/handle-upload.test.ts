@@ -14,6 +14,8 @@ afterAll(async () => {
 const rows: Record<string, { status: string; owner?: string; size?: number }> = {};
 let nextRow = 1;
 const completed: string[] = [];
+let lastChatCompleted: { multipartUploadId: string | undefined } | undefined;
+let lastLargeCompleted: { multipartUploadId: string | undefined } | undefined;
 
 const chat = handleUpload({
   bucket: pub,
@@ -28,7 +30,8 @@ const chat = handleUpload({
     rows[id] = { status: 'pending', owner: user };
     return { path, cache: 'immutable', metadata: { uploadedBy: user, originalName: file.name }, context: { rowId: id, owner: user } };
   },
-  onUploadCompleted: async ({ context, size }) => {
+  onUploadCompleted: async ({ context, size, multipartUploadId }) => {
+    lastChatCompleted = { multipartUploadId };
     rows[context.rowId] = { status: 'ready', owner: context.owner, size };
     return { rowId: context.rowId };
   },
@@ -38,8 +41,9 @@ const large = handleUpload({
   bucket: priv,
   limits: { maxBytes: '5gb' },
   onBeforeUpload: async ({ file }) => ({ path: p(`large/${crypto.randomUUID()}-${file.name}`), metadata: { originalName: file.name } }),
-  onUploadCompleted: async ({ path, size, etag, uploadId }) => {
+  onUploadCompleted: async ({ path, size, etag, uploadId, multipartUploadId }) => {
     completed.push(uploadId);
+    lastLargeCompleted = { multipartUploadId };
     rows[path] = { status: 'ready', size };
     return etag;
   },
@@ -49,9 +53,13 @@ const post = (route: { POST: (r: Request) => Promise<Response> }, body: unknown,
   route.POST(new Request('https://app.test/api/upload', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', authorization: auth } }));
 
 describe('GET', () => {
-  test('serves expanded limits, cacheable', async () => {
+  test('serves expanded limits, cached for a minute and revalidated', async () => {
     const res = await chat.GET(new Request('https://app.test/api/upload'));
-    expect(res.headers.get('cache-control')).toContain('immutable');
+    // Not immutable: the limits are the route's own code, and a deploy changes them.
+    expect(res.headers.get('cache-control')).toBe('public, max-age=60');
+    const etag = res.headers.get('etag')!;
+    expect(etag).toMatch(/^"/);
+    expect((await chat.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }))).status).toBe(304);
     expect(await res.json()).toEqual({ limits: { allowedContentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: 20_000_000 } });
     const img = handleUpload({ bucket: pub, limits: { allowedContentTypes: ['image/*'] }, onBeforeUpload: () => ({ path: 'x' }) });
     const limits = (await (await img.GET(new Request('https://x'))).json()).limits;
@@ -116,11 +124,12 @@ describe('begin', () => {
     expect(end.blob.etag).toMatch(/^"/);
     expect(end.blob.url).toMatch(/^https:\/\/b[0-9a-f]{11}\.blob\.upstash\.io\//);
     expect(rows[end.data.rowId]).toEqual({ status: 'ready', owner: 'u1', size: body.byteLength });
-    const served = await fetch(end.blob.url);
+    const served = await fetch(end.blob.url!);
     expect(served.status).toBe(200);
     // Measured 2026-08-24: the public hostname serves max-age=31536000 but drops the immutable token.
     expect(served.headers.get('cache-control')).toContain('max-age=31536000');
     expect((await pub.info(begin.path)).metadata.uploadedby).toBe('u1');
+    expect(lastChatCompleted!.multipartUploadId).toBeUndefined();
 
     // A fresh single url from phase 'parts': the re-presign path.
     const fresh = await post(chat, { phase: 'parts', completionToken: begin.completionToken, from: 1 });
@@ -141,6 +150,9 @@ describe('begin', () => {
     expect(end.status).toBe(400);
     expect((await end.json()).code).toBe('content_type_not_allowed');
     expect(rows[String(nextRow - 1)]!.status).toBe('pending');
+    // The bytes were already stored and, on a public bucket, already served: refusing them has to
+    // mean deleting them.
+    expect(await pub.exists(begin.path)).toBe(false);
 
     const [payload, sig] = begin.completionToken.split('.');
     const tampered = await post(chat, { phase: 'end', completionToken: `${payload}x.${sig}` });
@@ -199,6 +211,9 @@ describe('begin', () => {
     expect(completed.length).toBe(2);
     expect(completed[0]).toBe(completed[1]!);
     expect(completed[0]).toMatch(/^[0-9a-f-]{36}$/);
+    // R2's own id, for a bucket.abortMultipart(): not the same id the app dedupes on.
+    expect(typeof lastLargeCompleted!.multipartUploadId).toBe('string');
+    expect(lastLargeCompleted!.multipartUploadId).not.toBe(completed[0]);
     expect(rows[begin.path]).toEqual({ status: 'ready', size });
     const back = new Uint8Array(await new Response((await priv.get(begin.path)).body).arrayBuffer());
     expect(back.byteLength).toBe(size);
@@ -210,6 +225,17 @@ describe('begin', () => {
     expect(cancel.status).toBe(200);
     const after = await post(large, { phase: 'parts', completionToken: begin2.completionToken, from: 1 });
     expect(after.status).toBe(404);
+  });
+
+  test('a completion token is bound to its route, not just to its bucket', async () => {
+    const one = handleUpload({ bucket: pub, limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: p('routes/one') }) });
+    const two = handleUpload({ bucket: pub, limits: { maxBytes: '2mb' }, onBeforeUpload: () => ({ path: p('routes/two') }) });
+    const twin = handleUpload({ bucket: pub, id: 'twin', limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: p('routes/twin') }) });
+    const begin = (await (await post(one, { phase: 'begin', file: { name: 'a.bin', type: '', size: 10 } })).json()) as WireBeginResponse;
+    expect((await post(two, { phase: 'end', completionToken: begin.completionToken })).status).toBe(403);
+    expect((await post(twin, { phase: 'end', completionToken: begin.completionToken })).status).toBe(403);
+    // Its own route still takes it: the upload never landed, so 404, not 403.
+    expect((await post(one, { phase: 'end', completionToken: begin.completionToken })).status).toBe(404);
   });
 
   test('onBeforeUpload may narrow limits, never widen them', async () => {
@@ -233,6 +259,30 @@ describe('begin', () => {
       },
     });
     await expect(post(broken, { phase: 'begin', file: { name: 'a', type: '', size: 1 } })).rejects.toThrow('db down');
+  });
+
+  test('an incomplete multipart is visible, abortable and sweepable', async () => {
+    const size = 17_000_000;
+    const begin = (await (await post(large, { phase: 'begin', file: { name: 'orphan.bin', type: '', size } })).json()) as WireBeginResponse;
+    // list() cannot see it and neither can the console: this is the invisible billed storage that
+    // blocks deleting a bucket.
+    expect((await priv.list({ prefix: root })).blobs.some((b) => b.path === begin.path)).toBe(false);
+    const open = await priv.listMultipartUploads({ prefix: root });
+    const mine = open.find((u) => u.path === begin.path);
+    expect(mine).toBeDefined();
+    expect(mine!.uploadId.length).toBeGreaterThan(8);
+    expect(mine!.initiatedAt.getTime()).toBeGreaterThan(Date.now() - 3_600_000);
+
+    await priv.abortMultipart(mine!.uploadId, mine!.path);
+    expect((await priv.listMultipartUploads({ prefix: root })).some((u) => u.path === begin.path)).toBe(false);
+    // Aborting twice is not an error: a sweep has to be safe to run again.
+    await priv.abortMultipart(mine!.uploadId, mine!.path);
+
+    const second = (await (await post(large, { phase: 'begin', file: { name: 'abandoned.bin', type: '', size } })).json()) as WireBeginResponse;
+    expect(await priv.sweepMultipart({ olderThan: '1d', prefix: root })).toEqual([]);
+    const reaped = await priv.abortStaleUploads({ olderThan: 0, prefix: root });
+    expect(reaped.map((u) => u.path)).toContain(second.path);
+    expect(await priv.listMultipartUploads({ prefix: root })).toEqual([]);
   });
 
   test('exactly 16MB is multipart: 4 parts', async () => {

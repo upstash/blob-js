@@ -60,7 +60,7 @@ function _withoutInput(file: File) {
   start({ file, input: { threadId: 'x' } });
 
   if (task?.status === 'done') {
-    const url: string = task.blob.url;
+    const url: string | undefined = task.blob.url;
     void url;
   }
   // @ts-expect-error blob exists only on the done member

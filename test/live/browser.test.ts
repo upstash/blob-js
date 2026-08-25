@@ -82,7 +82,7 @@ describe('upload()', () => {
     expect(seen).toContain('uploading');
     expect(task.pause()).toBe(false);
     expect(task.cancel()).toBe(false);
-    expect((await fetch(blob.url)).status).toBe(200);
+    expect((await fetch(blob.url!)).status).toBe(200);
   });
 
   test('route errors surface as BlobError with the route status', async () => {

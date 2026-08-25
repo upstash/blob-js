@@ -11,6 +11,7 @@ export type BlobErrorCode =
   | 'unauthorized'
   | 'forbidden'
   | 'rate_limited'
+  | 'mint_backoff'
   | 'not_ready'
   | 'partial_delete'
   | 'move_left_a_copy'
@@ -30,6 +31,7 @@ export const STATUS: Record<BlobErrorCode, number> = {
   unauthorized: 401,
   forbidden: 403,
   rate_limited: 429,
+  mint_backoff: 429,
   not_ready: 503,
   partial_delete: 500,
   move_left_a_copy: 500,
@@ -50,6 +52,7 @@ const DEFAULT_MESSAGE: Record<BlobErrorCode, string> = {
   unauthorized: 'unauthorized',
   forbidden: 'forbidden',
   rate_limited: 'rate limited',
+  mint_backoff: 'the credential service asked for a backoff longer than a request can wait',
   not_ready: 'bucket is not ready',
   partial_delete: 'some paths were not deleted',
   move_left_a_copy: 'move left a copy at the source',
@@ -77,6 +80,8 @@ export interface BlobErrorOptions {
   /** already_exists: what is already there. */
   etag?: string;
   size?: number;
+  /** mint_backoff and rate_limited: seconds the service asked the caller to wait. */
+  retryAfter?: number;
   cause?: unknown;
 }
 
@@ -91,6 +96,7 @@ export class BlobError extends Error {
   readonly failed: string[] | undefined;
   readonly etag: string | undefined;
   readonly size: number | undefined;
+  readonly retryAfter: number | undefined;
   readonly [MARK] = true;
 
   constructor(code: BlobErrorCode, options: BlobErrorOptions | string = {}) {
@@ -105,6 +111,7 @@ export class BlobError extends Error {
     this.failed = o.failed;
     this.etag = o.etag;
     this.size = o.size;
+    this.retryAfter = o.retryAfter;
   }
 
   // is(), not instanceof: an ESM and a CJS copy of this class are two classes.
@@ -112,7 +119,7 @@ export class BlobError extends Error {
     return typeof e === 'object' && e !== null && (e as any)[MARK] === true;
   }
 
-  toJSON(): { code: BlobErrorCode; message: string; status: number; hint?: string; failed?: string[]; etag?: string; size?: number } {
+  toJSON(): { code: BlobErrorCode; message: string; status: number; hint?: string; failed?: string[]; etag?: string; size?: number; retryAfter?: number } {
     return {
       code: this.code,
       message: this.message,
@@ -121,6 +128,7 @@ export class BlobError extends Error {
       ...(this.failed ? { failed: this.failed } : {}),
       ...(this.etag ? { etag: this.etag } : {}),
       ...(this.size !== undefined ? { size: this.size } : {}),
+      ...(this.retryAfter !== undefined ? { retryAfter: this.retryAfter } : {}),
     };
   }
 
@@ -137,6 +145,7 @@ export class BlobError extends Error {
       failed: Array.isArray(b.failed) ? (b.failed as string[]) : undefined,
       etag: typeof b.etag === 'string' ? b.etag : undefined,
       size: typeof b.size === 'number' ? b.size : undefined,
+      retryAfter: typeof b.retryAfter === 'number' ? b.retryAfter : undefined,
     });
   }
 }

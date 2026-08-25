@@ -8,6 +8,7 @@ const single: TokenPayload = {
   v: 1,
   kind: 'single',
   b: 'ac63f03a-4c24-4ed2-a0e3-ab78d70b62d7',
+  r: 'route1',
   id: '9c1f0f5a-1f2e-4a3b-8c4d-5e6f7a8b9c0d',
   path: 'chat/42/holiday-8kZP4mQr.png',
   type: 'image/png',

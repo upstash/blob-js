@@ -2,7 +2,7 @@ import { BlobError } from '../shared/errors.ts';
 import type { BlobObject, UploadSnapshot, UploadTask, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
 import { abortError, clock } from './clock.ts';
 import { acquire } from './pool.ts';
-import { backoffMs, classify, MAX_ATTEMPTS, MAX_NETWORK_ATTEMPTS } from './retry.ts';
+import { backoffMs, classify, MAX_ATTEMPTS, MAX_NETWORK_ATTEMPTS, NO_BYTES_NETWORK_ATTEMPTS, STALL_TIMEOUT_MS } from './retry.ts';
 import { clearPending, fingerprint, readPending, writePending } from './store.ts';
 import { NetworkError, sendXhr } from './xhr.ts';
 
@@ -22,8 +22,8 @@ export interface InternalTask extends UploadTask {
 
 const PARTS_IN_FLIGHT = 4;
 const ROUTE_ATTEMPTS = 3;
-// A part url is signed with the bucket's temporary credential and dies with it, ~524 s out
-// (WIRE.md), which a 5 MiB part on a slow link outruns. A 403 on a url older than this is the
+// A part url is signed with the bucket's temporary credential and dies with it, well under ten
+// minutes out, which a 5 MiB part on a slow link outruns. A 403 on a url older than this is the
 // clock however often it happens; only a url minted moments ago and refused again is the body.
 const PRESIGN_STALE_MS = 60_000;
 
@@ -428,6 +428,7 @@ class Task implements InternalTask {
     const state: InFlight = { loaded: 0, backingOff: false, controller: ctrl };
     this.inflight.set(n, state);
     try {
+      let sentBytes = false;
       let lastStatus = 0;
       let httpAttempts = 0;
       let netAttempts = 0;
@@ -449,9 +450,11 @@ class Task implements InternalTask {
             body,
             signal: ctrl.signal,
             onUploadProgress: (loaded) => {
+              if (loaded > 0) sentBytes = true;
               state.loaded = Math.min(loaded, size);
               this.notify();
             },
+            stallTimeoutMs: STALL_TIMEOUT_MS,
           });
           status = res.status;
           // Chrome logs "Refused to get unsafe header" for any header a cross-origin response does
@@ -491,7 +494,7 @@ class Task implements InternalTask {
           await this.represign(n);
           continue;
         }
-        if (status === 0 ? ++netAttempts >= MAX_NETWORK_ATTEMPTS : ++httpAttempts >= MAX_ATTEMPTS) break;
+        if (status === 0 ? ++netAttempts >= networkAttemptCap(sentBytes) : ++httpAttempts >= MAX_ATTEMPTS) break;
         state.backingOff = true;
         this.notify();
         try {
@@ -504,7 +507,7 @@ class Task implements InternalTask {
       throw new BlobError('request_failed', {
         message: `upload failed after ${httpAttempts + netAttempts} attempts${lastStatus ? ` (last status ${lastStatus})` : ''}`,
         status: 503,
-        hint: this.kind === 'multipart' ? 'the parts that landed are kept: task.retry(), or pick the same file again' : undefined,
+        hint: netAttempts > 0 && !sentBytes ? CORS_HINT : this.kind === 'multipart' ? 'the parts that landed are kept: task.retry(), or pick the same file again' : undefined,
       });
     } finally {
       cancel.removeEventListener('abort', onCancel);
@@ -550,6 +553,18 @@ class Task implements InternalTask {
     }
     throw last ?? new BlobError('request_failed');
   }
+}
+
+// A PUT that fails with no status and no bytes sent was refused by the browser, not by storage, and
+// the reason is never visible to script: the preflight is what failed. Retrying it for four minutes
+// only delays the same answer.
+const CORS_HINT = 'the browser blocked the request before sending any bytes, which is almost always CORS: the bucket has to allow PUT and the signed headers from this origin';
+
+function networkAttemptCap(sentBytes: boolean): number {
+  if (sentBytes) return MAX_NETWORK_ATTEMPTS;
+  // Offline is the one other way to fail with nothing sent, and it does come back.
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  return offline ? MAX_NETWORK_ATTEMPTS : NO_BYTES_NETWORK_ATTEMPTS;
 }
 
 function sameOrigin(url: string): boolean {

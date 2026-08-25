@@ -2,13 +2,22 @@ import { BlobError } from '../shared/errors.ts';
 import type { BlobObject } from '../shared/types.ts';
 import { cacheControl, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
-import { blocks, decodeEntities, encodeKey, escapeXml, tag } from './keys.ts';
-import { errorFromBody, errorFromResponse, headFromHeaders, R2 } from './r2.ts';
+import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
+import { MULTIPART_THRESHOLD, partCount, partSizeFor } from './multipart.ts';
+import { errorFromBody, errorFromResponse, headFromHeaders, R2, type MultipartUpload } from './r2.ts';
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
 
+export type { MultipartUpload };
+
 export interface BucketOptions {
   token: string;
+  /**
+   * 'private' drops `url` and `versionedUrl` from every BlobObject: nothing serves a private
+   * bucket over the public host, so a url there is a link that 404s. A `visibility` in the
+   * credentials response wins over this.
+   */
+  visibility?: 'public' | 'private';
   /** Default cache policy for every write; per-call `cache` overrides it. */
   cache?: CacheOption;
   /**
@@ -21,7 +30,7 @@ export interface BucketOptions {
 
 export interface PutOptions {
   contentType?: string;
-  allowedContentTypes?: string[];
+  allowedContentTypes?: readonly string[];
   maxBytes?: Size;
   cache?: CacheOption;
   metadata?: Record<string, string>;
@@ -31,6 +40,12 @@ export interface PutOptions {
   overwrite?: boolean;
   /** An etag: If-Match, so the write fails with 'conflict' if the object changed. */
   ifUnchanged?: string;
+  /**
+   * Force or forbid the multipart path. The default is by size: a body over 16 MB goes up in parts,
+   * which is the only way past R2's ~5 GiB single-PUT cap and the only way a failed chunk can be
+   * retried. `overwrite: false` and `ifUnchanged` are single-PUT only, so they turn it off.
+   */
+  multipart?: boolean;
 }
 
 export interface ListOptions {
@@ -44,6 +59,11 @@ export interface ListPage {
   cursor: string | undefined;
 }
 
+/** What put() answers: the blob, plus the content type it was stored with. */
+export interface PutResult extends BlobObject {
+  contentType: string;
+}
+
 export interface BlobInfo extends BlobObject {
   contentType: string;
   metadata: Record<string, string>;
@@ -54,8 +74,31 @@ export interface BlobBody extends BlobInfo {
 }
 
 export interface SignedReadUrlOptions {
+  /**
+   * How long the link lives. Capped by what the signing credential has left, which is at most ten
+   * minutes and often less (measured 2026-08-25: a fresh mint came back with 199 s on it), so an
+   * `expiresIn` over the cap throws unless `clamp` is set. Omit it for the shorter of 5m and the
+   * cap, which never throws; `expiresAt` says what you got either way.
+   */
   expiresIn?: Duration;
   downloadName?: string;
+  /** Shorten a too-long `expiresIn` to the cap instead of throwing. */
+  clamp?: boolean;
+}
+
+export interface SignedRead {
+  url: string;
+  /** When the link stops working. Never later than the credential that signed it. */
+  expiresAt: Date;
+}
+
+export interface ListMultipartOptions {
+  prefix?: string;
+}
+
+export interface AbortStaleOptions extends ListMultipartOptions {
+  /** Only abort uploads started longer ago than this. */
+  olderThan: Duration;
 }
 
 export interface S3Config {
@@ -64,6 +107,8 @@ export interface S3Config {
   bucket: string;
   credentials: () => Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken: string; expiration: Date }>;
 }
+
+export type DeleteTarget = string | string[] | { prefix: string; all?: boolean };
 
 export interface UpdateOptions {
   cache?: CacheOption;
@@ -87,20 +132,20 @@ export class Bucket {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
     this.defaultCache = options.cache;
-    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true);
+    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true, options.visibility);
     INTERNALS.set(this, this.r2);
   }
 
-  static fromEnv(name = 'UPSTASH_BLOB_TOKEN'): Bucket {
+  static fromEnv(name = 'UPSTASH_BLOB_TOKEN', options: Omit<BucketOptions, 'token'> = {}): Bucket {
     const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
     const token = env?.[name];
     if (!token) throw new TypeError(`Bucket.fromEnv: ${name} is not set (on Workers, pass it explicitly: new Bucket({ token: env.${name} }))`);
-    return new Bucket({ token });
+    return new Bucket({ ...options, token });
   }
 
   /* ------------------------------------------------------------------ put */
 
-  async put(path: string, body: PutBody, options: PutOptions = {}): Promise<BlobObject> {
+  async put(path: string, body: PutBody, options: PutOptions = {}): Promise<PutResult> {
     encodeKey(path);
     const allowed = options.allowedContentTypes === undefined ? undefined : expandContentTypes(options.allowedContentTypes);
     const maxBytes = options.maxBytes === undefined ? undefined : parseSize(options.maxBytes, 'maxBytes');
@@ -130,12 +175,22 @@ export class Bucket {
     // A zero-length body goes out as bytes, so the peeked stream has to be released rather than left open.
     if (size === 0) await stream.cancel();
 
-    const headers: Record<string, string> = {
+    const objectHeaders: Record<string, string> = {
       'content-type': contentType,
-      'content-length': String(size),
       'cache-control': cacheControl(options.cache ?? this.defaultCache),
       ...metaHeaders(options.metadata),
     };
+
+    const conditional = options.overwrite === false || options.ifUnchanged !== undefined;
+    if (options.multipart === true && conditional) {
+      throw new BlobError('invalid_input', { message: 'multipart: overwrite:false and ifUnchanged are single-PUT only' });
+    }
+    // A zero-byte multipart upload is not a thing, and its stream has already been released.
+    if (size > 0 && (options.multipart ?? (size > MULTIPART_THRESHOLD && !conditional))) {
+      return this.putMultipart(path, stream, size, objectHeaders, contentType);
+    }
+
+    const headers: Record<string, string> = { ...objectHeaders, 'content-length': String(size) };
     if (options.overwrite === false) headers['if-none-match'] = '*';
     if (options.ifUnchanged !== undefined) headers['if-match'] = options.ifUnchanged;
 
@@ -157,7 +212,76 @@ export class Bucket {
     }
     if (!res.ok) throw await errorFromResponse(res);
     await res.body?.cancel();
-    return this.r2.blobObject(path, size, res.headers.get('etag') ?? '', new Date());
+    return { ...this.r2.blobObject(path, size, res.headers.get('etag') ?? '', new Date()), contentType };
+  }
+
+  /**
+   * One part at a time: a part is buffered whole so it can be retried, and holding several of them
+   * would multiply that by the concurrency. An error anywhere aborts the upload rather than leaving
+   * parts behind that nothing can see.
+   */
+  private async putMultipart(path: string, stream: ReadableStream<Uint8Array>, size: number, headers: Record<string, string>, contentType: string): Promise<PutResult> {
+    const partSize = partSizeFor(size);
+    const expected = partCount(size, partSize);
+    const uploadId = await this.r2.createMultipart(path, headers);
+    try {
+      const reader = stream.getReader();
+      const parts: { n: number; etag: string }[] = [];
+      let pending: Uint8Array[] = [];
+      let pendingBytes = 0;
+      let sent = 0;
+
+      const sendPart = async (length: number): Promise<void> => {
+        const chunk = new Uint8Array(length);
+        let filled = 0;
+        while (filled < length) {
+          const head = pending[0]!;
+          const take = Math.min(head.byteLength, length - filled);
+          chunk.set(head.subarray(0, take), filled);
+          filled += take;
+          if (take === head.byteLength) pending.shift();
+          else pending[0] = head.subarray(take);
+        }
+        pendingBytes -= length;
+        const n = parts.length + 1;
+        if (n > expected) throw new BlobError('invalid_input', { message: `body is longer than the declared ${size} bytes` });
+        const res = await this.r2.fetch({
+          method: 'PUT',
+          path,
+          query: { partNumber: String(n), uploadId },
+          headers: { 'content-length': String(length) },
+          body: chunk,
+        });
+        if (!res.ok) throw errorFromBody(res.status, await res.text());
+        await res.body?.cancel();
+        const etag = res.headers.get('etag');
+        if (!etag) throw new BlobError('request_failed', { message: `part ${n} landed without an etag`, status: 502 });
+        parts.push({ n, etag });
+        sent += length;
+      };
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (value && value.byteLength) {
+          pending.push(value);
+          pendingBytes += value.byteLength;
+        }
+        while (pendingBytes >= partSize) await sendPart(partSize);
+        if (done) break;
+      }
+      if (pendingBytes > 0) await sendPart(pendingBytes);
+      pending = [];
+      if (sent !== size) throw new BlobError('invalid_input', { message: `body was ${sent} bytes, ${size} were declared` });
+
+      const etag = await this.r2.completeMultipart(path, uploadId, parts);
+      return { ...this.r2.blobObject(path, size, etag, new Date()), contentType };
+    } catch (e) {
+      // Nothing lists an incomplete upload, so a failure that left one behind is invisible billing.
+      await this.r2.abortMultipart(path, uploadId).catch(() => {});
+      if (BlobError.is(e)) throw e;
+      if (e && typeof e === 'object' && BlobError.is((e as { cause?: unknown }).cause)) throw (e as { cause: BlobError }).cause;
+      throw e;
+    }
   }
 
   /* ----------------------------------------------------------------- read */
@@ -200,19 +324,30 @@ export class Bucket {
     return { blobs, cursor: tag(xml, 'IsTruncated') === 'true' && next ? decodeEntities(next) : undefined };
   }
 
-  async signedReadUrl(path: string, options: SignedReadUrlOptions = {}): Promise<string> {
-    const expiresIn = Math.max(1, Math.floor(parseDuration(options.expiresIn ?? '1h', 'expiresIn') / 1000));
+  /** The link and when it dies, so a caller can cache it until then rather than guess. */
+  async signedRead(path: string, options: SignedReadUrlOptions = {}): Promise<SignedRead> {
+    const expiresIn = options.expiresIn === undefined ? undefined : Math.max(1, Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000));
     const query: Record<string, string> = {};
     if (options.downloadName !== undefined) {
       const ascii = options.downloadName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
       query['response-content-disposition'] = `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(options.downloadName)}`;
     }
-    return this.r2.presign({ method: 'GET', path, query, expiresIn });
+    return this.r2.presignRead({ path, query, expiresIn, clamp: options.clamp });
+  }
+
+  /** signedRead(), url only. */
+  async signedReadUrl(path: string, options: SignedReadUrlOptions = {}): Promise<string> {
+    return (await this.signedRead(path, options)).url;
+  }
+
+  /** The longest `expiresIn` signedRead() will sign right now, in seconds. */
+  signedReadCap(): Promise<number> {
+    return this.r2.readCap();
   }
 
   /* ---------------------------------------------------------------- write */
 
-  async del(target: string | string[] | { prefix: string }): Promise<void> {
+  async del(target: DeleteTarget): Promise<void> {
     if (typeof target === 'string') {
       const res = await this.r2.fetch({ method: 'DELETE', path: target });
       await res.body?.cancel();
@@ -224,6 +359,13 @@ export class Bucket {
       for (let i = 0; i < target.length; i += 1000) failed.push(...(await this.deleteBatch(target.slice(i, i + 1000))));
       if (failed.length) throw new BlobError('partial_delete', { message: `${failed.length} of ${target.length} paths were not deleted`, failed });
       return;
+    }
+    if (typeof target?.prefix !== 'string') throw new BlobError('invalid_input', { message: 'del: expected a path, an array of paths, or { prefix }' });
+    if (target.prefix === '' && target.all !== true) {
+      throw new BlobError('invalid_input', {
+        message: "del({ prefix: '' }) would delete every object in the bucket",
+        hint: "pass { prefix: '', all: true } if that is what you mean",
+      });
     }
     const failed: string[] = [];
     let cursor: string | undefined;
@@ -251,6 +393,42 @@ export class Bucket {
     for (const p of failed) if (await this.exists(p)) survivors.push(p);
     return survivors;
   }
+
+  /* ------------------------------------------------------------ multipart */
+
+  /**
+   * Multipart uploads that were started and never completed or aborted. They are billed storage that
+   * list() cannot see, and a bucket cannot be deleted while one exists.
+   */
+  async listMultipartUploads(options: ListMultipartOptions = {}): Promise<MultipartUpload[]> {
+    return this.r2.listMultipartUploads(options.prefix);
+  }
+
+  /** Throws away an incomplete upload and every part that landed for it. Missing is success. */
+  async abortMultipart(uploadId: string, path: string): Promise<void> {
+    if (typeof uploadId !== 'string' || !uploadId) throw new BlobError('invalid_input', { message: 'abortMultipart(uploadId, path): uploadId is required' });
+    encodeKey(path);
+    await this.r2.abortMultipart(path, uploadId);
+  }
+
+  /**
+   * List plus abort, for an app cron: nothing in R2 expires an abandoned upload without a lifecycle
+   * rule, and an invisible one is what turns "delete the bucket" into a dead end. Returns what it
+   * aborted.
+   */
+  async abortStaleUploads(options: AbortStaleOptions): Promise<MultipartUpload[]> {
+    const cutoff = Date.now() - parseDuration(options.olderThan, 'olderThan');
+    const stale = (await this.listMultipartUploads(options)).filter((u) => u.initiatedAt.getTime() <= cutoff);
+    for (const u of stale) await this.r2.abortMultipart(u.path, u.uploadId);
+    return stale;
+  }
+
+  /** abortStaleUploads(), under the name the sweep is usually looked for. */
+  sweepMultipart(options: AbortStaleOptions): Promise<MultipartUpload[]> {
+    return this.abortStaleUploads(options);
+  }
+
+  /* ---------------------------------------------------------- copy/move */
 
   async copy(from: string, to: string): Promise<BlobObject> {
     const creds = await this.r2.credentials();
@@ -327,11 +505,3 @@ export class Bucket {
   }
 }
 
-function metaHeaders(metadata: Record<string, string> | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(metadata ?? {})) {
-    if (typeof v !== 'string') throw new TypeError(`metadata.${k} must be a string`);
-    out[`x-amz-meta-${k.toLowerCase()}`] = v;
-  }
-  return out;
-}

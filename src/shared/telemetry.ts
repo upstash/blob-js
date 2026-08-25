@@ -1,5 +1,11 @@
 import { VERSION } from '../version.ts';
 
+function disabled(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const v = value.trim().toLowerCase();
+  return v !== '' && v !== 'false' && v !== '0' && v !== 'no' && v !== 'off';
+}
+
 /** The subset of globalThis this module sniffs. Passed in so tests can fake a runtime. */
 export interface TelemetryGlobals {
   Deno?: { version?: { deno?: string } };
@@ -32,10 +38,11 @@ function platform(g: TelemetryGlobals): string | undefined {
 /**
  * Sent only on calls to the Upstash agent, not on object requests: it is one request per credential
  * lifetime, so it costs nothing there, while the object path is the hot path.
- * Opt out with UPSTASH_DISABLE_TELEMETRY (only reachable where process.env exists).
+ * Opt out with UPSTASH_DISABLE_TELEMETRY (only reachable where process.env exists). Setting it to
+ * 'false' or '0' does not opt out: an env var that says false and means true is a trap.
  */
 export function telemetryHeaders(g: TelemetryGlobals = globalThis as TelemetryGlobals): Record<string, string> {
-  if (g.process?.env?.UPSTASH_DISABLE_TELEMETRY) return {};
+  if (disabled(g.process?.env?.UPSTASH_DISABLE_TELEMETRY)) return {};
   const out: Record<string, string> = { 'Upstash-Telemetry-Sdk': `upstash-blob-js@${VERSION}` };
   const r = runtime(g);
   if (r) out['Upstash-Telemetry-Runtime'] = r;

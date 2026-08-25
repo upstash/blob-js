@@ -16,6 +16,11 @@ export const clock = {
       signal?.addEventListener('abort', onAbort, { once: true });
     });
   },
+  /** setTimeout, as a cancel function: the upload watchdog and tests share one clock. */
+  timer(ms: number, cb: () => void): () => void {
+    const t = setTimeout(cb, ms);
+    return () => clearTimeout(t);
+  },
   frame(cb: () => void): void {
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => cb());
     else setTimeout(cb, 16);
