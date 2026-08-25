@@ -104,11 +104,16 @@ export interface UploadTask {
 }
 
 /** Phantom types carried by a handleUpload POST handler so useUpload<typeof POST> can infer them. */
-export interface UploadRouteTypes<TInput, TData, TRoute extends string = string> {
+export interface UploadRouteTypes<TInput, TData, TRoute extends string = string, TProxy extends boolean = false> {
   input: TInput;
   data: TData;
   /** The url the route declared, when it declared one. `route` on the hooks is typed to it. */
   route: TRoute;
+  /**
+   * True for a handleProxyUpload route. One hook serves both transports, so the record it hands back
+   * -- pause and resume on a direct upload, `start({ body })` on a proxied one -- is chosen by this.
+   */
+  proxy: TProxy;
 }
 
 /**
@@ -116,9 +121,16 @@ export interface UploadRouteTypes<TInput, TData, TRoute extends string = string>
  * `(request: Request) => Promise<Response>` must NOT satisfy it, because the hooks decide from this
  * whether the route answers the SDK's envelope or whatever the app wrote itself.
  */
-export type UploadRoute<TInput = unknown, TData = unknown, TRoute extends string = string> = ((request: Request) => Promise<Response>) & {
-  readonly __upstashUploadRoute: UploadRouteTypes<TInput, TData, TRoute>;
+export type UploadRoute<TInput = unknown, TData = unknown, TRoute extends string = string, TProxy extends boolean = false> = ((request: Request) => Promise<Response>) & {
+  readonly __upstashUploadRoute: UploadRouteTypes<TInput, TData, TRoute, TProxy>;
 };
+
+/** What GET on an upload route answers: what it accepts, and which transport it speaks. */
+export interface WireLimitsResponse {
+  limits: WireLimits;
+  /** 'proxy': the bytes go through the route as one POST. 'direct': presigned, straight to storage. */
+  transport?: 'direct' | 'proxy';
+}
 
 /** What a handleProxyUpload route answers with. JSON, so uploadedAt is the string it crossed as. */
 export interface ProxyUploadResponse<TData = unknown> {

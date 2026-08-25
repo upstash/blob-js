@@ -410,7 +410,7 @@ describe('handleUpload', () => {
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
     const etag = res.headers.get('etag')!;
     expect(etag).toMatch(/^"[a-z0-9]+"$/);
-    expect(await res.json()).toEqual({ limits: { maxBytes: 1_000_000 } });
+    expect(await res.json()).toEqual({ limits: { maxBytes: 1_000_000 }, transport: 'direct' });
     const again = await route.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }));
     expect(again.status).toBe(304);
   });
@@ -520,7 +520,8 @@ describe('handleProxyUpload', () => {
   test('it serves the same limits document a direct route does', async () => {
     resetCredentialCaches();
     const res = await route().GET(new Request('https://app.test/api/avatar'));
-    expect(await res.json()).toEqual({ limits: { allowedContentTypes: ['image/png'], maxBytes: 1_000_000 } });
+    // transport is how one hook knows to POST the bytes here rather than presign them.
+    expect(await res.json()).toEqual({ limits: { allowedContentTypes: ['image/png'], maxBytes: 1_000_000 }, transport: 'proxy' });
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
   });
 

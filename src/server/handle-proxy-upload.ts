@@ -2,7 +2,10 @@ import { BlobError } from '../shared/errors.ts';
 import type { BlobObject, ProxyUploadResponse, UploadRoute, WireFile, WireLimits } from '../shared/types.ts';
 import { formatSize, type CacheOption, type Size } from '../shared/units.ts';
 import { type Bucket } from './bucket.ts';
-import { answerError, enforce, limitsEndpoint, resolveLimits, type UploadLimits } from './handle-upload.ts';
+import { answerError, enforce, limitsEndpoint, resolveLimits, stateOf, validateInput, type StandardSchema, type UploadLimits } from './handle-upload.ts';
+
+type InferOutput<S> = S extends StandardSchema<any, infer O> ? O : never;
+type ProxyInput<TSchema> = TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : undefined;
 
 /**
  * The other half of handleUpload: the upload that goes through your function instead of straight to
@@ -21,12 +24,14 @@ import { answerError, enforce, limitsEndpoint, resolveLimits, type UploadLimits 
  * from the route's own list and refuses an oversize file before it is sent.
  */
 
-export interface ProxyBeforeUploadArgs {
+export interface ProxyBeforeUploadArgs<TInput = undefined> {
   request: Request;
   file: WireFile;
+  /** The `input` form field, parsed as JSON and validated. `undefined` on a route with no schema. */
+  input: TInput;
 }
 
-export interface ProxyBeforeUploadResult<TContext> {
+export interface ProxyBeforeUploadResult<TState> {
   path: string;
   cache?: CacheOption;
   metadata?: Record<string, string>;
@@ -34,18 +39,30 @@ export interface ProxyBeforeUploadResult<TContext> {
   limits?: UploadLimits;
   /** false: If-None-Match: * server-side, so a second upload to the same path is a real 412. */
   overwrite?: boolean;
-  context?: TContext;
+  /** Carried to onUploadCompleted and onBeforeUploadFailed. */
+  state?: TState;
+  /** @deprecated renamed to `state`; still read for one minor. */
+  context?: TState;
 }
 
-export interface ProxyUploadCompletedArgs<TContext> extends BlobObject {
+export interface ProxyBeforeUploadFailedArgs<TInput, TState> extends ProxyBeforeUploadArgs<TInput> {
+  /** What onBeforeUpload returned: the row it reserved is reachable through its state. */
+  decided: ProxyBeforeUploadResult<TState>;
+  error: BlobError;
+}
+
+export interface ProxyUploadCompletedArgs<TState> extends BlobObject {
   request: Request;
   /** What R2 stored, canonicalised and proven by the leading bytes: not what the browser claimed. */
   contentType: string;
   metadata: Record<string, string>;
-  context: TContext;
+  /** What onBeforeUpload returned as `state`. */
+  state: TState;
+  /** @deprecated renamed to `state`; the same value for one minor. */
+  context: TState;
 }
 
-export interface HandleProxyUploadOptions<TContext, TData, TRoute extends string = string> {
+export interface HandleProxyUploadOptions<TSchema extends StandardSchema<any, any> | undefined, TState, TData, TRoute extends string = string> {
   bucket: Bucket;
   /** The URL this route is mounted at, so `route` on useUploadProxy is typed to it. */
   route?: TRoute;
@@ -53,8 +70,18 @@ export interface HandleProxyUploadOptions<TContext, TData, TRoute extends string
   limits?: UploadLimits;
   /** The form field the file arrives in. Default 'file'; a request that is not multipart is the body itself. */
   field?: string;
-  onBeforeUpload: (args: ProxyBeforeUploadArgs) => ProxyBeforeUploadResult<TContext> | Promise<ProxyBeforeUploadResult<TContext>>;
-  onUploadCompleted?: (args: ProxyUploadCompletedArgs<TContext>) => TData | Promise<TData>;
+  /**
+   * A Standard Schema for the `input` form field, which the browser sends as JSON beside the file.
+   * A raw body carries no fields, so a route that declares one only accepts multipart requests.
+   */
+  input?: TSchema;
+  onBeforeUpload: (args: ProxyBeforeUploadArgs<ProxyInput<TSchema>>) => ProxyBeforeUploadResult<TState> | Promise<ProxyBeforeUploadResult<TState>>;
+  /**
+   * onBeforeUpload accepted the upload but storing it failed, so nothing will ever complete: release
+   * the row it reserved here. The error is rethrown to the client afterwards.
+   */
+  onBeforeUploadFailed?: (args: ProxyBeforeUploadFailedArgs<ProxyInput<TSchema>, TState>) => void | Promise<void>;
+  onUploadCompleted?: (args: ProxyUploadCompletedArgs<TState>) => TData | Promise<TData>;
   /**
    * Maps anything a callback threw that is not a BlobError. Return a BlobError or a Response to
    * answer with it; return nothing to fall through. An error carrying a numeric `status` becomes
@@ -63,17 +90,17 @@ export interface HandleProxyUploadOptions<TContext, TData, TRoute extends string
   onError?: (error: unknown, request: Request) => BlobError | Response | void | Promise<BlobError | Response | void>;
 }
 
-export interface ProxyUploadHandlers<TData, TRoute extends string = string> {
+export interface ProxyUploadHandlers<TInput, TData, TRoute extends string = string> {
   GET: (request: Request) => Promise<Response>;
-  POST: UploadRoute<undefined, TData, TRoute>;
+  POST: UploadRoute<TInput, TData, TRoute, true>;
 }
 
-export function handleProxyUpload<TContext = undefined, TData = void, TRoute extends string = string>(
-  options: HandleProxyUploadOptions<TContext, TData, TRoute>,
-): ProxyUploadHandlers<TData, TRoute> {
+export function handleProxyUpload<TSchema extends StandardSchema<any, any> | undefined = undefined, TState = undefined, TData = void, TRoute extends string = string>(
+  options: HandleProxyUploadOptions<TSchema, TState, TData, TRoute>,
+): ProxyUploadHandlers<ProxyInput<TSchema>, TData, TRoute> {
   const routeLimits = resolveLimits(options.limits);
   const field = options.field ?? 'file';
-  const GET = limitsEndpoint(routeLimits);
+  const GET = limitsEndpoint(routeLimits, 'proxy');
 
   const POST = async (request: Request): Promise<Response> => {
     try {
@@ -91,7 +118,8 @@ export function handleProxyUpload<TContext = undefined, TData = void, TRoute ext
       const file: WireFile = { name: body.name, type: normalizeType(body.type), size: body.size };
       enforce(routeLimits, file);
 
-      const decided = await options.onBeforeUpload({ request, file });
+      const input = (await validateInput(options.input, body.input)) as ProxyInput<TSchema>;
+      const decided = await options.onBeforeUpload({ request, file, input });
       if (!decided || typeof decided.path !== 'string') throw new TypeError('onBeforeUpload must return { path }');
 
       let limits = routeLimits;
@@ -116,18 +144,28 @@ export function handleProxyUpload<TContext = undefined, TData = void, TRoute ext
       const metadata = decided.metadata ?? {};
       // put() sniffs the leading bytes against allowedContentTypes and caps the stream at maxBytes,
       // both before the first byte reaches the bucket. A refusal here stored nothing.
-      const blob = await options.bucket.put(decided.path, body.blob, {
-        contentType: file.type,
-        ...(limits.allowedContentTypes ? { allowedContentTypes: limits.allowedContentTypes } : {}),
-        ...(limits.maxBytes === undefined ? {} : { maxBytes: limits.maxBytes as Size }),
-        ...(decided.cache === undefined ? {} : { cache: decided.cache }),
-        ...(decided.overwrite === undefined ? {} : { overwrite: decided.overwrite }),
-        metadata,
-      });
+      let blob;
+      try {
+        blob = await options.bucket.put(decided.path, body.blob, {
+          contentType: file.type,
+          ...(limits.allowedContentTypes ? { allowedContentTypes: limits.allowedContentTypes } : {}),
+          ...(limits.maxBytes === undefined ? {} : { maxBytes: limits.maxBytes as Size }),
+          ...(decided.cache === undefined ? {} : { cache: decided.cache }),
+          ...(decided.overwrite === undefined ? {} : { overwrite: decided.overwrite }),
+          metadata,
+        });
+      } catch (e) {
+        // The path is onBeforeUpload's to decide, so the row it reserved exists before the bytes do;
+        // a put that fails afterwards is told back to the app instead of stranding it.
+        const error = BlobError.is(e) ? e : new BlobError('request_failed', { message: 'could not store the upload', status: 502, cause: e });
+        await options.onBeforeUploadFailed?.({ request, file, input, decided, error });
+        throw error;
+      }
 
+      const state = stateOf(decided) as TState;
       let data: TData = undefined as TData;
       if (options.onUploadCompleted) {
-        data = await options.onUploadCompleted({ request, ...blob, contentType: blob.contentType, metadata, context: decided.context as TContext });
+        data = await options.onUploadCompleted({ request, ...blob, contentType: blob.contentType, metadata, state, context: state });
       }
       // The envelope phase 'end' answers with, so a proxied upload and a direct one land in the same
       // shape on the client and the two hooks stay interchangeable.
@@ -138,7 +176,7 @@ export function handleProxyUpload<TContext = undefined, TData = void, TRoute ext
     }
   };
 
-  return { GET, POST: POST as UploadRoute<undefined, TData, TRoute> };
+  return { GET, POST: POST as UploadRoute<ProxyInput<TSchema>, TData, TRoute, true> };
 }
 
 /**
@@ -154,6 +192,8 @@ interface ReadBody {
   name: string;
   type: string;
   size: number;
+  /** The `input` form field, still JSON. Never present on a raw body: it has no fields. */
+  input?: unknown;
 }
 
 /** put() takes either; a stream is what keeps a chunked body from being buffered to refuse it. */
@@ -192,7 +232,7 @@ async function readBody(request: Request, field: string, maxBytes: number | unde
   const value = form.get(field);
   if (!(value instanceof File)) throw new BlobError('invalid_input', { message: `the request needs a ${field} field holding the file` });
   if (value.size === 0) throw new BlobError('empty_body');
-  return { blob: value, name: value.name, type: value.type, size: value.size };
+  return { blob: value, name: value.name, type: value.type, size: value.size, input: parseInputField(form.get('input')) };
 }
 
 /**
@@ -212,6 +252,16 @@ function filenameOf(request: Request): string {
   }
   const plain = /filename=\s*(?:"([^"]*)"|([^";]+))/i.exec(header);
   return (plain?.[1] ?? plain?.[2])?.trim() || 'upload';
+}
+
+/** The browser sends `input` as a JSON string beside the file; a form field cannot carry an object. */
+function parseInputField(raw: FormDataEntryValue | null): unknown {
+  if (typeof raw !== 'string') return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new BlobError('invalid_input', { message: 'the input field is not valid JSON' });
+  }
 }
 
 function normalizeType(type: string): string {

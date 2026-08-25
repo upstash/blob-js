@@ -5,6 +5,7 @@ import type { BlobError } from '../shared/errors.ts';
 import type { ProxyUploadResponse, UploadRouteTypes } from '../shared/types.ts';
 import { deny, useLimits } from './limits.ts';
 import { ProxyTask } from './proxy-task.ts';
+import { resolveRouteUrl } from './routes.ts';
 import { useTaskList, type ListEntry } from './task-list.ts';
 import type { RouteData, RoutePath } from './use-upload.ts';
 
@@ -13,7 +14,7 @@ import type { RouteData, RoutePath } from './use-upload.ts';
  * envelope; anything else -- including an ordinary `(request: Request) => Promise<Response>` you
  * wrote yourself -- is whatever shape you passed, untouched.
  */
-export type ProxyResponse<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<any, any, any> } ? ProxyUploadResponse<RouteData<R>> : R;
+export type ProxyResponse<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<any, any, any, any> } ? ProxyUploadResponse<RouteData<R>> : R;
 
 export interface ProxyRecordBase {
   readonly id: string;
@@ -39,7 +40,10 @@ export type ProxyRecord<TResponse = unknown> =
 export type ProxyStartArgs = { file?: File | null } | { body?: File | Blob | FormData | null };
 
 export interface UseUploadProxyOptions<R> {
-  route: RoutePath<R>;
+  /** @deprecated pass the route positionally: `useUploadProxy(route, options)`. */
+  route?: RoutePath<R>;
+  /** Where the router is mounted, for a route named rather than spelled out. Default '/api/upload'. */
+  endpoint?: string;
   /**
    * A function is re-read per request, so a rotated JWT is never stale. A throw from it ends the
    * upload carrying that error, which is how an app refuses its own upload.
@@ -56,6 +60,9 @@ export interface UseUploadProxyOptions<R> {
 export interface UseUploadProxyResult<R> {
   start(args: ProxyStartArgs): ProxyRecord<ProxyResponse<R>> | null;
   uploads: ProxyRecord<ProxyResponse<R>>[];
+  /** The newest record. */
+  upload: ProxyRecord<ProxyResponse<R>> | null;
+  /** @deprecated renamed to `upload`; the same record for one minor. */
   task: ProxyRecord<ProxyResponse<R>> | null;
   clear(id?: string): void;
   /** The route's allowedContentTypes, joined. Empty until GET lands, or when it serves none. */
@@ -113,10 +120,19 @@ function refusedEntry<TResponse>(file: File, error: BlobError): ListEntry<ProxyR
   return { id, subscribe: () => () => {}, status: () => 'error', record: () => record, start: () => {} };
 }
 
-/** One ordinary POST to your own route: fetch() plus a bytes-sent event and a cancel. */
-export function useUploadProxy<R = unknown>(options: UseUploadProxyOptions<R>): UseUploadProxyResult<R> {
-  type TResponse = ProxyResponse<R>;
-  const route = options.route as string;
+/**
+ * One ordinary POST to your own route: fetch() plus a bytes-sent event and a cancel. `useUpload`
+ * covers an SDK proxy route now; this stays for a target the SDK did not write, whose response is
+ * handed back exactly as it arrived.
+ */
+export function useUploadProxy<R = unknown>(route: RoutePath<R>, options?: UseUploadProxyOptions<R>): UseUploadProxyResult<R>;
+/** @deprecated pass the route positionally: `useUploadProxy(route, options)`. */
+export function useUploadProxy<R = unknown>(options: UseUploadProxyOptions<R> & { route: RoutePath<R> }): UseUploadProxyResult<R>;
+export function useUploadProxy(routeOrOptions: any, maybeOptions?: any): any {
+  type TResponse = unknown;
+  const options: UseUploadProxyOptions<any> = (typeof routeOrOptions === 'string' ? maybeOptions : routeOrOptions) ?? {};
+  const name: string = typeof routeOrOptions === 'string' ? routeOrOptions : (options.route ?? '');
+  const route = resolveRouteUrl(name, options.endpoint);
 
   const headersRef = useRef<HeadersProvider | undefined>(options.headers);
   headersRef.current = options.headers;
@@ -150,5 +166,5 @@ export function useUploadProxy<R = unknown>(options: UseUploadProxyOptions<R>): 
     [add, route, limitsRef],
   );
 
-  return { start, uploads, task, clear, accept };
+  return { start, uploads, upload: task, task, clear, accept };
 }

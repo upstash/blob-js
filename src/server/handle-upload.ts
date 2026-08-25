@@ -1,5 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
-import type { BlobObject, UploadRoute, WireBeginResponse, WireEndResponse, WireFile, WireLanded, WireLimits, WirePart, WirePartsResponse } from '../shared/types.ts';
+import type { BlobObject, UploadRoute, WireBeginResponse, WireEndResponse, WireFile, WireLanded, WireLimits, WireLimitsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
 import { cacheControl, formatSize, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
 import { signToken, verifyToken, type TokenPayload } from './completion-token.ts';
@@ -32,22 +32,25 @@ export interface BeforeUploadArgs<TInput> {
   input: TInput;
 }
 
-export interface BeforeUploadResult<TContext> {
+export interface BeforeUploadResult<TState> {
   path: string;
   cache?: CacheOption;
   metadata?: Record<string, string>;
   /** May narrow the route's limits per user, never widen them. */
   limits?: UploadLimits;
-  context?: TContext;
+  /** Carried to onUploadCompleted and onBeforeUploadFailed. `metadata` is the way to carry an id. */
+  state?: TState;
+  /** @deprecated renamed to `state`; still read for one minor. */
+  context?: TState;
 }
 
-export interface BeforeUploadFailedArgs<TInput, TContext> extends BeforeUploadArgs<TInput> {
-  /** What onBeforeUpload returned: the row it reserved is reachable through its context. */
-  decided: BeforeUploadResult<TContext>;
+export interface BeforeUploadFailedArgs<TInput, TState> extends BeforeUploadArgs<TInput> {
+  /** What onBeforeUpload returned: the row it reserved is reachable through its state. */
+  decided: BeforeUploadResult<TState>;
   error: BlobError;
 }
 
-export interface UploadCompletedArgs<TContext> extends BlobObject {
+export interface UploadCompletedArgs<TState> extends BlobObject {
   request: Request;
   /** Stable for one upload across a retried phase 'end': the key to dedupe on. */
   uploadId: string;
@@ -55,10 +58,13 @@ export interface UploadCompletedArgs<TContext> extends BlobObject {
   multipartUploadId: string | undefined;
   contentType: string;
   metadata: Record<string, string>;
-  context: TContext;
+  /** What onBeforeUpload returned as `state`. */
+  state: TState;
+  /** @deprecated renamed to `state`; the same value for one minor. */
+  context: TState;
 }
 
-export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | undefined, TContext, TData, TRoute extends string = string> {
+export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | undefined, TState, TData, TRoute extends string = string> {
   bucket: Bucket;
   /**
    * The URL this route is mounted at -- the same string the hooks take as `route`, which is typed to
@@ -76,13 +82,13 @@ export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | 
   id?: string;
   limits?: UploadLimits;
   input?: TSchema;
-  onBeforeUpload: (args: BeforeUploadArgs<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : never>) => BeforeUploadResult<TContext> | Promise<BeforeUploadResult<TContext>>;
+  onBeforeUpload: (args: BeforeUploadArgs<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : never>) => BeforeUploadResult<TState> | Promise<BeforeUploadResult<TState>>;
   /**
    * onBeforeUpload accepted the upload but reserving it with storage failed, so nothing will ever
    * complete: release the row it reserved here. The error is rethrown to the client afterwards.
    */
-  onBeforeUploadFailed?: (args: BeforeUploadFailedArgs<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : never, TContext>) => void | Promise<void>;
-  onUploadCompleted?: (args: UploadCompletedArgs<TContext>) => TData | Promise<TData>;
+  onBeforeUploadFailed?: (args: BeforeUploadFailedArgs<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : never, TState>) => void | Promise<void>;
+  onUploadCompleted?: (args: UploadCompletedArgs<TState>) => TData | Promise<TData>;
   /**
    * Maps anything a callback threw that is not a BlobError. Return a BlobError or a Response to
    * answer with it; return nothing to fall through. An error carrying a numeric `status` becomes
@@ -93,7 +99,7 @@ export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | 
 
 export interface UploadHandlers<TInput, TData, TRoute extends string = string> {
   GET: (request: Request) => Promise<Response>;
-  POST: UploadRoute<TInput, TData, TRoute>;
+  POST: UploadRoute<TInput, TData, TRoute, false>;
 }
 
 const PARTS_PER_BATCH = 16;
@@ -105,8 +111,8 @@ const PRESIGN_MIN_REMAINING_SECONDS = 120;
 const TOKEN_TTL_MS = 7 * 86_400_000;
 const LIMITS_MAX_AGE = 60;
 
-export function handleUpload<TSchema extends StandardSchema<any, any> | undefined = undefined, TContext = undefined, TData = void, TRoute extends string = string>(
-  options: HandleUploadOptions<TSchema, TContext, TData, TRoute>,
+export function handleUpload<TSchema extends StandardSchema<any, any> | undefined = undefined, TState = undefined, TData = void, TRoute extends string = string>(
+  options: HandleUploadOptions<TSchema, TState, TData, TRoute>,
 ): UploadHandlers<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : undefined, TData, TRoute> {
   const r2 = r2Of(options.bucket);
   const routeLimits = resolveLimits(options.limits);
@@ -138,16 +144,7 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
     const file = readFile(body.file);
     enforce(routeLimits, file);
 
-    let input: unknown = undefined;
-    if (options.input) {
-      const result = await options.input['~standard'].validate(body.input);
-      if (result.issues) {
-        throw new BlobError('invalid_input', { message: result.issues.map((i) => (i.path?.length ? `${i.path.map((p) => (typeof p === 'object' ? String(p.key) : String(p))).join('.')}: ` : '') + i.message).join('; ') });
-      }
-      input = result.value;
-    } else if (body.input !== undefined) {
-      throw new BlobError('invalid_input', { message: 'this route takes no input' });
-    }
+    const input = await validateInput(options.input, body.input);
 
     const decided = await options.onBeforeUpload({ request, file, input: input as any });
     if (!decided || typeof decided.path !== 'string') throw new TypeError('onBeforeUpload must return { path }');
@@ -181,7 +178,7 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
       size: file.size,
       headers,
       allowed,
-      ctx: decided.context,
+      ctx: stateOf(decided),
       exp: Date.now() + TOKEN_TTL_MS,
     };
 
@@ -263,7 +260,8 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
         ...blob,
         contentType: head.contentType,
         metadata: head.metadata,
-        context: t.ctx as TContext,
+        state: t.ctx as TState,
+        context: t.ctx as TState,
       });
     }
     return { blob: { ...blob, uploadedAt: blob.uploadedAt.toISOString() }, data };
@@ -329,7 +327,7 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
     return out;
   }
 
-  return { GET, POST: POST as UploadRoute<any, TData, TRoute> };
+  return { GET, POST: POST as UploadRoute<any, TData, TRoute, false> };
 }
 
 /**
@@ -359,17 +357,40 @@ export async function answerError(e: unknown, request: Request, onError: ((error
  * the refusing. Short and revalidated, not immutable -- the limits are the route's own code and
  * change with a deploy, and a client that cached them forever refuses files the route now accepts.
  */
-export function limitsEndpoint(routeLimits: ResolvedLimits): (request: Request) => Promise<Response> {
+export function limitsEndpoint(routeLimits: ResolvedLimits, transport: 'direct' | 'proxy' = 'direct'): (request: Request) => Promise<Response> {
   const wireLimits: WireLimits = {};
   if (routeLimits.allowedContentTypes) wireLimits.allowedContentTypes = routeLimits.allowedContentTypes;
   if (routeLimits.maxBytes !== undefined) wireLimits.maxBytes = routeLimits.maxBytes;
-  const body = JSON.stringify({ limits: wireLimits });
+  // transport is what lets one hook serve both kinds: the browser learns from the route itself
+  // whether to presign or to POST the bytes, instead of the page having to say which it is.
+  const body = JSON.stringify({ limits: wireLimits, transport } satisfies WireLimitsResponse);
   const etag = `"${hash(body)}"`;
   return async (request: Request): Promise<Response> => {
     const headers = { 'content-type': 'application/json', 'cache-control': `public, max-age=${LIMITS_MAX_AGE}`, etag };
     if (request?.headers?.get('if-none-match') === etag) return new Response(null, { status: 304, headers });
     return new Response(body, { headers });
   };
+}
+
+/**
+ * The route's Standard Schema against what the browser sent, as invalid_input rather than whatever
+ * the validator throws. A route with no schema refuses input rather than dropping it silently.
+ */
+export async function validateInput(schema: StandardSchema<any, any> | undefined, raw: unknown): Promise<unknown> {
+  if (!schema) {
+    if (raw !== undefined) throw new BlobError('invalid_input', { message: 'this route takes no input' });
+    return undefined;
+  }
+  const result = await schema['~standard'].validate(raw);
+  if (result.issues) {
+    throw new BlobError('invalid_input', { message: result.issues.map((i) => (i.path?.length ? `${i.path.map((p) => (typeof p === 'object' ? String(p.key) : String(p))).join('.')}: ` : '') + i.message).join('; ') });
+  }
+  return result.value;
+}
+
+/** `state`, with the name it used to have still read for one minor. */
+export function stateOf<T>(decided: { state?: T; context?: T }): T | undefined {
+  return decided.state ?? decided.context;
 }
 
 export interface ResolvedLimits {

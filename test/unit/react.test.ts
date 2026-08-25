@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:te
 import { act, createElement, StrictMode } from 'react';
 import { clock } from '../../src/browser/clock.ts';
 import { poolState } from '../../src/browser/pool.ts';
-import { BlobError, configureUpload, useUpload, useUploadProxy } from '../../src/react/index.ts';
+import { BlobError, configureUpload, createUploadHooks, useUpload, useUploadProxy } from '../../src/react/index.ts';
 import type { UploadRoute } from '../../src/shared/types.ts';
 import { installRouter, installXhr, ManualXhr } from '../helpers/xhr.ts';
 
@@ -843,4 +843,166 @@ test('pause is refused once every part has landed', async () => {
     expect(task.canPause).toBe(false);
     expect(task.pause()).toBe(false);
   }
+});
+
+/* ------------------------------------------------------------------ router -- */
+
+/** The shape `typeof uploads` has: only the brands matter, so a fake one types the hooks here. */
+type Uploads = {
+  readonly __upstashUploadRouter: {
+    doc: UploadRoute<undefined, { rowId: string }, string, false>;
+    avatar: UploadRoute<undefined, { rowId: string }, string, true>;
+  };
+};
+
+function mountRouter(transport: 'direct' | 'proxy', name: string, gate?: Promise<unknown>): { endpoint: string; url: string } {
+  const endpoint = `/api/router/${++routeId}`;
+  const url = `${endpoint}?route=${name}`;
+  restore.push(
+    installRouter({
+      [url]: {
+        GET: async (request: Request) => {
+          calls.push({ url, method: 'GET', body: undefined, auth: request.headers.get('authorization') });
+          // A route that has not answered yet is the whole point of the deferred tests below.
+          if (gate) await gate;
+          return jsonResponse({ limits: LIMITS, transport });
+        },
+        POST: async (request: Request) => {
+          const body = (await request.json()) as any;
+          calls.push({ url, method: 'POST', body, auth: request.headers.get('authorization') });
+          if (body?.phase === 'begin') return jsonResponse({ completionToken: 't', path: 'p', upload: { kind: 'single', url: 'https://r2.test/put', headers: { 'content-type': 'image/png' } } });
+          if (body?.phase === 'end') return jsonResponse(END_BODY);
+          return jsonResponse({ ok: true });
+        },
+      },
+    }),
+  );
+  return { endpoint, url };
+}
+
+test('a route name resolves against the endpoint, for the limits and for the upload', async () => {
+  const { endpoint, url } = mountRouter('direct', 'doc');
+  const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint });
+  const hook = await render(() => bound('doc'));
+  await flush();
+  expect(calls[0]).toMatchObject({ url, method: 'GET' });
+  expect(hook.current.accept).toBe('image/png');
+
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const put = await nextXhr();
+  expect(put.method).toBe('PUT');
+  expect(calls.some((c) => c.url === url && c.body?.phase === 'begin')).toBe(true);
+  await act(async () => {
+    put.respond(200, { etag: '"x"' });
+  });
+  await flush(3);
+  const upload = hook.current.upload!;
+  expect(upload.status).toBe('done');
+  expect(upload.status === 'done' && upload.blob.data.rowId).toBe('1');
+  // task is the same record under its old name.
+  expect(hook.current.task).toBe(upload);
+});
+
+test('the same hook runs a proxy route as one POST, and merges the envelope into blob', async () => {
+  const { endpoint, url } = mountRouter('proxy', 'avatar');
+  const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint, headers: () => ({ authorization: 'Bearer t' }) });
+  const hook = await render(() => bound('avatar'));
+  await flush();
+
+  const file = png();
+  await act(async () => {
+    hook.current.start({ file });
+  });
+  const xhr = await nextXhr();
+  expect(xhr.method).toBe('POST');
+  expect(xhr.url).toBe(url);
+  expect(xhr.headers['authorization']).toBe('Bearer t');
+  expect(xhr.body).toBeInstanceOf(FormData);
+  expect((xhr.body as FormData).get('file')).toBe(file as any);
+  // No begin, no end: the bytes and the answer are the one request.
+  expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0);
+
+  await act(async () => {
+    xhr.respond(200, {}, JSON.stringify(END_BODY));
+  });
+  await flush(2);
+  const upload = hook.current.upload!;
+  expect(upload.status).toBe('done');
+  if (upload.status !== 'done') throw new Error('unreachable');
+  expect(upload.blob.data.rowId).toBe('1');
+  expect(upload.blob.url).toBe('https://h/p');
+  // The envelope crossed as JSON; uploadedAt is a Date again, as it is on a direct upload.
+  expect(upload.blob.uploadedAt).toBeInstanceOf(Date);
+});
+
+test('a file picked before the route has answered waits for it, then goes the right way', async () => {
+  let answer!: () => void;
+  const gate = new Promise<void>((resolve) => (answer = resolve));
+  const { endpoint } = mountRouter('proxy', 'avatar', gate);
+  const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint });
+  // The route has not said what it is yet, so nothing can be sent with the right transport.
+  const hook = await render(() => bound('avatar'));
+  let record: any;
+  await act(async () => {
+    record = hook.current.start({ file: png() });
+  });
+  expect(record.status).toBe('queued');
+  expect(xhrs).toHaveLength(0);
+
+  await act(async () => {
+    answer();
+  });
+  const xhr = await nextXhr();
+  // It went out as one POST, not as a presign: the route said so before anything was sent.
+  expect(xhr.method).toBe('POST');
+  expect(xhr.body).toBeInstanceOf(FormData);
+  expect(hook.current.uploads).toHaveLength(1);
+  expect(hook.current.uploads[0]!.id).toBe(record.id);
+  await act(async () => {
+    xhr.respond(200, {}, JSON.stringify(END_BODY));
+  });
+  await flush(2);
+  expect(hook.current.upload!.status).toBe('done');
+});
+
+test('a file the limits refuse is refused even when it was picked before they landed', async () => {
+  let answer!: () => void;
+  const gate = new Promise<void>((resolve) => (answer = resolve));
+  const { endpoint } = mountRouter('proxy', 'avatar', gate);
+  const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint });
+  const hook = await render(() => bound('avatar'));
+  await act(async () => {
+    hook.current.start({ file: png('big.png', 2000) });
+  });
+  await act(async () => {
+    answer();
+  });
+  await flush(3);
+  const upload = hook.current.upload!;
+  expect(upload.status).toBe('error');
+  expect(upload.status === 'error' && upload.error.code).toBe('too_large');
+  expect(xhrs).toHaveLength(0);
+});
+
+test('cancel before the route answers never sends the file', async () => {
+  let answer!: () => void;
+  const gate = new Promise<void>((resolve) => (answer = resolve));
+  const { endpoint } = mountRouter('proxy', 'avatar', gate);
+  const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint });
+  const hook = await render(() => bound('avatar'));
+  let record: any;
+  await act(async () => {
+    record = hook.current.start({ file: png() });
+  });
+  await act(async () => {
+    expect(record.cancel()).toBe(true);
+  });
+  await act(async () => {
+    answer();
+  });
+  await flush(3);
+  expect(xhrs).toHaveLength(0);
+  expect(hook.current.upload!.status).toBe('canceled');
 });
