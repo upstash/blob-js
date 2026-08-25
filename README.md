@@ -15,7 +15,7 @@ const bucket = Bucket.fromEnv(); // reads UPSTASH_BLOB_TOKEN
 // or: new Bucket({ token: '...' })
 
 const blob = await bucket.put('avatars/me.png', file, { contentType: 'image/png' });
-blob.url; // https://b<hash>.blob.upstash.io/avatars/me.png
+blob.url; // https://b<hash>.blob.upstash.io/avatars/me.png — undefined on a private bucket
 blob.contentType; // what it was stored as
 
 await bucket.get('avatars/me.png');
@@ -84,7 +84,7 @@ Route handler:
 
 ```ts
 // app/api/upload/route.ts
-import { Bucket, handleUpload } from '@upstash/blob';
+import { BlobError, Bucket, handleUpload } from '@upstash/blob';
 
 export const { GET, POST } = handleUpload({
   bucket: Bucket.fromEnv(),

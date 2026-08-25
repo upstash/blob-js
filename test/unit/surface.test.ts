@@ -8,6 +8,19 @@ describe('public surface', () => {
     expect(() => Bucket.fromEnv('UPSTASH_BLOB_NOPE')).toThrow(/UPSTASH_BLOB_NOPE is not set.*new Bucket\(\{ token: env\.UPSTASH_BLOB_NOPE \}\)/);
   });
 
+  test('fromEnv takes the constructor options too', () => {
+    process.env.UPSTASH_BLOB_SURFACE = encodeToken('bucket', 'pw', 'bdeadbeef012');
+    try {
+      const b = Bucket.fromEnv('UPSTASH_BLOB_SURFACE', { visibility: 'private', cache: '1m' });
+      expect(b).toBeInstanceOf(Bucket);
+      // The token in the options is ignored: fromEnv's whole job is to read it from the environment.
+      // @ts-expect-error token is not one of fromEnv's options
+      void Bucket.fromEnv('UPSTASH_BLOB_SURFACE', { token: 'x' });
+    } finally {
+      delete process.env.UPSTASH_BLOB_SURFACE;
+    }
+  });
+
   test('nothing SPEC does not name', () => {
     // @ts-expect-error signal is not a put() option
     const _opts: PutOptions = { signal: new AbortController().signal };
