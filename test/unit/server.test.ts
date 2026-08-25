@@ -256,6 +256,26 @@ describe('bucket guards', () => {
     expect(r2Calls().length).toBe(0);
   });
 
+  test("del({ prefix: '', all: true }) means it, and lists then batch-deletes", async () => {
+    resetCredentialCaches();
+    const listed = ['a.txt', 'b/c.txt'];
+    r2Handler = (call) => {
+      const u = new URL(call.url);
+      if (u.searchParams.get('list-type') === '2') {
+        return new Response(
+          `<ListBucketResult>${listed.map((k) => `<Contents><Key>${k}</Key><Size>1</Size><ETag>&quot;e&quot;</ETag></Contents>`).join('')}<IsTruncated>false</IsTruncated></ListBucketResult>`,
+          { status: 200 },
+        );
+      }
+      if (u.searchParams.has('delete')) return new Response('<DeleteResult/>', { status: 200 });
+      return new Response('', { status: 200 });
+    };
+    await bucket().del({ prefix: '', all: true });
+    const batch = r2Calls().find((c) => new URL(c.url).searchParams.has('delete'))!;
+    expect(batch.method).toBe('POST');
+    expect(String(batch.init.body)).toContain('<Key>b/c.txt</Key>');
+  });
+
   test('put answers the content type it sent', async () => {
     resetCredentialCaches();
     r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
@@ -276,6 +296,34 @@ describe('bucket guards', () => {
     // The credentials response wins over the option: the bucket knows what it is.
     const declaredPublic = await new Bucket({ token: TOKEN, visibility: 'public' }).put('a.txt', 'x');
     expect(declaredPublic.url).toBeUndefined();
+  });
+});
+
+describe('listMultipartUploads', () => {
+  test('pages with markers decoded, so a key with an entity in it does not repeat forever', async () => {
+    resetCredentialCaches();
+    const markers: (string | null)[] = [];
+    let page = 0;
+    r2Handler = (call) => {
+      const u = new URL(call.url);
+      markers.push(u.searchParams.get('key-marker'));
+      page++;
+      if (page === 1) {
+        return new Response(
+          '<ListMultipartUploadsResult><Upload><Key>a&amp;b.txt</Key><UploadId>u1</UploadId><Initiated>2026-08-01T00:00:00Z</Initiated></Upload>' +
+            '<IsTruncated>true</IsTruncated><NextKeyMarker>a&amp;b.txt</NextKeyMarker><NextUploadIdMarker>u1</NextUploadIdMarker></ListMultipartUploadsResult>',
+          { status: 200 },
+        );
+      }
+      return new Response(
+        '<ListMultipartUploadsResult><Upload><Key>c.txt</Key><UploadId>u2</UploadId><Initiated>2026-08-02T00:00:00Z</Initiated></Upload>' +
+          '<IsTruncated>false</IsTruncated></ListMultipartUploadsResult>',
+        { status: 200 },
+      );
+    };
+    const uploads = await bucket().listMultipartUploads();
+    expect(uploads.map((u) => u.path)).toEqual(['a&b.txt', 'c.txt']);
+    expect(markers).toEqual([null, 'a&b.txt']);
   });
 });
 

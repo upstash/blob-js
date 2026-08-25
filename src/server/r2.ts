@@ -258,8 +258,12 @@ export class R2 {
         out.push({ path: decodeEntities(key), uploadId: decodeEntities(id), initiatedAt: new Date(tag(b, 'Initiated') ?? 0) });
       }
       if (tag(xml, 'IsTruncated') !== 'true') break;
-      keyMarker = tag(xml, 'NextKeyMarker');
-      idMarker = tag(xml, 'NextUploadIdMarker');
+      const nextKey = tag(xml, 'NextKeyMarker');
+      const nextId = tag(xml, 'NextUploadIdMarker');
+      // The markers are sent back verbatim, so a key carrying &, < or > has to be decoded first or
+      // the next page repeats this one forever.
+      keyMarker = nextKey === undefined ? undefined : decodeEntities(nextKey);
+      idMarker = nextId === undefined ? undefined : decodeEntities(nextId);
       if (!keyMarker) break;
     }
     return out;
