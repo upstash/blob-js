@@ -119,6 +119,8 @@ export function useLimits(route: string, headers: HeadersProvider | undefined) {
 
   const limitsRef = useRef<WireLimits | undefined>(cachedFacts(route)?.limits);
   const transportRef = useRef<'direct' | 'proxy' | undefined>(cachedFacts(route)?.transport);
+  // State, not just the ref: a page that prints the size cap has to render again when it lands.
+  const [limits, setLimits] = useState<WireLimits | undefined>(() => cachedFacts(route)?.limits);
   const [accept, setAccept] = useState(() => acceptOf(cachedFacts(route)?.limits));
 
   /** Resolves once the route has said what it is, so a file picked before the GET lands still waits. */
@@ -136,14 +138,17 @@ export function useLimits(route: string, headers: HeadersProvider | undefined) {
     const hit = cachedFacts(route);
     limitsRef.current = hit?.limits;
     transportRef.current = hit?.transport;
+    setLimits(hit?.limits);
     setAccept(acceptOf(limitsRef.current));
     void load().then((facts) => {
-      if (alive) setAccept(acceptOf(facts.limits));
+      if (!alive) return;
+      setLimits(facts.limits);
+      setAccept(acceptOf(facts.limits));
     });
     return () => {
       alive = false;
     };
   }, [route, load]);
 
-  return { limitsRef, transportRef, accept, load };
+  return { limitsRef, transportRef, limits, accept, load };
 }

@@ -1,5 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
-import type { BlobObject, UploadRoute, WireBeginResponse, WireEndResponse, WireFile, WireLanded, WireLimits, WireLimitsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
+import type { BlobObject, UploadFile, UploadRoute, WireBeginResponse, WireEndResponse, WireLanded, WireLimits, WireLimitsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
 import { cacheControl, formatSize, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
 import { signToken, verifyToken, type TokenPayload } from './completion-token.ts';
@@ -28,7 +28,7 @@ export interface UploadLimits {
 
 export interface BeforeUploadArgs<TInput> {
   request: Request;
-  file: WireFile;
+  file: UploadFile;
   input: TInput;
 }
 
@@ -405,14 +405,14 @@ export function resolveLimits(limits: UploadLimits | undefined): ResolvedLimits 
   };
 }
 
-export function enforce(limits: ResolvedLimits, file: WireFile): void {
+export function enforce(limits: ResolvedLimits, file: UploadFile): void {
   if (limits.maxBytes !== undefined && file.size > limits.maxBytes) {
     throw new BlobError('too_large', { message: `${file.name} is ${formatSize(file.size)}, over the ${formatSize(limits.maxBytes)} limit` });
   }
   if (limits.allowedContentTypes) checkContentType(file.type, undefined, limits.allowedContentTypes);
 }
 
-function readFile(raw: unknown): WireFile {
+function readFile(raw: unknown): UploadFile {
   const f = raw as Record<string, unknown> | undefined;
   if (!f || typeof f !== 'object' || typeof f.name !== 'string' || !Number.isInteger(f.size) || (f.size as number) < 0) {
     throw new BlobError('invalid_input', { message: 'file must be { name, type, size }' });

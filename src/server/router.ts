@@ -1,5 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
-import type { BlobObject, UploadRouteTypes, WireFile } from '../shared/types.ts';
+import type { BlobObject, UploadFile, UploadRouteTypes } from '../shared/types.ts';
 import type { CacheOption, Size } from '../shared/units.ts';
 import type { Bucket } from './bucket.ts';
 import { handleProxyUpload } from './handle-proxy-upload.ts';
@@ -23,12 +23,24 @@ export interface RouteLimits {
   maxBytes?: Size | null;
 }
 
-export interface RouteBeforeUploadArgs<TCtx, TInput> {
+/**
+ * The ctx a router hands every callback. Takes the router -- `UploadContext<typeof uploads>` -- or a
+ * ctx type, which passes straight through, so a callback written beside the router and one written
+ * in another file are annotated the same way.
+ */
+export type UploadContext<T> = [T] extends [{ readonly __upstashUploadContext: infer TCtx }] ? TCtx : T;
+
+/**
+ * The args a route's `onBeforeUpload` is called with. Inside `upload({ ... })` they are contextual
+ * and nothing needs writing; this is for the callback two routes share, written once elsewhere:
+ * `({ ctx, file }: RouteBeforeUploadArgs<typeof uploads>) => ...`.
+ */
+export interface RouteBeforeUploadArgs<TCtx = unknown, TInput = undefined> {
   request: Request;
-  file: WireFile;
+  file: UploadFile;
   input: TInput;
   /** Whatever the router's `context` returned for this request. */
-  ctx: TCtx;
+  ctx: UploadContext<TCtx>;
 }
 
 export interface RouteBeforeUploadResult<TState, TProxy extends boolean> {
@@ -43,7 +55,7 @@ export interface RouteBeforeUploadResult<TState, TProxy extends boolean> {
   overwrite?: TProxy extends true ? boolean : never;
 }
 
-export interface RouteBeforeUploadFailedArgs<TCtx, TInput, TState, TProxy extends boolean> extends RouteBeforeUploadArgs<TCtx, TInput> {
+export interface RouteBeforeUploadFailedArgs<TCtx = unknown, TInput = undefined, TState = undefined, TProxy extends boolean = boolean> extends RouteBeforeUploadArgs<TCtx, TInput> {
   /** What onBeforeUpload returned: the row it reserved is reachable through its state. */
   decided: RouteBeforeUploadResult<TState, TProxy>;
   error: BlobError;
@@ -55,7 +67,7 @@ interface CompletedBase<TCtx, TState> extends BlobObject {
   contentType: string;
   metadata: Record<string, string>;
   state: TState;
-  ctx: TCtx;
+  ctx: UploadContext<TCtx>;
 }
 
 interface DirectCompletedExtras {
@@ -65,13 +77,17 @@ interface DirectCompletedExtras {
   multipartUploadId: string | undefined;
 }
 
-/** Flat: the stored object, plus what this route knows about it. Absent on proxy: the two ids. */
-export type RouteUploadCompletedArgs<TCtx, TState, TProxy extends boolean> = CompletedBase<TCtx, TState> & (TProxy extends true ? unknown : DirectCompletedExtras);
+/**
+ * Flat: the stored object, plus what this route knows about it. Absent on proxy: the two ids, which
+ * is why `TProxy` defaults to `boolean` -- the fields both transports carry, so one annotation fits
+ * a shared callback mounted on either. Pass `false` to reach `uploadId` on a direct route.
+ */
+export type RouteUploadCompletedArgs<TCtx = unknown, TState = undefined, TProxy extends boolean = boolean> = CompletedBase<TCtx, TState> & (TProxy extends true ? unknown : DirectCompletedExtras);
 
-export interface RouteErrorArgs<TCtx> {
+export interface RouteErrorArgs<TCtx = unknown> {
   error: unknown;
   request: Request;
-  ctx: TCtx | undefined;
+  ctx: UploadContext<TCtx> | undefined;
 }
 
 /**
@@ -167,11 +183,13 @@ export interface UploadRouterOptions<TCtx, TRoutes> {
   routes: TRoutes | ((upload: UploadBuilder<Awaited<TCtx>>) => TRoutes);
 }
 
-export interface UploadRouter<TRoutes = UploadRouteMap> {
+export interface UploadRouter<TRoutes = UploadRouteMap, TCtx = unknown> {
   GET: (request: Request) => Promise<Response>;
   POST: (request: Request) => Promise<Response>;
   /** The route map, as types. This is what `createUploadHooks<typeof uploads>` reads. */
   readonly __upstashUploadRouter: TRoutes;
+  /** What `context` returned, as types. This is what `UploadContext<typeof uploads>` reads. */
+  readonly __upstashUploadContext: TCtx;
 }
 
 /** Route names live in a url query, so they are limited to what reads back as one word. */
@@ -206,9 +224,9 @@ interface Slot {
 /** With a `context`, `routes` must be the function form: the plain object cannot see `ctx`. */
 export function uploadRouter<TCtx, TRoutes extends Record<string, unknown>>(
   options: UploadRouterOptions<TCtx, TRoutes> & { context: (request: Request) => TCtx; routes: (upload: UploadBuilder<Awaited<TCtx>>) => TRoutes },
-): UploadRouter<TRoutes>;
-export function uploadRouter<TRoutes extends Record<string, unknown>>(options: UploadRouterOptions<undefined, TRoutes> & { context?: undefined }): UploadRouter<TRoutes>;
-export function uploadRouter<TCtx = undefined, TRoutes extends Record<string, unknown> = Record<string, never>>(options: UploadRouterOptions<TCtx, TRoutes>): UploadRouter<TRoutes> {
+): UploadRouter<TRoutes, Awaited<TCtx>>;
+export function uploadRouter<TRoutes extends Record<string, unknown>>(options: UploadRouterOptions<undefined, TRoutes> & { context?: undefined }): UploadRouter<TRoutes, undefined>;
+export function uploadRouter<TCtx = undefined, TRoutes extends Record<string, unknown> = Record<string, never>>(options: UploadRouterOptions<TCtx, TRoutes>): UploadRouter<TRoutes, Awaited<TCtx>> {
   const definitions = (typeof options.routes === 'function' ? (options.routes as (u: UploadBuilder<any>) => TRoutes)(upload as UploadBuilder<any>) : options.routes) as unknown as Record<string, Definition>;
 
   // The request is the key, so `ctx` reaches callbacks the primitives own without either of them
@@ -336,7 +354,8 @@ export function uploadRouter<TCtx = undefined, TRoutes extends Record<string, un
     return response;
   };
 
-  return { GET, POST, __upstashUploadRouter: undefined as unknown as TRoutes };
+  // Types only, never read: the two brands are how `typeof uploads` carries its routes and its ctx.
+  return { GET, POST, __upstashUploadRouter: undefined as unknown as TRoutes, __upstashUploadContext: undefined as unknown as Awaited<TCtx> };
 }
 
 /** The route's own limits, key by key, over the router's. `null` clears one the router set. */

@@ -2,7 +2,7 @@ import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
 import { createTask, type HeadersProvider, type InternalTask } from '../browser/task.ts';
 import { BlobError } from '../shared/errors.ts';
-import type { BlobObject, ProxyUploadResponse, UploadRoute, UploadRouteTypes } from '../shared/types.ts';
+import type { BlobObject, ProxyUploadResponse, UploadRoute, UploadRouteTypes, WireLimits } from '../shared/types.ts';
 import { deny, useLimits } from './limits.ts';
 import { ProxyTask } from './proxy-task.ts';
 import { resolveRouteUrl, type AnyUploadRoute, type IsProxyRoute } from './routes.ts';
@@ -118,6 +118,12 @@ export interface UseUploadResult<R> {
   clear(id?: string): void;
   /** The route's allowedContentTypes, joined. Empty until GET lands, or when it serves none. */
   accept: string;
+  /**
+   * What the route says it accepts, its own numbers: `maxBytes` in bytes and the exact content type
+   * list, so a page states the cap instead of repeating a constant that can drift from it. Undefined
+   * until the route's GET answers, and when it serves no limits at all.
+   */
+  limits: WireLimits | undefined;
 }
 
 interface AnyStartArgs {
@@ -312,7 +318,7 @@ export function useUpload(routeOrOptions: any, maybeOptions?: any): any {
   const handlers = useRef(options);
   handlers.current = options;
 
-  const { limitsRef, transportRef, accept, load } = useLimits(url, options.headers);
+  const { limitsRef, transportRef, limits, accept, load } = useLimits(url, options.headers);
 
   const { uploads, task, add, clear } = useTaskList<AnyRecord>({
     concurrency: options.concurrency,
@@ -365,5 +371,5 @@ export function useUpload(routeOrOptions: any, maybeOptions?: any): any {
     [add, url, limitsRef, transportRef, load],
   );
 
-  return { start, uploads, upload: task, task, clear, accept };
+  return { start, uploads, upload: task, task, clear, accept, limits };
 }

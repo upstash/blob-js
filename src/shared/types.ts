@@ -14,11 +14,19 @@ export interface BlobObject {
 
 /* ----------------------------------------------------------- upload wire -- */
 
-export interface WireFile {
+/**
+ * What a route is told about a file before a byte of it is sent: what the browser claimed, which is
+ * why onUploadCompleted's `contentType` is the one to record. Exported so a shared onBeforeUpload
+ * can be written outside the `upload({ ... })` that runs it.
+ */
+export interface UploadFile {
   name: string;
   type: string;
   size: number;
 }
+
+/** The name this crosses the wire under, kept for the wire types below. */
+export type WireFile = UploadFile;
 
 export interface WireLimits {
   allowedContentTypes?: readonly string[];

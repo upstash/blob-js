@@ -193,6 +193,35 @@ export default function Page() {
 - **`onError` on a route** maps: return a `BlobError` or a `Response` to answer with it. **`onError`
   on the router** observes: it hears about every refusal either way and cannot change the answer.
 
+### Callbacks two routes share
+
+Inside `upload({ ... })` the callbacks are contextually typed and nothing needs writing. A pair
+written once and mounted on several routes is annotated instead, with one type each:
+`RouteBeforeUploadArgs` and `RouteUploadCompletedArgs`, keyed on the router or on the ctx type.
+`UploadContext<typeof uploads>` is what the router's `context` returned, and `UploadFile` is the file
+as the browser described it.
+
+```ts
+import type { RouteBeforeUploadArgs, RouteUploadCompletedArgs } from '@upstash/blob';
+
+// The ctx is named once and the transport is not named at all, so this fits a direct route and a
+// proxied one; each route still infers its own state and its own data from the pair.
+const stored = (prefix: string) => ({
+  onBeforeUpload: ({ ctx, file }: RouteBeforeUploadArgs<Session>) => ({ path: uniquePath`${prefix}/${ctx.id}/${file.name}`, state: { name: file.name } }),
+  onUploadCompleted: ({ ctx, state, path, size }: RouteUploadCompletedArgs<Session, { name: string }>) => db.files.insert({ owner: ctx.id, name: state.name, path, size }),
+});
+
+routes: (upload) => ({
+  attachment: upload({ ...stored('attachment') }),
+  avatar: upload({ proxy: true, ...stored('avatar'), onBeforeUpload: ({ ctx }) => ({ path: `avatar/${ctx.id}` }) }),
+});
+```
+
+`RouteUploadCompletedArgs` defaults to the fields both transports carry, which is what lets one
+annotation serve both; pass `false` as its third argument for the direct-only `uploadId` and
+`multipartUploadId`. A helper written outside the router file takes the router itself --
+`RouteBeforeUploadArgs<typeof uploads>` -- so the ctx has one source of truth.
+
 ### Proxied routes
 
 `proxy: true` sends the bytes through your function, and `put()` checks them before anything reaches
@@ -329,6 +358,10 @@ function Uploader() {
   all. `task` is `upload` under its old name, deprecated.
 - **`accept`** is the route's own `allowedContentTypes`, for the file input, so there is no second
   list to fall out of step with the one that does the refusing.
+- **`limits`** is the same document unjoined -- `limits.maxBytes` in bytes, `limits.allowedContentTypes`
+  as the list -- for a page that states the cap it is about to enforce. Undefined until the route's
+  GET answers, and when the route serves no limits, so nothing renders a number the route did not
+  give.
 - A **done** record carries `blob`, whichever transport ran: the stored object, `uploadedAt` as a
   `Date`, and `blob.data` typed to whatever the route's `onUploadCompleted` returned.
 - A **direct** record has `pause()`, `resume()`, `retry()`, `canPause` and `stalled`. A **proxy**
