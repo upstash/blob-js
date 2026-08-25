@@ -81,7 +81,14 @@ export interface SignedReadUrlOptions {
    * cap, which never throws; `expiresAt` says what you got either way.
    */
   expiresIn?: Duration;
-  downloadName?: string;
+  /**
+   * Save the file instead of showing it in the tab: `true` uses the last segment of the path,
+   * a string is the name to save it as. It rides on the signature as
+   * `response-content-disposition`, so the browser can be sent straight to storage.
+   */
+  download?: boolean | string;
+  /** What storage answers with as `Content-Type`, overriding what the object was stored as. */
+  contentType?: string;
   /** Shorten a too-long `expiresIn` to the cap instead of throwing. */
   clamp?: boolean;
 }
@@ -113,6 +120,29 @@ export type DeleteTarget = string | string[] | { prefix: string; all?: boolean }
 export interface UpdateOptions {
   cache?: CacheOption;
   metadata?: Record<string, string>;
+}
+
+/**
+ * The name reaches storage as a query parameter and comes back as a header value, so a quote, a
+ * semicolon or a CRLF in it must not be able to add a parameter or a second header. RFC 6266 4.1
+ * carries the real name in `filename*` as an RFC 8187 ext-value, where percent-encoding leaves a
+ * parser nothing to read as syntax; the `filename` fallback is cut back to characters that cannot
+ * end the quoted string. encodeURIComponent leaves `!'()*` alone and only `!` of those is an
+ * attr-char, so the other four are escaped by hand.
+ */
+function attachmentDisposition(name: string): string {
+  const raw = name || 'download';
+  const ascii = raw.replace(/[^\w.\- ]+/g, '_') || 'download';
+  const encoded = encodeURIComponent(raw).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+/** Same reasoning: this becomes the Content-Type header storage answers with. */
+function safeContentType(type: string): string {
+  if (!/^[\w.+-]+\/[\w.+-]+(?:\s*;\s*[\w.+-]+=(?:[\w.+-]+|"[^";\\]*"))*$/.test(type)) {
+    throw new BlobError('invalid_input', { message: `contentType: "${type}" is not a media type` });
+  }
+  return type;
 }
 
 const INTERNALS = new WeakMap<Bucket, R2>();
@@ -328,10 +358,11 @@ export class Bucket {
   async signedRead(path: string, options: SignedReadUrlOptions = {}): Promise<SignedRead> {
     const expiresIn = options.expiresIn === undefined ? undefined : Math.max(1, Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000));
     const query: Record<string, string> = {};
-    if (options.downloadName !== undefined) {
-      const ascii = options.downloadName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
-      query['response-content-disposition'] = `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(options.downloadName)}`;
+    if (options.download) {
+      const name = typeof options.download === 'string' ? options.download : (path.split('/').pop() ?? '');
+      query['response-content-disposition'] = attachmentDisposition(name);
     }
+    if (options.contentType !== undefined) query['response-content-type'] = safeContentType(options.contentType);
     return this.r2.presignRead({ path, query, expiresIn, clamp: options.clamp });
   }
 

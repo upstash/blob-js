@@ -127,7 +127,7 @@ describe('read', () => {
     const cap = await priv.signedReadCap();
     expect(cap).toBeGreaterThanOrEqual(30);
     const asked = Math.min(120, cap);
-    const read = await priv.signedRead(p('secret.txt'), { expiresIn: asked, downloadName: 'Report Q3.txt' });
+    const read = await priv.signedRead(p('secret.txt'), { expiresIn: asked, download: 'Report Q3.txt' });
     expect(Number(new URL(read.url).searchParams.get('X-Amz-Expires'))).toBe(asked);
     // The old signedReadUrl clamped to whatever the credential had left, so a link could come back
     // already dead. expiresAt is the truth now, and it is never later than the credential.

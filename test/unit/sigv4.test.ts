@@ -99,6 +99,33 @@ describe('presign', () => {
     expect(actual.pathname).toBe(path);
   });
 
+  test('a response-content-disposition rides inside the signature', async () => {
+    const path = '/bucket-id/report.pdf';
+    const disposition = `attachment; filename="Report Q3.pdf"; filename*=UTF-8''Report%20Q3.pdf`;
+
+    const expected = await oracle(CREDS.sessionToken).presign(
+      new HttpRequest({
+        method: 'GET',
+        protocol: 'https:',
+        hostname: R2_HOST,
+        path,
+        query: { 'response-content-disposition': disposition, 'response-content-type': 'application/pdf' },
+        headers: { host: R2_HOST },
+        body: { unhashable: true },
+      }),
+      { signingDate: DATE, expiresIn: 300 },
+    );
+
+    const url = new URL(`https://${R2_HOST}${path}`);
+    url.searchParams.set('response-content-disposition', disposition);
+    url.searchParams.set('response-content-type', 'application/pdf');
+    const actual = new URL(await presign(CREDS, { method: 'GET', url: url.href, expiresIn: 300, date: DATE }));
+
+    expect(actual.searchParams.get('response-content-disposition')).toBe(disposition);
+    // Signed, not merely appended: storage refuses a link whose disposition was edited afterwards.
+    expect(actual.searchParams.get('X-Amz-Signature')).toBe(expected.query?.['X-Amz-Signature'] as string);
+  });
+
   test('omits the session token when the credentials carry none', async () => {
     const url = await presign(
       { accessKeyId: CREDS.accessKeyId, secretAccessKey: CREDS.secretAccessKey, region: 'auto' },

@@ -99,7 +99,7 @@ describe('4. files', () => {
       if (!row || row.owner !== user.id || row.status !== 'ready') return Response.json({ error: 'not found' }, { status: 404 });
       // No expiresIn: 15m was answered with a link that quietly died with the credential, and the
       // cap moves, so the default asks for the shorter of five minutes and what it can actually sign.
-      const url = await priv.signedReadUrl(row.path, { downloadName: row.name });
+      const url = await priv.signedReadUrl(row.path, { download: row.name });
       return Response.json({ url });
     });
     const ok = await GET_fileUrl(new Request('https://app/api/file?id=r1', { headers: { authorization: 'Bearer 7' } }));

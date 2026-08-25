@@ -228,6 +228,70 @@ describe('signedRead', () => {
   });
 });
 
+describe('signedRead download', () => {
+  const disposition = async (path: string, options: Parameters<Bucket['signedRead']>[1] = {}) =>
+    new URL((await bucket().signedRead(path, options)).url).searchParams.get('response-content-disposition');
+
+  test('download: true saves it under the last segment of the path', async () => {
+    resetCredentialCaches();
+    expect(await disposition('reports/2026/q3.pdf', { download: true })).toBe(`attachment; filename="q3.pdf"; filename*=UTF-8''q3.pdf`);
+    // A trailing slash leaves nothing to name it with, so it is still a download.
+    expect(await disposition('reports/', { download: true })).toBe(`attachment; filename="download"; filename*=UTF-8''download`);
+  });
+
+  test('download: name is the name it saves as', async () => {
+    resetCredentialCaches();
+    expect(await disposition('u/1/abc', { download: 'Report Q3.pdf' })).toBe(`attachment; filename="Report Q3.pdf"; filename*=UTF-8''Report%20Q3.pdf`);
+  });
+
+  test('no download option is no disposition at all', async () => {
+    resetCredentialCaches();
+    expect(await disposition('a.txt')).toBeNull();
+    expect(await disposition('a.txt', { download: false })).toBeNull();
+  });
+
+  test('a name a header cannot carry cannot add a parameter or a second header', async () => {
+    resetCredentialCaches();
+    // The quote, the semicolon and the CRLF are what an injection needs; filename* carries the
+    // real name percent-encoded, where a parser finds nothing to read as syntax.
+    const evil = 'a";x=1\r\nSet-Cookie: p=1.txt';
+    const value = (await disposition('u/1/abc', { download: evil }))!;
+    expect(value).toBe(`attachment; filename="a_x_1_Set-Cookie_ p_1.txt"; filename*=UTF-8''a%22%3Bx%3D1%0D%0ASet-Cookie%3A%20p%3D1.txt`);
+    // The quoted fallback ends where it is meant to, and the ext-value carries no syntax at all.
+    expect(value.slice(value.indexOf('"') + 1, value.lastIndexOf('"'))).not.toMatch(/["\\;\r\n]/);
+    expect(value.slice(value.indexOf('filename*'))).not.toMatch(/[\r\n;"]/);
+  });
+
+  test('a unicode name crosses as an RFC 8187 ext-value with an ascii fallback', async () => {
+    resetCredentialCaches();
+    expect(await disposition('u/1/abc', { download: 'café ☕.pdf' })).toBe(`attachment; filename="caf_ _.pdf"; filename*=UTF-8''caf%C3%A9%20%E2%98%95.pdf`);
+    // encodeURIComponent leaves !'()* alone; only ! is an attr-char, so the rest are escaped.
+    expect(await disposition('u/1/abc', { download: "it's (a)*.pdf" })).toBe(`attachment; filename="it_s _a_.pdf"; filename*=UTF-8''it%27s%20%28a%29%2A.pdf`);
+  });
+
+  test('contentType overrides what the object was stored as, and must be a media type', async () => {
+    resetCredentialCaches();
+    const url = new URL((await bucket().signedRead('u/1/abc', { contentType: 'application/pdf' })).url);
+    expect(url.searchParams.get('response-content-type')).toBe('application/pdf');
+    expect(new URL((await bucket().signedRead('a', { contentType: 'text/plain; charset=utf-8' })).url).searchParams.get('response-content-type')).toBe('text/plain; charset=utf-8');
+    const e = await bucket()
+      .signedRead('a', { contentType: 'text/plain\r\nX-Evil: 1' })
+      .catch((x) => x);
+    expect(BlobError.is(e)).toBe(true);
+    expect(e.code).toBe('invalid_input');
+  });
+
+  test('the disposition is inside the signature, not appended to it', async () => {
+    resetCredentialCaches();
+    const b = bucket();
+    const plain = new URL((await b.signedRead('a.txt', { expiresIn: 60 })).url);
+    const named = new URL((await b.signedRead('a.txt', { expiresIn: 60, download: 'x.txt' })).url);
+    expect(named.searchParams.get('X-Amz-Signature')).not.toBe(plain.searchParams.get('X-Amz-Signature'));
+    // Sorted into the canonical query with everything else, before the signature is appended.
+    expect(named.search.indexOf('response-content-disposition')).toBeLessThan(named.search.indexOf('X-Amz-Signature'));
+  });
+});
+
 describe('bucket guards', () => {
   test('metadata that a header cannot carry is invalid_input, not a TypeError', async () => {
     resetCredentialCaches();
