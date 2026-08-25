@@ -2,13 +2,21 @@ import { BlobError } from '../shared/errors.ts';
 import type { BlobObject } from '../shared/types.ts';
 import { cacheControl, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
-import { blocks, decodeEntities, encodeKey, escapeXml, tag } from './keys.ts';
-import { errorFromBody, errorFromResponse, headFromHeaders, R2 } from './r2.ts';
+import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
+import { errorFromBody, errorFromResponse, headFromHeaders, R2, type MultipartUpload } from './r2.ts';
+
+export type { MultipartUpload };
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
 
 export interface BucketOptions {
   token: string;
+  /**
+   * 'private' drops `url` and `versionedUrl` from every BlobObject: nothing serves a private
+   * bucket over the public host, so a url there is a link that 404s. A `visibility` in the
+   * credentials response wins over this.
+   */
+  visibility?: 'public' | 'private';
   /** Default cache policy for every write; per-call `cache` overrides it. */
   cache?: CacheOption;
   /**
@@ -21,7 +29,7 @@ export interface BucketOptions {
 
 export interface PutOptions {
   contentType?: string;
-  allowedContentTypes?: string[];
+  allowedContentTypes?: readonly string[];
   maxBytes?: Size;
   cache?: CacheOption;
   metadata?: Record<string, string>;
@@ -44,6 +52,11 @@ export interface ListPage {
   cursor: string | undefined;
 }
 
+/** What put() answers: the blob, plus the content type it was stored with. */
+export interface PutResult extends BlobObject {
+  contentType: string;
+}
+
 export interface BlobInfo extends BlobObject {
   contentType: string;
   metadata: Record<string, string>;
@@ -54,8 +67,30 @@ export interface BlobBody extends BlobInfo {
 }
 
 export interface SignedReadUrlOptions {
+  /**
+   * How long the link lives. Capped by the credential the SDK can sign with (~10 minutes today);
+   * over that it throws unless `clamp` is set. Default 5m, which is under the cap on purpose: an
+   * `expiresIn` close to it mints a fresh credential on nearly every call.
+   */
   expiresIn?: Duration;
   downloadName?: string;
+  /** Shorten a too-long `expiresIn` to the cap instead of throwing. */
+  clamp?: boolean;
+}
+
+export interface SignedRead {
+  url: string;
+  /** When the link stops working. Never later than the credential that signed it. */
+  expiresAt: Date;
+}
+
+export interface ListMultipartOptions {
+  prefix?: string;
+}
+
+export interface AbortStaleOptions extends ListMultipartOptions {
+  /** Only abort uploads started longer ago than this. */
+  olderThan: Duration;
 }
 
 export interface S3Config {
@@ -65,10 +100,16 @@ export interface S3Config {
   credentials: () => Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken: string; expiration: Date }>;
 }
 
+export type DeleteTarget = string | string[] | { prefix: string; all?: boolean };
+
 export interface UpdateOptions {
   cache?: CacheOption;
   metadata?: Record<string, string>;
 }
+
+// Under the cap on purpose: an expiresIn near it re-mints a credential on nearly every call, and
+// mints are the account-wide budget the whole product shares.
+const DEFAULT_SIGNED_READ = '5m';
 
 const INTERNALS = new WeakMap<Bucket, R2>();
 
@@ -87,20 +128,20 @@ export class Bucket {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
     this.defaultCache = options.cache;
-    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true);
+    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true, options.visibility);
     INTERNALS.set(this, this.r2);
   }
 
-  static fromEnv(name = 'UPSTASH_BLOB_TOKEN'): Bucket {
+  static fromEnv(name = 'UPSTASH_BLOB_TOKEN', options: Omit<BucketOptions, 'token'> = {}): Bucket {
     const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
     const token = env?.[name];
     if (!token) throw new TypeError(`Bucket.fromEnv: ${name} is not set (on Workers, pass it explicitly: new Bucket({ token: env.${name} }))`);
-    return new Bucket({ token });
+    return new Bucket({ ...options, token });
   }
 
   /* ------------------------------------------------------------------ put */
 
-  async put(path: string, body: PutBody, options: PutOptions = {}): Promise<BlobObject> {
+  async put(path: string, body: PutBody, options: PutOptions = {}): Promise<PutResult> {
     encodeKey(path);
     const allowed = options.allowedContentTypes === undefined ? undefined : expandContentTypes(options.allowedContentTypes);
     const maxBytes = options.maxBytes === undefined ? undefined : parseSize(options.maxBytes, 'maxBytes');
@@ -157,7 +198,7 @@ export class Bucket {
     }
     if (!res.ok) throw await errorFromResponse(res);
     await res.body?.cancel();
-    return this.r2.blobObject(path, size, res.headers.get('etag') ?? '', new Date());
+    return { ...this.r2.blobObject(path, size, res.headers.get('etag') ?? '', new Date()), contentType };
   }
 
   /* ----------------------------------------------------------------- read */
@@ -200,19 +241,30 @@ export class Bucket {
     return { blobs, cursor: tag(xml, 'IsTruncated') === 'true' && next ? decodeEntities(next) : undefined };
   }
 
-  async signedReadUrl(path: string, options: SignedReadUrlOptions = {}): Promise<string> {
-    const expiresIn = Math.max(1, Math.floor(parseDuration(options.expiresIn ?? '1h', 'expiresIn') / 1000));
+  /** The link and when it dies, so a caller can cache it until then rather than guess. */
+  async signedRead(path: string, options: SignedReadUrlOptions = {}): Promise<SignedRead> {
+    const expiresIn = Math.max(1, Math.floor(parseDuration(options.expiresIn ?? DEFAULT_SIGNED_READ, 'expiresIn') / 1000));
     const query: Record<string, string> = {};
     if (options.downloadName !== undefined) {
       const ascii = options.downloadName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
       query['response-content-disposition'] = `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(options.downloadName)}`;
     }
-    return this.r2.presign({ method: 'GET', path, query, expiresIn });
+    return this.r2.presignRead({ path, query, expiresIn, clamp: options.clamp });
+  }
+
+  /** signedRead(), url only. */
+  async signedReadUrl(path: string, options: SignedReadUrlOptions = {}): Promise<string> {
+    return (await this.signedRead(path, options)).url;
+  }
+
+  /** The longest `expiresIn` signedRead() will sign right now, in seconds. */
+  signedReadCap(): Promise<number> {
+    return this.r2.readCap();
   }
 
   /* ---------------------------------------------------------------- write */
 
-  async del(target: string | string[] | { prefix: string }): Promise<void> {
+  async del(target: DeleteTarget): Promise<void> {
     if (typeof target === 'string') {
       const res = await this.r2.fetch({ method: 'DELETE', path: target });
       await res.body?.cancel();
@@ -224,6 +276,13 @@ export class Bucket {
       for (let i = 0; i < target.length; i += 1000) failed.push(...(await this.deleteBatch(target.slice(i, i + 1000))));
       if (failed.length) throw new BlobError('partial_delete', { message: `${failed.length} of ${target.length} paths were not deleted`, failed });
       return;
+    }
+    if (typeof target?.prefix !== 'string') throw new BlobError('invalid_input', { message: 'del: expected a path, an array of paths, or { prefix }' });
+    if (target.prefix === '' && target.all !== true) {
+      throw new BlobError('invalid_input', {
+        message: "del({ prefix: '' }) would delete every object in the bucket",
+        hint: "pass { prefix: '', all: true } if that is what you mean",
+      });
     }
     const failed: string[] = [];
     let cursor: string | undefined;
@@ -251,6 +310,42 @@ export class Bucket {
     for (const p of failed) if (await this.exists(p)) survivors.push(p);
     return survivors;
   }
+
+  /* ------------------------------------------------------------ multipart */
+
+  /**
+   * Multipart uploads that were started and never completed or aborted. They are billed storage that
+   * list() cannot see, and a bucket cannot be deleted while one exists.
+   */
+  async listMultipartUploads(options: ListMultipartOptions = {}): Promise<MultipartUpload[]> {
+    return this.r2.listMultipartUploads(options.prefix);
+  }
+
+  /** Throws away an incomplete upload and every part that landed for it. Missing is success. */
+  async abortMultipart(uploadId: string, path: string): Promise<void> {
+    if (typeof uploadId !== 'string' || !uploadId) throw new BlobError('invalid_input', { message: 'abortMultipart(uploadId, path): uploadId is required' });
+    encodeKey(path);
+    await this.r2.abortMultipart(path, uploadId);
+  }
+
+  /**
+   * List plus abort, for an app cron: nothing in R2 expires an abandoned upload without a lifecycle
+   * rule, and an invisible one is what turns "delete the bucket" into a dead end. Returns what it
+   * aborted.
+   */
+  async abortStaleUploads(options: AbortStaleOptions): Promise<MultipartUpload[]> {
+    const cutoff = Date.now() - parseDuration(options.olderThan, 'olderThan');
+    const stale = (await this.listMultipartUploads(options)).filter((u) => u.initiatedAt.getTime() <= cutoff);
+    for (const u of stale) await this.r2.abortMultipart(u.path, u.uploadId);
+    return stale;
+  }
+
+  /** abortStaleUploads(), under the name the sweep is usually looked for. */
+  sweepMultipart(options: AbortStaleOptions): Promise<MultipartUpload[]> {
+    return this.abortStaleUploads(options);
+  }
+
+  /* ---------------------------------------------------------- copy/move */
 
   async copy(from: string, to: string): Promise<BlobObject> {
     const creds = await this.r2.credentials();
@@ -327,11 +422,3 @@ export class Bucket {
   }
 }
 
-function metaHeaders(metadata: Record<string, string> | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(metadata ?? {})) {
-    if (typeof v !== 'string') throw new TypeError(`metadata.${k} must be a string`);
-    out[`x-amz-meta-${k.toLowerCase()}`] = v;
-  }
-  return out;
-}

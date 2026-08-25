@@ -15,6 +15,7 @@ const TABLE: Record<BlobErrorCode, number> = {
   unauthorized: 401,
   forbidden: 403,
   rate_limited: 429,
+  mint_backoff: 429,
   not_ready: 503,
   partial_delete: 500,
   move_left_a_copy: 500,

@@ -3,9 +3,10 @@ import type { BlobError } from './errors.ts';
 /** What every write verb returns, what list() pages carry, and blob in a snapshot's 'done' member. */
 export interface BlobObject {
   path: string;
-  url: string;
-  /** `${url}?v=${etag}`: the fix for a stable path that gets overwritten. */
-  versionedUrl: string;
+  /** Undefined on a private bucket: no public host serves it, so use signedRead(). */
+  url?: string;
+  /** `${url}?v=${etag}`: the fix for a stable path that gets overwritten. Undefined when url is. */
+  versionedUrl?: string;
   size: number;
   etag: string;
   uploadedAt: Date;
@@ -20,7 +21,7 @@ export interface WireFile {
 }
 
 export interface WireLimits {
-  allowedContentTypes?: string[];
+  allowedContentTypes?: readonly string[];
   maxBytes?: number;
 }
 

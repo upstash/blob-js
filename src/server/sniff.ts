@@ -168,7 +168,7 @@ function subtypesOf(prefix: string): string[] {
  * any other wildcard and an empty list throw, because a list that matches everything is a limit
  * that reads enforced and is not.
  */
-export function expandContentTypes(allowed: string[]): string[] {
+export function expandContentTypes(allowed: readonly string[]): string[] {
   if (allowed.length === 0) {
     throw new BlobError('invalid_content_type_pattern', {
       message: 'allowedContentTypes: empty list; omit the option to accept anything',
@@ -202,7 +202,7 @@ export function expandContentTypes(allowed: string[]): string[] {
  * leading bytes. An unsniffable declaration (text/plain, text/csv, application/json) passes on the
  * declaration; a sniffable one has to be proven by the bytes.
  */
-export function checkContentType(declared: string, bytes: Uint8Array | undefined, allowed: string[]): void {
+export function checkContentType(declared: string, bytes: Uint8Array | undefined, allowed: readonly string[]): void {
   const declaredBare = declared.split(';', 1)[0]!.trim().toLowerCase();
   const want = ALIASES[declaredBare] ?? declaredBare;
   const list = allowed.map(canonical);

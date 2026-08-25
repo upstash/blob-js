@@ -67,13 +67,26 @@ interface AnyStartArgs {
   input?: unknown;
 }
 
-const limitsCache = new Map<string, WireLimits>();
+// The route serves its limits with max-age=60. A cache that never expired outlived the deploy that
+// changed them, so the picker went on refusing files the route had started accepting.
+const LIMITS_TTL_MS = 60_000;
+const limitsCache = new Map<string, { limits: WireLimits; at: number }>();
 const limitsInFlight = new Map<string, Promise<WireLimits | undefined>>();
+
+function cachedLimits(route: string): WireLimits | undefined {
+  const entry = limitsCache.get(route);
+  if (!entry) return undefined;
+  if (clock.now() - entry.at > LIMITS_TTL_MS) {
+    limitsCache.delete(route);
+    return undefined;
+  }
+  return entry.limits;
+}
 
 let staticCounter = 0;
 
 async function loadLimits(route: string, headers: HeadersProvider | undefined): Promise<WireLimits | undefined> {
-  const cached = limitsCache.get(route);
+  const cached = cachedLimits(route);
   if (cached) return cached;
   let pending = limitsInFlight.get(route);
   if (!pending) {
@@ -84,7 +97,7 @@ async function loadLimits(route: string, headers: HeadersProvider | undefined): 
         const body = (await res.json()) as { limits?: WireLimits } | undefined;
         const limits = body?.limits;
         if (!limits || typeof limits !== 'object') return undefined;
-        limitsCache.set(route, limits);
+        limitsCache.set(route, { limits, at: clock.now() });
         return limits;
       } catch {
         // A route that will not say what it allows still uploads; the picker just has no accept.
@@ -169,8 +182,8 @@ export function useUpload<R extends UploadRoute<any, any> = UploadRoute<undefine
   const handlers = useRef(options);
   handlers.current = options;
 
-  const limitsRef = useRef<WireLimits | undefined>(limitsCache.get(route));
-  const [accept, setAccept] = useState(() => acceptOf(limitsCache.get(route)));
+  const limitsRef = useRef<WireLimits | undefined>(cachedLimits(route));
+  const [accept, setAccept] = useState(() => acceptOf(cachedLimits(route)));
 
   const { uploads, task, add, clear } = useTaskList<UploadRecord<TData>>({
     concurrency: options.concurrency,
@@ -184,7 +197,7 @@ export function useUpload<R extends UploadRoute<any, any> = UploadRoute<undefine
 
   useEffect(() => {
     let alive = true;
-    limitsRef.current = limitsCache.get(route);
+    limitsRef.current = cachedLimits(route);
     setAccept(acceptOf(limitsRef.current));
     void loadLimits(route, headersRef.current).then((limits) => {
       if (!alive || !limits) return;

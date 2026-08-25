@@ -35,7 +35,7 @@ describe('put', () => {
 
   test('public url serves the object with the chosen cache-control', async () => {
     const blob = await pub.put(p('served.txt'), 'served', { contentType: 'text/plain', cache: '1m' });
-    const res = await fetch(blob.url);
+    const res = await fetch(blob.url!);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('served');
     expect(res.headers.get('cache-control')).toContain('max-age=60');

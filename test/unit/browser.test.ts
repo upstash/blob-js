@@ -9,6 +9,7 @@ import { flush, installXhr, ManualXhr } from '../helpers/xhr.ts';
 const MIB = 1024 * 1024;
 const memory = new Map<string, string>();
 const sleeps: number[] = [];
+let timers: { ms: number; cb: () => void }[] = [];
 let wakers: (() => void)[] = [];
 let calls: { phase: string; body: any }[] = [];
 let onPhase: (body: any) => unknown | Response;
@@ -54,6 +55,14 @@ beforeAll(() => {
   };
   clock.frame = (cb) => queueMicrotask(cb);
   clock.random = () => 0.5;
+  clock.timer = (ms, cb) => {
+    const entry = { ms, cb };
+    timers.push(entry);
+    return () => {
+      const i = timers.indexOf(entry);
+      if (i >= 0) timers.splice(i, 1);
+    };
+  };
   clock.sleep = async (ms, signal) => {
     sleeps.push(ms);
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
@@ -76,8 +85,15 @@ beforeAll(() => {
   });
 });
 afterAll(() => restore.forEach((r) => r()));
+function fireTimers(): void {
+  const due = timers;
+  timers = [];
+  for (const t of due) t.cb();
+}
+
 beforeEach(() => {
   calls = [];
+  timers = [];
   sleeps.length = 0;
   wakers = [];
   memory.clear();
@@ -261,6 +277,8 @@ describe('single PUT', () => {
     const task = upload(png(), { route: '/api/upload' });
     for (let i = 0; i < 8; i++) {
       await settle();
+      // Bytes went out before the link died: this is an outage, not a refusal.
+      ManualXhr.pending[0]!.progress(1);
       ManualXhr.pending[0]!.fail();
       await wake();
     }
@@ -268,11 +286,47 @@ describe('single PUT', () => {
     expect(task.snapshot().status).toBe('uploading');
     for (let i = 8; i < 20; i++) {
       await settle();
+      ManualXhr.pending[0]!.progress(1);
       ManualXhr.pending[0]!.fail();
       await wake();
     }
     await expect(task.done).rejects.toMatchObject({ code: 'request_failed', status: 503 });
     expect(sleeps.length).toBe(19);
+  });
+
+  test('a PUT the browser refuses before any bytes fails fast, naming CORS', async () => {
+    onPhase = defaultRoute(3);
+    const task = upload(png(), { route: '/api/upload' });
+    for (let i = 0; i < 3; i++) {
+      await settle();
+      ManualXhr.pending[0]!.fail();
+      await wake();
+    }
+    const e = await task.done.catch((x) => x);
+    expect(BlobError.is(e)).toBe(true);
+    expect(e.message).toContain('CORS');
+    // Three attempts, not twenty: no amount of backoff fixes a preflight.
+    expect(sleeps.length).toBe(2);
+  });
+
+  test('a PUT that goes quiet is aborted and retried instead of hanging', async () => {
+    onPhase = defaultRoute(3);
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    const first = ManualXhr.pending[0]!;
+    first.progress(1);
+    expect(timers.map((t) => t.ms)).toEqual([60_000]);
+    fireTimers();
+    expect(first.aborted).toBe(true);
+    await tick();
+    await wake();
+    expect(sleeps.length).toBe(1);
+    expect(ManualXhr.pending.length).toBe(1);
+    expect(ManualXhr.pending[0]).not.toBe(first);
+    ManualXhr.pending[0]!.progress(3);
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await task.done;
+    expect(task.snapshot().status).toBe('done');
   });
 
   test('a cross-origin 200 asks only for the etag, and retry-after only where one is carried', async () => {

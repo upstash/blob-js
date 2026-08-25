@@ -116,7 +116,7 @@ describe('begin', () => {
     expect(end.blob.etag).toMatch(/^"/);
     expect(end.blob.url).toMatch(/^https:\/\/b[0-9a-f]{11}\.blob\.upstash\.io\//);
     expect(rows[end.data.rowId]).toEqual({ status: 'ready', owner: 'u1', size: body.byteLength });
-    const served = await fetch(end.blob.url);
+    const served = await fetch(end.blob.url!);
     expect(served.status).toBe(200);
     // Measured 2026-08-24: the public hostname serves max-age=31536000 but drops the immutable token.
     expect(served.headers.get('cache-control')).toContain('max-age=31536000');

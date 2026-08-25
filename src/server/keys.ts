@@ -1,3 +1,4 @@
+import { BlobError } from '../shared/errors.ts';
 import { uriEncode } from './sigv4.ts';
 
 // A temp credential authorises the whole bucket and the URL parser resolves `..`, so a traversing
@@ -32,4 +33,26 @@ export function tag(xml: string, name: string): string | undefined {
 
 export function blocks(xml: string, name: string): string[] {
   return xml.match(new RegExp(`<${name}>[\\s\\S]*?</${name}>`, 'g')) ?? [];
+}
+
+const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+// A header value is a ByteString: fetch throws a bare TypeError on anything above U+00FF, which
+// surfaces as "request failed" rather than as the caller's mistake. Reject it here instead, and say
+// what to do about it.
+const LATIN1_RE = /^[\x20-\x7e\xa0-\xff]*$/;
+
+export function metaHeaders(metadata: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(metadata ?? {})) {
+    if (!HEADER_NAME_RE.test(k)) throw new BlobError('invalid_input', { message: `metadata key "${k}" is not a valid header name` });
+    if (typeof v !== 'string') throw new BlobError('invalid_input', { message: `metadata.${k} must be a string` });
+    if (!LATIN1_RE.test(v)) {
+      throw new BlobError('invalid_input', {
+        message: `metadata.${k} has characters storage cannot carry in a header`,
+        hint: 'metadata is Latin-1 only; percent-encode it with encodeURIComponent first',
+      });
+    }
+    out[`x-amz-meta-${k.toLowerCase()}`] = v;
+  }
+  return out;
 }

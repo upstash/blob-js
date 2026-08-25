@@ -3,7 +3,7 @@ import type { BlobObject, UploadRoute, WireBeginResponse, WireEndResponse, WireF
 import { cacheControl, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
 import { signToken, verifyToken, type TokenPayload } from './completion-token.ts';
-import { encodeKey } from './keys.ts';
+import { encodeKey, metaHeaders } from './keys.ts';
 import { MULTIPART_THRESHOLD, partCount, partSizeFor } from './multipart.ts';
 import { checkContentType, expandContentTypes, SNIFF_BYTES } from './sniff.ts';
 
@@ -22,7 +22,7 @@ export type StandardResult<T> = { readonly value: T; readonly issues?: undefined
 type InferOutput<S> = S extends StandardSchema<any, infer O> ? O : never;
 
 export interface UploadLimits {
-  allowedContentTypes?: string[];
+  allowedContentTypes?: readonly string[];
   maxBytes?: Size;
 }
 
@@ -41,10 +41,18 @@ export interface BeforeUploadResult<TContext> {
   context?: TContext;
 }
 
+export interface BeforeUploadFailedArgs<TInput, TContext> extends BeforeUploadArgs<TInput> {
+  /** What onBeforeUpload returned: the row it reserved is reachable through its context. */
+  decided: BeforeUploadResult<TContext>;
+  error: BlobError;
+}
+
 export interface UploadCompletedArgs<TContext> extends BlobObject {
   request: Request;
   /** Stable for one upload across a retried phase 'end': the key to dedupe on. */
   uploadId: string;
+  /** R2's own multipart id, for a bucket.abortMultipart(). Undefined for a single PUT. */
+  multipartUploadId: string | undefined;
   contentType: string;
   metadata: Record<string, string>;
   context: TContext;
@@ -52,10 +60,28 @@ export interface UploadCompletedArgs<TContext> extends BlobObject {
 
 export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | undefined, TContext, TData> {
   bucket: Bucket;
+  /**
+   * Which route a completion token belongs to. Two routes on one bucket sign with the same key, so
+   * without this a token minted by one is spendable at the other. Derived from the route's limits
+   * and whether it takes input when omitted, which collides when two routes declare the same ones:
+   * name them then.
+   */
+  id?: string;
   limits?: UploadLimits;
   input?: TSchema;
   onBeforeUpload: (args: BeforeUploadArgs<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : never>) => BeforeUploadResult<TContext> | Promise<BeforeUploadResult<TContext>>;
+  /**
+   * onBeforeUpload accepted the upload but reserving it with storage failed, so nothing will ever
+   * complete: release the row it reserved here. The error is rethrown to the client afterwards.
+   */
+  onBeforeUploadFailed?: (args: BeforeUploadFailedArgs<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : never, TContext>) => void | Promise<void>;
   onUploadCompleted?: (args: UploadCompletedArgs<TContext>) => TData | Promise<TData>;
+  /**
+   * Maps anything a callback threw that is not a BlobError. Return a BlobError or a Response to
+   * answer with it; return nothing to fall through. An error carrying a numeric `status` becomes
+   * that status without this hook.
+   */
+  onError?: (error: unknown, request: Request) => BlobError | Response | void | Promise<BlobError | Response | void>;
 }
 
 export interface UploadHandlers<TInput, TData> {
@@ -64,8 +90,13 @@ export interface UploadHandlers<TInput, TData> {
 }
 
 const PARTS_PER_BATCH = 16;
-const PRESIGN_SECONDS = 3600;
+// What the SDK asks for. R2 signs with a credential that lives at most ~600 s and the signature dies
+// with it, so this is an upper bound, never the real lifetime: the client re-presigns through phase
+// 'parts' when a url stops working, and minRemainingSeconds keeps a fresh url from being born stale.
+const PRESIGN_REQUESTED_SECONDS = 3600;
+const PRESIGN_MIN_REMAINING_SECONDS = 120;
 const TOKEN_TTL_MS = 7 * 86_400_000;
+const LIMITS_MAX_AGE = 60;
 
 export function handleUpload<TSchema extends StandardSchema<any, any> | undefined = undefined, TContext = undefined, TData = void>(
   options: HandleUploadOptions<TSchema, TContext, TData>,
@@ -75,9 +106,17 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
   const wireLimits: WireLimits = {};
   if (routeLimits.allowedContentTypes) wireLimits.allowedContentTypes = routeLimits.allowedContentTypes;
   if (routeLimits.maxBytes !== undefined) wireLimits.maxBytes = routeLimits.maxBytes;
+  const routeId = options.id ?? deriveRouteId(routeLimits, options.input !== undefined);
+  const limitsBody = JSON.stringify({ limits: wireLimits });
+  const limitsEtag = `"${hash(limitsBody)}"`;
 
-  const GET = async (): Promise<Response> =>
-    Response.json({ limits: wireLimits }, { headers: { 'cache-control': 'public, max-age=31536000, immutable' } });
+  // Short and revalidated, not immutable: the limits are the route's own code and change with a
+  // deploy, and a client that cached them forever refuses files the route now accepts.
+  const GET = async (request: Request): Promise<Response> => {
+    const headers = { 'content-type': 'application/json', 'cache-control': `public, max-age=${LIMITS_MAX_AGE}`, etag: limitsEtag };
+    if (request?.headers?.get('if-none-match') === limitsEtag) return new Response(null, { status: 304, headers });
+    return new Response(limitsBody, { headers });
+  };
 
   const POST = async (request: Request): Promise<Response> => {
     try {
@@ -97,6 +136,16 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
       }
     } catch (e) {
       if (BlobError.is(e)) return Response.json(e.toJSON(), { status: e.status });
+      if (options.onError) {
+        const mapped = await options.onError(e, request);
+        if (mapped instanceof Response) return mapped;
+        if (BlobError.is(mapped)) return Response.json(mapped.toJSON(), { status: mapped.status });
+      }
+      const status = statusOf(e);
+      if (status !== undefined) {
+        const err = new BlobError('request_failed', { message: messageOf(e), status });
+        return Response.json(err.toJSON(), { status });
+      }
       // Anything else is the app's bug: let the framework log it rather than mask it as a 500.
       throw e;
     }
@@ -137,12 +186,12 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
 
     const cache = cacheControl(decided.cache ?? r2.defaultCache);
     const metadata = decided.metadata ?? {};
-    const headers: Record<string, string> = { 'content-type': file.type, 'cache-control': cache };
-    for (const [k, v] of Object.entries(metadata)) headers[`x-amz-meta-${k.toLowerCase()}`] = v;
+    const headers: Record<string, string> = { 'content-type': file.type, 'cache-control': cache, ...metaHeaders(metadata) };
 
     const base = {
       v: 1 as const,
       b: r2.bucketId,
+      r: routeId,
       id: crypto.randomUUID(),
       path: decided.path,
       type: file.type,
@@ -154,7 +203,16 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
     };
 
     if (file.size >= MULTIPART_THRESHOLD) {
-      const uploadId = await r2.createMultipart(decided.path, headers);
+      // The path is onBeforeUpload's to decide, so the multipart cannot be created before it runs;
+      // a create that fails afterwards is told back to the app instead of stranding its row.
+      let uploadId: string;
+      try {
+        uploadId = await r2.createMultipart(decided.path, headers);
+      } catch (e) {
+        const error = BlobError.is(e) ? e : new BlobError('request_failed', { message: 'could not start the upload', status: 502, cause: e });
+        await options.onBeforeUploadFailed?.({ request, file, input: input as any, decided, error });
+        throw error;
+      }
       const partSize = partSizeFor(file.size);
       const payload: TokenPayload = { ...base, kind: 'multipart', uploadId, partSize };
       const completionToken = await signToken(payload, tokenKey());
@@ -193,21 +251,49 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
 
     const head = await r2.head(t.path);
     if (!head) throw new BlobError('not_found', { message: 'the upload never landed' });
-    if (head.size !== t.size) throw new BlobError('signature_mismatch', { message: `stored ${head.size} bytes, ${t.size} were declared` });
+    // Refusing bytes that are already stored is only a refusal if they stop being stored: on a public
+    // bucket the url is live from the moment the PUT lands, so the object goes before the throw does.
+    if (head.size !== t.size) {
+      await discard(t.path);
+      throw new BlobError('signature_mismatch', { message: `stored ${head.size} bytes, ${t.size} were declared` });
+    }
 
     if (t.allowed) {
       const res = await r2.fetch({ method: 'GET', path: t.path, headers: { range: `bytes=0-${SNIFF_BYTES - 1}` } });
       const bytes = new Uint8Array(await res.arrayBuffer());
       if (!res.ok) throw new BlobError('request_failed', { message: `could not read back the upload (${res.status})`, status: 502 });
-      checkContentType(head.contentType, bytes, t.allowed);
+      try {
+        checkContentType(head.contentType, bytes, t.allowed);
+      } catch (e) {
+        await discard(t.path);
+        throw e;
+      }
     }
 
     const blob = r2.blobObject(t.path, head.size, head.etag, head.uploadedAt);
     let data: TData = undefined as TData;
     if (options.onUploadCompleted) {
-      data = await options.onUploadCompleted({ request, uploadId: t.id, ...blob, contentType: head.contentType, metadata: head.metadata, context: t.ctx as TContext });
+      data = await options.onUploadCompleted({
+        request,
+        uploadId: t.id,
+        multipartUploadId: t.kind === 'multipart' ? t.uploadId : undefined,
+        ...blob,
+        contentType: head.contentType,
+        metadata: head.metadata,
+        context: t.ctx as TContext,
+      });
     }
     return { blob: { ...blob, uploadedAt: blob.uploadedAt.toISOString() }, data };
+  }
+
+  /** Deletes the object a rejected upload left behind. */
+  async function discard(path: string): Promise<void> {
+    try {
+      const res = await r2.fetch({ method: 'DELETE', path });
+      await res.body?.cancel();
+    } catch {
+      // The refusal is the answer; a delete that fails must not replace it with its own error.
+    }
   }
 
   async function cancel(body: any): Promise<{ ok: true }> {
@@ -219,7 +305,7 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
   async function verify(token: unknown): Promise<TokenPayload> {
     if (typeof token !== 'string') throw new BlobError('invalid_input', { message: 'completionToken is required' });
     const t = await verifyToken(token, tokenKey());
-    if (!t || t.b !== r2.bucketId) throw new BlobError('forbidden', { message: 'completionToken is not valid for this route' });
+    if (!t || t.b !== r2.bucketId || t.r !== routeId) throw new BlobError('forbidden', { message: 'completionToken is not valid for this route' });
     if (t.exp < Date.now()) throw new BlobError('forbidden', { message: 'completionToken has expired' });
     return t;
   }
@@ -232,7 +318,8 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
     const url = await r2.presign({
       method: 'PUT',
       path: t.path,
-      expiresIn: PRESIGN_SECONDS,
+      expiresIn: PRESIGN_REQUESTED_SECONDS,
+      minRemainingSeconds: PRESIGN_MIN_REMAINING_SECONDS,
       signedHeaders: { ...t.headers, 'content-length': String(t.size) },
     });
     // content-length is signed but not returned: the browser sets it itself and refuses it as a header.
@@ -250,7 +337,8 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
           method: 'PUT',
           path: t.path,
           query: { partNumber: String(n), uploadId: t.uploadId },
-          expiresIn: PRESIGN_SECONDS,
+          expiresIn: PRESIGN_REQUESTED_SECONDS,
+          minRemainingSeconds: PRESIGN_MIN_REMAINING_SECONDS,
           signedHeaders: { 'content-length': String(length) },
         }),
       });
@@ -287,4 +375,29 @@ function readFile(raw: unknown): WireFile {
   }
   const type = typeof f.type === 'string' && f.type ? f.type.toLowerCase().split(';')[0]!.trim() : 'application/octet-stream';
   return { name: f.name, type, size: f.size as number };
+}
+
+/** An app error that named an HTTP status meant it; anything else is a bug and stays a throw. */
+function statusOf(e: unknown): number | undefined {
+  const s = (e as { status?: unknown } | null | undefined)?.status;
+  return typeof s === 'number' && Number.isInteger(s) && s >= 400 && s < 600 ? s : undefined;
+}
+
+function messageOf(e: unknown): string {
+  const m = (e as { message?: unknown } | null | undefined)?.message;
+  return typeof m === 'string' && m ? m : 'request failed';
+}
+
+export function deriveRouteId(limits: { allowedContentTypes: string[] | undefined; maxBytes: number | undefined }, hasInput: boolean): string {
+  return hash(JSON.stringify([limits.allowedContentTypes ?? null, limits.maxBytes ?? null, hasInput]));
+}
+
+/** FNV-1a. Not a security boundary: the token's MAC is. This only separates routes and versions a body. */
+function hash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
 }

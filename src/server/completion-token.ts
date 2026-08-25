@@ -5,6 +5,8 @@ interface TokenBase {
   v: 1;
   /** Bucket id the grant is bound to. */
   b: string;
+  /** Route id the grant is bound to: one bucket's routes all sign with the same key. */
+  r: string;
   /** Upload id: what makes an at-least-once phase 'end' idempotent for the app. */
   id: string;
   path: string;

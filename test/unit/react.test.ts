@@ -45,7 +45,7 @@ interface RouteCall {
 let calls: RouteCall[] = [];
 let restore: (() => void)[] = [];
 let routeId = 0;
-// The limits GET is cached per route for the lifetime of the module, so every test gets its own.
+// The limits GET is cached per route for a minute, so every test gets its own route.
 let route = '';
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -156,6 +156,29 @@ test('accept lands from the route GET', async () => {
   await flush();
   expect(hook.current.accept).toBe('image/png');
   expect(calls[0]).toMatchObject({ url: route, method: 'GET' });
+});
+
+test('the cached limits expire, so a deploy that widens them reaches the picker', async () => {
+  const realNow = clock.now;
+  let t = 1_000_000;
+  clock.now = () => t;
+  try {
+    const first = await render(() => useUpload({ route }));
+    await flush();
+    expect(first.current.accept).toBe('image/png');
+    expect(calls.filter((c) => c.method === 'GET')).toHaveLength(1);
+    // A second mount inside the TTL is served from memory.
+    t += 30_000;
+    await render(() => useUpload({ route }));
+    await flush();
+    expect(calls.filter((c) => c.method === 'GET')).toHaveLength(1);
+    t += 61_000;
+    await render(() => useUpload({ route }));
+    await flush();
+    expect(calls.filter((c) => c.method === 'GET')).toHaveLength(2);
+  } finally {
+    clock.now = realNow;
+  }
 });
 
 test('start({file}) returns the record uploads holds, and task is the newest', async () => {
