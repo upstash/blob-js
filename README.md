@@ -42,6 +42,10 @@ cannot read back. Percent-encode first.
 ```ts
 const { url, expiresAt } = await bucket.signedRead('private/report.pdf');
 await bucket.signedReadUrl('private/report.pdf'); // the url alone
+
+// saves as report.pdf instead of opening in the tab
+await bucket.signedReadUrl('u/7/9f3c2a', { download: 'report.pdf' });
+await bucket.signedReadUrl('private/report.pdf', { download: true }); // the last path segment
 ```
 
 The link is signed with the bucket's temporary credential and cannot outlive it. That cap moves:
@@ -53,6 +57,13 @@ anywhere from ~30 s to ~10 min (measured 2026-08-25: a fresh mint came back with
   the cap instead. Either way `expiresAt` is when the link really dies, so cache it until then.
 - If the backend later ships a long-lived signing credential, it is used for reads automatically and
   the cap goes up.
+- `download` puts the file name on the link as `response-content-disposition`, signed with the rest
+  of it: send the browser straight to storage and the file saves under that name, with no route of
+  your own to stream the bytes through. `true` uses the last segment of the path, a string is the
+  name to use. It is written the RFC 6266 way -- an ASCII `filename` and an RFC 8187 `filename*` --
+  so a name with a space, a quote, an emoji or a newline in it arrives whole and cannot add a header.
+- `contentType` overrides what the object answers with as `Content-Type`, for a blob stored as
+  `application/octet-stream` that you want a browser to render.
 
 ### Private buckets
 
@@ -362,6 +373,12 @@ function Uploader() {
   as the list -- for a page that states the cap it is about to enforce. Undefined until the route's
   GET answers, and when the route serves no limits, so nothing renders a number the route did not
   give.
+- **`status`** is `'queued' | 'uploading' | 'finishing' | 'paused' | 'done' | 'canceled' | 'error'`
+  (a proxy record has no `'paused'`). `'finishing'` is the stretch after the last byte is sent while
+  the route completes the upload -- sniffing it, recording it, running `onUploadCompleted` -- where
+  `percent` sits at 99 and nothing is moving; naming it is the difference between a bar that is
+  working and one that looks stuck. The words are machine-readable: what to *print* for each is the
+  app's, and the SDK ships no labels.
 - A **done** record carries `blob`, whichever transport ran: the stored object, `uploadedAt` as a
   `Date`, and `blob.data` typed to whatever the route's `onUploadCompleted` returned.
 - A **direct** record has `pause()`, `resume()`, `retry()`, `canPause` and `stalled`. A **proxy**
@@ -423,6 +440,38 @@ error, rather than being retried as a network fault.
 With no type argument the hooks keep their unbound signatures, and `configureUpload` is the same
 call under its old name, deprecated.
 
+
+## Errors and sizes
+
+Everything that fails, on either side of the wire, throws a `BlobError` with a `code` from a closed
+list, a `status`, and a `message` written to be printed as it stands: it is sentence-cased at
+construction, and the hint (when there is one) is already folded into it. A message that opens with
+an identifier -- a MIME type, a file name, a metadata key -- keeps its case, so `text/html is not
+allowed` is never `Text/html`.
+
+```ts
+import { BlobError } from '@upstash/blob'; // also from /react and /browser
+
+try {
+  await bucket.put(path, body, { maxBytes: '2mb' });
+} catch (e) {
+  if (BlobError.is(e) && e.code === 'too_large') showError(e.message); // "The body is 3.1 MB, over the 2 MB limit"
+  else throw e;
+}
+```
+
+An upload route names the file instead -- `cat.png is 3.1 MB, over the 2 MB limit` -- and that one
+keeps its lowercase `c`, because the first word is the file, not a sentence.
+
+`BlobError.is()` rather than `instanceof`: an ESM and a CJS copy of the package are two classes. A
+route answers with `e.toJSON()` and the browser rebuilds it, so `error.code` in a hook is the code
+the server raised, not a status number to match on.
+
+`formatBytes(bytes)` is the size formatter the SDK's own messages use, exported from
+`@upstash/blob`, `@upstash/blob/react` and `@upstash/blob/browser` so a page states a limit the same
+way the refusal does. Decimal, like every size the SDK parses and every provider's bill:
+`formatBytes(20_000_000)` is `'20 MB'`, `formatBytes(512)` is `'512 B'`. The `Size` strings that go
+the other way (`'20mb'`, `'2gb'`) are decimal for the same reason.
 
 ## Telemetry
 
