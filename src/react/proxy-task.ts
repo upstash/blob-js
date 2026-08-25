@@ -7,10 +7,9 @@ export type ProxySnapshot<TResponse> = {
   loaded: number;
   total: number;
   percent: number;
-  /** The bytes are sent and the response has not come back. */
-  finishing: boolean;
 } & (
-  | { status: 'queued' | 'uploading' }
+  /** 'finishing': every byte is sent and the route has not answered yet. */
+  | { status: 'queued' | 'uploading' | 'finishing' }
   | { status: 'done'; response: TResponse }
   | { status: 'canceled' }
   | { status: 'error'; error: BlobError }
@@ -26,7 +25,7 @@ export interface ProxyTaskOptions {
   total: number;
 }
 
-type Status = 'queued' | 'uploading' | 'done' | 'canceled' | 'error';
+type Status = 'queued' | 'uploading' | 'finishing' | 'done' | 'canceled' | 'error';
 
 let counter = 0;
 
@@ -38,7 +37,6 @@ export class ProxyTask<TResponse = unknown> {
   private status: Status = 'queued';
   private loaded = 0;
   private total: number;
-  private finishing = false;
   private response: TResponse | undefined;
   private error: BlobError | undefined;
   private started = false;
@@ -58,10 +56,9 @@ export class ProxyTask<TResponse = unknown> {
     const base = {
       loaded: done ? this.total : this.loaded,
       total: this.total,
-      // 100% means sent, not stored: the bar sits there with finishing set while the route streams
-      // the body onward. That is the whole difference from useUpload's percent.
+      // 100% means sent, not stored: the bar sits there in status 'finishing' while the route
+      // streams the body onward. That is the whole difference from useUpload's percent.
       percent: done ? 100 : this.total > 0 ? Math.min(100, Math.floor((this.loaded / this.total) * 100)) : 0,
-      finishing: this.finishing,
     };
     switch (this.status) {
       case 'done':
@@ -95,7 +92,6 @@ export class ProxyTask<TResponse = unknown> {
   cancel(): boolean {
     if (this.status === 'done' || this.status === 'error' || this.status === 'canceled') return false;
     this.status = 'canceled';
-    this.finishing = false;
     this.controller.abort();
     this.notify();
     return true;
@@ -128,7 +124,7 @@ export class ProxyTask<TResponse = unknown> {
           this.notify();
         },
         onUploadDone: () => {
-          this.finishing = true;
+          if (this.status === 'uploading') this.status = 'finishing';
           this.notify();
         },
       });
@@ -140,7 +136,6 @@ export class ProxyTask<TResponse = unknown> {
     }
     if (this.isCanceled()) return;
 
-    this.finishing = false;
     let json: unknown;
     try {
       json = res.text ? JSON.parse(res.text) : undefined;
@@ -176,7 +171,6 @@ export class ProxyTask<TResponse = unknown> {
   }
 
   private fail(error: BlobError): void {
-    this.finishing = false;
     this.error = error;
     this.status = 'error';
     this.notify();

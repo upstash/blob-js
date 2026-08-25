@@ -83,16 +83,15 @@ export type UploadSnapshot = {
   total: number;
   percent: number;
   canPause: boolean;
-  /**
-   * Every byte is sent and phase 'end' is completing the upload: sniffing it, recording it, running
-   * onUploadCompleted. percent sits at 99 for exactly this stretch, and naming it is the difference
-   * between a bar that is working and one that looks stuck.
-   */
-  finishing: boolean;
   /** Every in-flight part is waiting on a backoff. */
   stalled: boolean;
 } & (
-  | { status: 'queued' | 'uploading' | 'paused' }
+  /**
+   * 'finishing': every byte is sent and phase 'end' is completing the upload -- sniffing it,
+   * recording it, running onUploadCompleted. percent sits at 99 for exactly that stretch, and
+   * naming it is the difference between a bar that is working and one that looks stuck.
+   */
+  | { status: 'queued' | 'uploading' | 'finishing' | 'paused' }
   | { status: 'done'; blob: BlobObject & { data: unknown } }
   | { status: 'canceled' }
   | { status: 'error'; error: BlobError }

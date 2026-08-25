@@ -72,7 +72,6 @@ describe('useUploadProxy primitive', () => {
     if (s.status !== 'done') throw new Error();
     expect(s.response.url).toMatch(/\?v=/);
     expect(s.percent).toBe(100);
-    expect(s.finishing).toBe(false);
     expect((await fetch(s.response.url)).status).toBe(200);
   });
 

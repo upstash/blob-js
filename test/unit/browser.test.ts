@@ -200,7 +200,7 @@ describe('single PUT', () => {
     await tick();
     expect(calls.at(-1)!.phase).toBe('end');
     // The bytes are in R2; the bar must not collapse while the route HEADs and runs the hook.
-    expect(task.snapshot()).toMatchObject({ status: 'uploading', loaded: 3, percent: 99 });
+    expect(task.snapshot()).toMatchObject({ status: 'finishing', loaded: 3, percent: 99 });
     finish();
     await task.done;
     expect(task.snapshot()).toMatchObject({ status: 'done', percent: 100 });

@@ -487,7 +487,7 @@ test('proxy start({body: formData}) sends it as is', async () => {
   expect(record.file).toBeNull();
 });
 
-test('proxy reports progress, then finishing, then the parsed response', async () => {
+test('proxy reports progress, then status finishing, then the parsed response', async () => {
   const done: any[] = [];
   const hook = await render(() => useUploadProxy<{ url: string }>({ route: '/api/avatar', onDone: (u) => done.push(u) }));
   await act(async () => {
@@ -500,17 +500,16 @@ test('proxy reports progress, then finishing, then the parsed response', async (
   await flush();
   expect(hook.current.task!.total).toBe(12);
   expect(hook.current.task!.percent).toBe(50);
-  expect(hook.current.task!.finishing).toBe(false);
+  expect(hook.current.task!.status).toBe('uploading');
 
   await act(async () => {
     xhr.progress(12, 12);
     xhr.sentAll();
   });
   await flush();
-  // Sent, not stored: the bar sits at 100 with finishing set until the route answers.
+  // Sent, not stored: the bar sits at 100 in status 'finishing' until the route answers.
   expect(hook.current.task!.percent).toBe(100);
-  expect(hook.current.task!.finishing).toBe(true);
-  expect(hook.current.task!.status).toBe('uploading');
+  expect(hook.current.task!.status).toBe('finishing');
 
   await act(async () => {
     xhr.respond(200, {}, JSON.stringify({ url: 'https://h/p' }));
@@ -519,7 +518,6 @@ test('proxy reports progress, then finishing, then the parsed response', async (
   const task = hook.current.task!;
   expect(task.status === 'done' && task.response.url).toBe('https://h/p');
   expect(task.percent).toBe(100);
-  expect(task.finishing).toBe(false);
   expect(done).toHaveLength(1);
 });
 
@@ -776,14 +774,14 @@ test('a direct upload is finishing between the last byte and the end response', 
     hook.current.start({ file: png() });
   });
   const put = await nextXhr();
-  expect(hook.current.task!.finishing).toBe(false);
+  expect(hook.current.task!.status).toBe('uploading');
   await act(async () => {
     put.respond(200, { etag: '"x"' });
   });
   await flush(2);
   const task = hook.current.task!;
   // Every byte is sent, phase 'end' is in flight, and percent is clamped to 99 for this stretch.
-  expect(task.status === 'done' || task.finishing).toBe(true);
+  expect(task.status === 'done' || task.status === 'finishing').toBe(true);
 });
 
 /* --------------------------------------------------------- configureUpload -- */
@@ -853,7 +851,7 @@ test('pause is refused once every part has landed', async () => {
   });
   await flush();
   const task = hook.current.task!;
-  if (task.finishing) {
+  if (task.status === 'finishing') {
     // Nothing is left to hold back: pausing here only mislabelled an upload that completed anyway.
     expect(task.canPause).toBe(false);
     expect(task.pause()).toBe(false);

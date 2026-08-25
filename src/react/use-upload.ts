@@ -30,8 +30,6 @@ export interface UploadRecordBase {
   total: number;
   percent: number;
   canPause: boolean;
-  /** Every byte is sent and the route is completing the upload. percent sits at 99 here. */
-  finishing: boolean;
   /** Every in-flight part is waiting on a backoff. */
   stalled: boolean;
 }
@@ -40,7 +38,8 @@ export type DoneUpload<TData> = UploadRecordBase & { status: 'done'; blob: BlobO
 export type FailedUpload = UploadRecordBase & { status: 'error'; error: BlobError };
 
 export type UploadRecord<TData = unknown> =
-  | (UploadRecordBase & { status: 'queued' | 'uploading' | 'paused' })
+  /** 'finishing': every byte is sent and the route is completing the upload. percent sits at 99. */
+  | (UploadRecordBase & { status: 'queued' | 'uploading' | 'finishing' | 'paused' })
   | DoneUpload<TData>
   | (UploadRecordBase & { status: 'canceled' })
   | FailedUpload;
@@ -57,14 +56,13 @@ export interface ProxyUploadRecordBase {
   loaded: number;
   total: number;
   percent: number;
-  /** The bytes are sent and the route has not answered. */
-  finishing: boolean;
 }
 
 export type DoneProxyRecord<TData> = ProxyUploadRecordBase & { status: 'done'; blob: BlobObject & { data: TData } };
 
 export type ProxyUploadRecord<TData = unknown> =
-  | (ProxyUploadRecordBase & { status: 'queued' | 'uploading' })
+  /** 'finishing': the bytes are sent and the route has not answered. */
+  | (ProxyUploadRecordBase & { status: 'queued' | 'uploading' | 'finishing' })
   | DoneProxyRecord<TData>
   | (ProxyUploadRecordBase & { status: 'canceled' })
   | (ProxyUploadRecordBase & { status: 'error'; error: BlobError });
@@ -171,7 +169,7 @@ function proxyEntry(task: ProxyTask<unknown>): ListEntry<AnyRecord> {
     status: () => task.snapshot().status,
     record: () => {
       const snapshot = task.snapshot();
-      const base = { id: task.id, file: task.file, cancel, loaded: snapshot.loaded, total: snapshot.total, percent: snapshot.percent, finishing: snapshot.finishing };
+      const base = { id: task.id, file: task.file, cancel, loaded: snapshot.loaded, total: snapshot.total, percent: snapshot.percent };
       if (snapshot.status === 'done') return { ...base, status: 'done', blob: envelopeBlob(snapshot.response) } as unknown as AnyRecord;
       if (snapshot.status === 'error') return { ...base, status: 'error', error: snapshot.error } as unknown as AnyRecord;
       return { ...base, status: snapshot.status } as unknown as AnyRecord;
@@ -195,7 +193,6 @@ function refusedEntry(file: File | null, error: BlobError): ListEntry<AnyRecord>
     total: file?.size ?? 0,
     percent: 0,
     canPause: false,
-    finishing: false,
     stalled: false,
     status: 'error',
     error,
@@ -243,7 +240,6 @@ function deferredEntry(file: File | null, make: () => Promise<ListEntry<AnyRecor
       total: file?.size ?? 0,
       percent: 0,
       canPause: false,
-      finishing: false,
       stalled: false,
       status: canceled ? 'canceled' : 'queued',
     }) as unknown as AnyRecord;

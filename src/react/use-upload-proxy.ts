@@ -24,15 +24,14 @@ export interface ProxyRecordBase {
   loaded: number;
   total: number;
   percent: number;
-  /** The bytes are sent and the response has not come back. */
-  finishing: boolean;
 }
 
 export type DoneProxyUpload<TResponse> = ProxyRecordBase & { status: 'done'; response: TResponse };
 export type FailedProxyUpload = ProxyRecordBase & { status: 'error'; error: BlobError };
 
 export type ProxyRecord<TResponse = unknown> =
-  | (ProxyRecordBase & { status: 'queued' | 'uploading' })
+  /** 'finishing': the bytes are sent and the response has not come back. */
+  | (ProxyRecordBase & { status: 'queued' | 'uploading' | 'finishing' })
   | DoneProxyUpload<TResponse>
   | (ProxyRecordBase & { status: 'canceled' })
   | FailedProxyUpload;
@@ -118,7 +117,6 @@ function refusedEntry<TResponse>(file: File, error: BlobError): ListEntry<ProxyR
     loaded: 0,
     total: file.size,
     percent: 0,
-    finishing: false,
     status: 'error',
     error,
   };

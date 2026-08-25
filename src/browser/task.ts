@@ -72,8 +72,6 @@ class Task implements InternalTask {
   private inflight = new Map<number, InFlight>();
   private represigned = new Set<number>();
   private urlsMintedAt = 0;
-  /** Set for the stretch between the last byte and the answer from phase 'end'. */
-  private finishing = false;
   private paused = false;
   private resumeWaiters: (() => void)[] = [];
   private readonly cancelController = new AbortController();
@@ -120,8 +118,7 @@ class Task implements InternalTask {
       loaded,
       total,
       percent: this.status === 'done' ? 100 : total > 0 ? Math.min(99, Math.floor((loaded / total) * 100)) : 0,
-      canPause: this.kind === 'multipart' && !this.finishing,
-      finishing: this.finishing && this.status === 'uploading',
+      canPause: this.kind === 'multipart' && (this.status === 'queued' || this.status === 'uploading' || this.status === 'paused'),
       stalled: this.inflight.size > 0 && [...this.inflight.values()].every((f) => f.backingOff),
     };
     switch (this.status) {
@@ -164,9 +161,9 @@ class Task implements InternalTask {
   // (parked on a backoff, or waiting for a pool slot) is dropped and re-queued. Aborting all four
   // threw away up to a part each and snapped the bar to zero.
   pause(): boolean {
-    // Not once finishing: every part has landed and phase 'end' is running, so there is nothing left
-    // to hold back. Pausing there only mislabelled an upload that went on to complete anyway.
-    if (this.kind !== 'multipart' || this.status !== 'uploading' || this.paused || this.finishing) return false;
+    // Status 'finishing' is not pausable: every part has landed and phase 'end' is running, so there
+    // is nothing left to hold back. Pausing there only mislabelled an upload that completed anyway.
+    if (this.kind !== 'multipart' || this.status !== 'uploading' || this.paused) return false;
     this.paused = true;
     this.status = 'paused';
     for (const f of this.inflight.values()) if (f.loaded === 0) f.controller.abort();
@@ -253,7 +250,6 @@ class Task implements InternalTask {
 
   private async run(): Promise<BlobObject & { data: unknown }> {
     const signal = this.cancelController.signal;
-    this.finishing = false;
     if (this.token) {
       // A retry of an upload that already began: its presigns are stale and its parts are the
       // server's to report, so ask for fresh urls instead of beginning a second multipart.
@@ -280,7 +276,7 @@ class Task implements InternalTask {
     }
     if (signal.aborted) throw abortError();
 
-    this.finishing = true;
+    this.status = 'finishing';
     this.notify();
     const end = (await this.routeCall({ phase: 'end', completionToken: this.token, parts: landed }, signal)) as WireEndResponse;
     return { ...end.blob, uploadedAt: new Date(end.blob.uploadedAt), data: end.data };
