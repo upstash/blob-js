@@ -58,14 +58,15 @@ export interface UploadCompletedArgs<TContext> extends BlobObject {
   context: TContext;
 }
 
-export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | undefined, TContext, TData, TPath extends string = string> {
+export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | undefined, TContext, TData, TRoute extends string = string> {
   bucket: Bucket;
   /**
-   * The URL this route is mounted at. `route` on the hooks is typed to it, so naming one endpoint
-   * while importing another's handler type stops compiling. It also separates two routes that
-   * declare identical limits, which is what `id` otherwise has to do by hand.
+   * The URL this route is mounted at -- the same string the hooks take as `route`, which is typed to
+   * it, so naming one endpoint while importing another's handler type stops compiling. It also
+   * separates two routes that declare identical limits, which is what `id` otherwise has to do by
+   * hand. Not to be confused with the `path` onBeforeUpload returns, which is the object's key.
    */
-  path?: TPath;
+  route?: TRoute;
   /**
    * Which route a completion token belongs to. Two routes on one bucket sign with the same key, so
    * without this a token minted by one is spendable at the other. Derived from the route's path,
@@ -90,9 +91,9 @@ export interface HandleUploadOptions<TSchema extends StandardSchema<any, any> | 
   onError?: (error: unknown, request: Request) => BlobError | Response | void | Promise<BlobError | Response | void>;
 }
 
-export interface UploadHandlers<TInput, TData, TPath extends string = string> {
+export interface UploadHandlers<TInput, TData, TRoute extends string = string> {
   GET: (request: Request) => Promise<Response>;
-  POST: UploadRoute<TInput, TData, TPath>;
+  POST: UploadRoute<TInput, TData, TRoute>;
 }
 
 const PARTS_PER_BATCH = 16;
@@ -104,12 +105,12 @@ const PRESIGN_MIN_REMAINING_SECONDS = 120;
 const TOKEN_TTL_MS = 7 * 86_400_000;
 const LIMITS_MAX_AGE = 60;
 
-export function handleUpload<TSchema extends StandardSchema<any, any> | undefined = undefined, TContext = undefined, TData = void, TPath extends string = string>(
-  options: HandleUploadOptions<TSchema, TContext, TData, TPath>,
-): UploadHandlers<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : undefined, TData, TPath> {
+export function handleUpload<TSchema extends StandardSchema<any, any> | undefined = undefined, TContext = undefined, TData = void, TRoute extends string = string>(
+  options: HandleUploadOptions<TSchema, TContext, TData, TRoute>,
+): UploadHandlers<TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : undefined, TData, TRoute> {
   const r2 = r2Of(options.bucket);
   const routeLimits = resolveLimits(options.limits);
-  const routeId = options.id ?? deriveRouteId(routeLimits, options.input !== undefined, options.path);
+  const routeId = options.id ?? deriveRouteId(routeLimits, options.input !== undefined, options.route);
   const GET = limitsEndpoint(routeLimits);
 
   const POST = async (request: Request): Promise<Response> => {
@@ -328,7 +329,7 @@ export function handleUpload<TSchema extends StandardSchema<any, any> | undefine
     return out;
   }
 
-  return { GET, POST: POST as UploadRoute<any, TData, TPath> };
+  return { GET, POST: POST as UploadRoute<any, TData, TRoute> };
 }
 
 /**
@@ -410,8 +411,8 @@ function messageOf(e: unknown): string {
   return typeof m === 'string' && m ? m : 'request failed';
 }
 
-export function deriveRouteId(limits: { allowedContentTypes: string[] | undefined; maxBytes: number | undefined }, hasInput: boolean, path?: string): string {
-  return hash(JSON.stringify([path ?? null, limits.allowedContentTypes ?? null, limits.maxBytes ?? null, hasInput]));
+export function deriveRouteId(limits: { allowedContentTypes: string[] | undefined; maxBytes: number | undefined }, hasInput: boolean, route?: string): string {
+  return hash(JSON.stringify([route ?? null, limits.allowedContentTypes ?? null, limits.maxBytes ?? null, hasInput]));
 }
 
 /** FNV-1a. Not a security boundary: the token's MAC is. This only separates routes and versions a body. */

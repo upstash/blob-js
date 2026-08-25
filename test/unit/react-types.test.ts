@@ -89,7 +89,7 @@ function _proxy(file: File) {
 function _pathBound(bucket: Bucket) {
   return handleUpload({
     bucket,
-    path: '/api/upload/attachments',
+    route: '/api/upload/attachments',
     limits: { maxBytes: '20mb' },
     onBeforeUpload: async () => ({ path: 'a/1' }),
     onUploadCompleted: async () => ({ rowId: 'r1' }),
@@ -100,7 +100,7 @@ type BoundPost = ReturnType<typeof _pathBound>['POST'];
 function _avatarRoutes(bucket: Bucket) {
   return handleProxyUpload({
     bucket,
-    path: '/api/avatar',
+    route: '/api/avatar',
     limits: { allowedContentTypes: ['image/png'], maxBytes: '2mb' },
     onBeforeUpload: () => ({ path: 'avatar/demo', context: { owner: 'demo' } }),
     onUploadCompleted: ({ context }) => ({ owner: context.owner }),

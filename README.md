@@ -88,7 +88,7 @@ import { BlobError, Bucket, handleUpload } from '@upstash/blob';
 
 export const { GET, POST } = handleUpload({
   bucket: Bucket.fromEnv(),
-  path: '/api/upload', // where it is mounted, so the client cannot name a different route
+  route: '/api/upload', // where it is mounted, so the client cannot name a different route
   limits: { maxBytes: '10mb', allowedContentTypes: ['image/*'] },
   onBeforeUpload: async ({ request, file }) => {
     // throw to reject the upload
@@ -105,11 +105,12 @@ export const { GET, POST } = handleUpload({
 });
 ```
 
-- **`path`** is where the route is mounted. `route` on the hooks is typed to it, so naming one
-  endpoint while importing another's handler type stops compiling.
+- **`route`** is where this route is mounted, the same string the hooks take. `route` on the hooks
+  is typed to it, so naming one endpoint while importing another's handler type stops compiling. Not
+  the `path` `onBeforeUpload` returns, which is the object's key.
 - **`id`** binds completion tokens to this route. Every route on one bucket signs with the same key,
   so without it a token minted by one route is spendable at another. It defaults to a hash of the
-  route's path, limits and input, which collides only when two routes declare all three the same:
+  route's url, limits and input, which collides only when two routes declare all three the same:
   name them then.
 - **`onError`** maps anything a callback threw that is not a `BlobError`. Return a `BlobError` or a
   `Response`, or nothing to let it through to the framework. An error carrying a numeric `status`
@@ -152,7 +153,7 @@ import { handleProxyUpload } from '@upstash/blob';
 
 export const { GET, POST } = handleProxyUpload({
   bucket,
-  path: '/api/avatar',
+  route: '/api/avatar',
   limits: { maxBytes: '2mb', allowedContentTypes: ['image/png', 'image/jpeg'] },
   onBeforeUpload: ({ request, file }) => ({ path: `avatar/${userId(request)}`, cache: '1m' }),
   onUploadCompleted: async ({ path, versionedUrl, contentType, size }) => db.upsert({ path, versionedUrl }),

@@ -45,10 +45,10 @@ export interface ProxyUploadCompletedArgs<TContext> extends BlobObject {
   context: TContext;
 }
 
-export interface HandleProxyUploadOptions<TContext, TData, TPath extends string = string> {
+export interface HandleProxyUploadOptions<TContext, TData, TRoute extends string = string> {
   bucket: Bucket;
   /** The URL this route is mounted at, so `route` on useUploadProxy is typed to it. */
-  path?: TPath;
+  route?: TRoute;
   /** Refused before the body is read when content-length says so, and again from the stream. */
   limits?: UploadLimits;
   /** The form field the file arrives in. Default 'file'; a request that is not multipart is the body itself. */
@@ -63,14 +63,14 @@ export interface HandleProxyUploadOptions<TContext, TData, TPath extends string 
   onError?: (error: unknown, request: Request) => BlobError | Response | void | Promise<BlobError | Response | void>;
 }
 
-export interface ProxyUploadHandlers<TData, TPath extends string = string> {
+export interface ProxyUploadHandlers<TData, TRoute extends string = string> {
   GET: (request: Request) => Promise<Response>;
-  POST: UploadRoute<undefined, TData, TPath>;
+  POST: UploadRoute<undefined, TData, TRoute>;
 }
 
-export function handleProxyUpload<TContext = undefined, TData = void, TPath extends string = string>(
-  options: HandleProxyUploadOptions<TContext, TData, TPath>,
-): ProxyUploadHandlers<TData, TPath> {
+export function handleProxyUpload<TContext = undefined, TData = void, TRoute extends string = string>(
+  options: HandleProxyUploadOptions<TContext, TData, TRoute>,
+): ProxyUploadHandlers<TData, TRoute> {
   const routeLimits = resolveLimits(options.limits);
   const field = options.field ?? 'file';
   const GET = limitsEndpoint(routeLimits);
@@ -129,7 +129,7 @@ export function handleProxyUpload<TContext = undefined, TData = void, TPath exte
     }
   };
 
-  return { GET, POST: POST as UploadRoute<undefined, TData, TPath> };
+  return { GET, POST: POST as UploadRoute<undefined, TData, TRoute> };
 }
 
 interface ReadBody {

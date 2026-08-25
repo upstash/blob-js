@@ -111,9 +111,9 @@ export interface UploadRouteTypes<TInput, TData> {
 
 /**
  * The route's own URL, when handleUpload was told it. `route` on the hooks is typed to this literal,
- * so pairing one route's path with another route's handler type stops compiling.
+ * so pairing one endpoint's url with another endpoint's handler type stops compiling.
  */
-export type UploadRoute<TInput = unknown, TData = unknown, TPath extends string = string> = ((request: Request) => Promise<Response>) & {
+export type UploadRoute<TInput = unknown, TData = unknown, TRoute extends string = string> = ((request: Request) => Promise<Response>) & {
   readonly __types?: UploadRouteTypes<TInput, TData>;
-  readonly __path?: TPath;
+  readonly __route?: TRoute;
 };

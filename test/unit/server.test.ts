@@ -509,7 +509,7 @@ describe('handleProxyUpload', () => {
   function route(extra: Record<string, unknown> = {}) {
     return handleProxyUpload({
       bucket: bucket(),
-      path: '/api/avatar',
+      route: '/api/avatar',
       limits: { allowedContentTypes: ['image/png'], maxBytes: '1mb' },
       onBeforeUpload: () => ({ path: 'avatar/demo', metadata: { owner: 'demo' } }),
       onUploadCompleted: ({ path, contentType, size }) => ({ row: path, contentType, size }),

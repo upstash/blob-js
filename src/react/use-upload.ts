@@ -11,10 +11,10 @@ export type RouteInput<R> = R extends { readonly __types?: UploadRouteTypes<infe
 /** What onUploadCompleted returned, which reaches the browser as blob.data. */
 export type RouteData<R> = R extends { readonly __types?: UploadRouteTypes<any, infer TData> } ? TData : unknown;
 /**
- * The path the route was declared with, so `route` cannot name one endpoint while the handler type
- * describes another. A route that did not declare a path types as plain string, as before.
+ * The url the route was declared with, so `route` cannot name one endpoint while the handler type
+ * describes another. A route that declared none types as plain string, as before.
  */
-export type RoutePath<R> = R extends UploadRoute<any, any, infer TPath> ? (string extends TPath ? string : TPath) : string;
+export type RoutePath<R> = R extends UploadRoute<any, any, infer TRoute> ? (string extends TRoute ? string : TRoute) : string;
 
 export interface UploadRecordBase {
   readonly id: string;
