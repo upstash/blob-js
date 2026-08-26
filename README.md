@@ -268,6 +268,11 @@ const thread = upload<Session>()({
 export const uploads = uploadHandler({ bucket, context: (request: Request): Session => getSession(request), routes: { thread } });
 ```
 
+A handler-level `onBeforeUpload` and `onUploadComplete` are shared by both transports, so they carry
+neither a typed `state` nor the direct-only `uploadId`. A route that needs either -- to dedupe a
+retried completion, or to carry the picked name to the row it writes -- names itself and uses the
+builder, even when it is the only one.
+
 The browser sends `input` with the file and `start({ file, input })` is typed to the schema; it is
 validated before `onBeforeUpload` runs and a route with no schema refuses input rather than dropping
 it. A callback written outside any handler is annotated with `BeforeUploadArgs` and

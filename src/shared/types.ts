@@ -16,7 +16,7 @@ export interface BlobObject {
 
 /**
  * What a route is told about a file before a byte of it is sent: what the browser claimed, which is
- * why onUploadCompleted's `contentType` is the one to record. Exported so a shared onBeforeUpload
+ * why onUploadComplete's `contentType` is the one to record. Exported so a shared onBeforeUpload
  * can be written outside the `upload({ ... })` that runs it.
  */
 export interface UploadFile {
@@ -89,7 +89,7 @@ export type UploadSnapshot = {
 } & (
   /**
    * 'finishing': every byte is sent and phase 'end' is completing the upload -- sniffing it,
-   * recording it, running onUploadCompleted. percent sits at 99 for exactly that stretch, and
+   * recording it, running onUploadComplete. percent sits at 99 for exactly that stretch, and
    * naming it is the difference between a bar that is working and one that looks stuck.
    */
   | { status: 'queued' | 'uploading' | 'finishing' | 'paused' }

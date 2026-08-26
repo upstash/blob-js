@@ -10,7 +10,7 @@ import { useTaskList, type ListEntry } from './task-list.ts';
 
 /** The input schema of an upload route, or undefined when it has none. */
 export type RouteInput<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<infer TInput, any, any, any> } ? TInput : undefined;
-/** What onUploadCompleted returned, which reaches the browser as blob.data. */
+/** What onUploadComplete returned, which reaches the browser as blob.data. */
 export type RouteData<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<any, infer TData, any, any> } ? TData : unknown;
 /**
  * The url the route was declared with, so `route` cannot name one endpoint while the handler type
