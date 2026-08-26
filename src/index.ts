@@ -17,28 +17,26 @@ export type {
   UpdateOptions,
 } from './server/bucket.ts';
 export type { PutBody } from './server/body.ts';
-export { handleUpload } from './server/handle-upload.ts';
-export type { HandleUploadOptions, UploadHandlers, UploadLimits, BeforeUploadArgs, BeforeUploadResult, BeforeUploadFailedArgs, UploadCompletedArgs, StandardSchema } from './server/handle-upload.ts';
-export { handleProxyUpload } from './server/handle-proxy-upload.ts';
-export type { HandleProxyUploadOptions, ProxyUploadHandlers, ProxyBeforeUploadArgs, ProxyBeforeUploadFailedArgs, ProxyBeforeUploadResult, ProxyUploadCompletedArgs } from './server/handle-proxy-upload.ts';
-export { upload, uploadRouter } from './server/router.ts';
+export type { StandardSchema, UploadLimits } from './server/handle-upload.ts';
+export { upload, uploadHandler } from './server/handler.ts';
 export type {
-  RouteBeforeUploadArgs,
-  RouteBeforeUploadFailedArgs,
-  RouteBeforeUploadResult,
-  RouteErrorArgs,
+  AnyUploadRouteConfig,
+  BeforeUploadArgs,
+  BeforeUploadResult,
+  DirectUploadRoute,
+  HandlerRoutes,
+  ProxyUploadRoute,
   RouteLimits,
-  RouteUploadCompletedArgs,
-  RouterErrorEvent,
-  RouterUploadCompletedEvent,
   UploadBuilder,
+  UploadCompleteArgs,
   UploadContext,
+  UploadErrorArgs,
+  UploadHandler,
+  UploadHandlerOptions,
   UploadRouteDefinition,
   UploadRouteMap,
   UploadRouteOptions,
-  UploadRouter,
-  UploadRouterOptions,
-} from './server/router.ts';
+} from './server/handler.ts';
 export { uniquePath } from './server/unique-path.ts';
 export { BlobError } from './shared/errors.ts';
 export type { BlobErrorCode, BlobErrorOptions } from './shared/errors.ts';

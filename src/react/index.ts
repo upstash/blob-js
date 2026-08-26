@@ -21,9 +21,9 @@ export type {
 } from './use-upload.ts';
 export { useUploadProxy } from './use-upload-proxy.ts';
 export type { DoneProxyUpload, FailedProxyUpload, ProxyRecord, ProxyRecordBase, ProxyResponse, ProxyStartArgs, UseUploadProxyOptions, UseUploadProxyResult } from './use-upload-proxy.ts';
-export { configureUpload, createUploadHooks } from './configure.ts';
+export { createUploadHooks } from './configure.ts';
 export type { BoundUseUpload, BoundUseUploadProxy, FailedAnyUpload, UnboundUploadHooks, UploadDefaults, UploadHooks } from './configure.ts';
-export type { AnyUploadRoute, AnyUploadRouter, IsProxyRoute, RouteAt, RouteKey, RoutesOf } from './routes.ts';
+export type { AnyUploadHandler, AnyUploadRoute, IsProxyRoute, RouteAt, RouteKey, RoutesOf, SoleRoute } from './routes.ts';
 export type { ProxySnapshot } from './proxy-task.ts';
 export { BlobError } from '../shared/errors.ts';
 export { formatBytes } from '../shared/units.ts';

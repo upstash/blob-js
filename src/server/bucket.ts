@@ -3,7 +3,7 @@ import type { BlobObject } from '../shared/types.ts';
 import { cacheControl, formatBytes, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
-import { MULTIPART_THRESHOLD, partCount, partSizeFor } from './multipart.ts';
+import { partCount, partSizeFor, PUT_MULTIPART_THRESHOLD } from './multipart.ts';
 import { errorFromBody, errorFromResponse, headFromHeaders, R2, type MultipartUpload } from './r2.ts';
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
@@ -216,7 +216,7 @@ export class Bucket {
       throw new BlobError('invalid_input', { message: 'multipart: overwrite:false and ifUnchanged are single-PUT only' });
     }
     // A zero-byte multipart upload is not a thing, and its stream has already been released.
-    if (size > 0 && (options.multipart ?? (size > MULTIPART_THRESHOLD && !conditional))) {
+    if (size > 0 && (options.multipart ?? (size > PUT_MULTIPART_THRESHOLD && !conditional))) {
       return this.putMultipart(path, stream, size, objectHeaders, contentType);
     }
 

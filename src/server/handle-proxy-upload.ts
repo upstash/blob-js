@@ -1,71 +1,41 @@
 import { BlobError } from '../shared/errors.ts';
-import type { BlobObject, ProxyUploadResponse, UploadFile, UploadRoute, WireLimits } from '../shared/types.ts';
+import type { ProxyUploadResponse, UploadFile, WireLimits } from '../shared/types.ts';
 import { formatBytes, type CacheOption, type Size } from '../shared/units.ts';
 import { type Bucket } from './bucket.ts';
-import { answerError, enforce, limitsEndpoint, resolveLimits, stateOf, validateInput, type StandardSchema, type UploadLimits } from './handle-upload.ts';
-
-type InferOutput<S> = S extends StandardSchema<any, infer O> ? O : never;
-type ProxyInput<TSchema> = TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : undefined;
+import { answerError, enforce, limitsEndpoint, resolveLimits, validateInput, type ErrorDetails, type ErrorMapper, type StandardSchema, type UploadLimits } from './handle-upload.ts';
 
 /**
- * The other half of handleUpload: the upload that goes through your function instead of straight to
- * storage, for when the bytes have to be checked before they are stored rather than after.
+ * The other half of handleUpload, internal to `uploadHandler`: the upload that goes through your
+ * function instead of straight to storage, for when the bytes have to be checked before they are
+ * stored rather than after.
  *
- * handleUpload cannot do that. It presigns, the browser PUTs, and phase 'end' reads the object back
- * to sniff it -- so at a path that is overwritten in place (an avatar), a refused file has already
- * replaced the one it was refused in favour of. put() checks first: the leading bytes against
- * allowedContentTypes and the stream against maxBytes, before anything reaches the bucket.
+ * The direct transport cannot do that. It presigns, the browser PUTs, and phase 'end' reads the
+ * object back to sniff it -- so at a path that is overwritten in place (an avatar), a refused file
+ * has already replaced the one it was refused in favour of. put() checks first: the leading bytes
+ * against allowedContentTypes and the stream against maxBytes, before anything reaches the bucket.
  *
  * The cost is that every byte crosses your function, so it is bounded by the platform's request body
- * cap (Vercel 4.5MB, AWS Lambda 6MB, Cloudflare 100MB): keep maxBytes well inside it and use
- * handleUpload for anything larger.
+ * cap (Vercel 4.5MB, AWS Lambda 6MB, Cloudflare 100MB): keep maxBytes well inside it and leave
+ * anything larger on the direct transport.
  *
- * GET answers the same limits document handleUpload's does, so useUploadProxy fills a file picker
+ * GET answers the same limits document the direct transport's does, so the hook fills a file picker
  * from the route's own list and refuses an oversize file before it is sent.
  */
 
-export interface ProxyBeforeUploadArgs<TInput = undefined> {
-  request: Request;
-  file: UploadFile;
-  /** The `input` form field, parsed as JSON and validated. `undefined` on a route with no schema. */
-  input: TInput;
-}
-
-export interface ProxyBeforeUploadResult<TState> {
+/** What the route decided about one file. `ctx` is added by the handler, not by this module. */
+interface ProxyDecided {
   path: string;
   cache?: CacheOption;
   metadata?: Record<string, string>;
-  /** May narrow the route's limits per user, never widen them. */
   limits?: UploadLimits;
-  /** false: If-None-Match: * server-side, so a second upload to the same path is a real 412. */
   overwrite?: boolean;
-  /** Carried to onUploadCompleted and onBeforeUploadFailed. */
-  state?: TState;
-  /** @deprecated renamed to `state`; still read for one minor. */
-  context?: TState;
+  state?: unknown;
 }
 
-export interface ProxyBeforeUploadFailedArgs<TInput, TState> extends ProxyBeforeUploadArgs<TInput> {
-  /** What onBeforeUpload returned: the row it reserved is reachable through its state. */
-  decided: ProxyBeforeUploadResult<TState>;
-  error: BlobError;
-}
-
-export interface ProxyUploadCompletedArgs<TState> extends BlobObject {
-  request: Request;
-  /** What R2 stored, canonicalised and proven by the leading bytes: not what the browser claimed. */
-  contentType: string;
-  metadata: Record<string, string>;
-  /** What onBeforeUpload returned as `state`. */
-  state: TState;
-  /** @deprecated renamed to `state`; the same value for one minor. */
-  context: TState;
-}
-
-export interface HandleProxyUploadOptions<TSchema extends StandardSchema<any, any> | undefined, TState, TData, TRoute extends string = string> {
+export interface InternalProxyUploadOptions {
   bucket: Bucket;
-  /** The URL this route is mounted at, so `route` on useUploadProxy is typed to it. */
-  route?: TRoute;
+  /** The route's name, handed to every callback. '' for a handler that mounts no named routes. */
+  route: string;
   /** Refused before the body is read when content-length says so, and again from the stream. */
   limits?: UploadLimits;
   /** The form field the file arrives in. Default 'file'; a request that is not multipart is the body itself. */
@@ -74,35 +44,24 @@ export interface HandleProxyUploadOptions<TSchema extends StandardSchema<any, an
    * A Standard Schema for the `input` form field, which the browser sends as JSON beside the file.
    * A raw body carries no fields, so a route that declares one only accepts multipart requests.
    */
-  input?: TSchema;
-  onBeforeUpload: (args: ProxyBeforeUploadArgs<ProxyInput<TSchema>>) => ProxyBeforeUploadResult<TState> | Promise<ProxyBeforeUploadResult<TState>>;
-  /**
-   * onBeforeUpload accepted the upload but storing it failed, so nothing will ever complete: release
-   * the row it reserved here. The error is rethrown to the client afterwards.
-   */
-  onBeforeUploadFailed?: (args: ProxyBeforeUploadFailedArgs<ProxyInput<TSchema>, TState>) => void | Promise<void>;
-  onUploadCompleted?: (args: ProxyUploadCompletedArgs<TState>) => TData | Promise<TData>;
-  /**
-   * Maps anything a callback threw that is not a BlobError. Return a BlobError or a Response to
-   * answer with it; return nothing to fall through. An error carrying a numeric `status` becomes
-   * that status without this hook.
-   */
-  onError?: (error: unknown, request: Request) => BlobError | Response | void | Promise<BlobError | Response | void>;
+  input?: StandardSchema<any, any> | undefined;
+  onBeforeUpload: (args: { request: Request; route: string; file: UploadFile; input: unknown }) => ProxyDecided | Promise<ProxyDecided>;
+  onUploadComplete?: (args: Record<string, unknown>) => unknown;
+  onError?: ErrorMapper;
 }
 
-export interface ProxyUploadHandlers<TInput, TData, TRoute extends string = string> {
+export interface InternalProxyUploadHandlers {
   GET: (request: Request) => Promise<Response>;
-  POST: UploadRoute<TInput, TData, TRoute, true>;
+  POST: (request: Request) => Promise<Response>;
 }
 
-export function handleProxyUpload<TSchema extends StandardSchema<any, any> | undefined = undefined, TState = undefined, TData = void, TRoute extends string = string>(
-  options: HandleProxyUploadOptions<TSchema, TState, TData, TRoute>,
-): ProxyUploadHandlers<ProxyInput<TSchema>, TData, TRoute> {
+export function handleProxyUpload(options: InternalProxyUploadOptions): InternalProxyUploadHandlers {
   const routeLimits = resolveLimits(options.limits);
   const field = options.field ?? 'file';
   const GET = limitsEndpoint(routeLimits, 'proxy');
 
   const POST = async (request: Request): Promise<Response> => {
+    const details: ErrorDetails = {};
     try {
       // Before the body is read, so a file far over the limit costs a header rather than the memory
       // to hold it. A multipart body is the file plus a boundary and part headers, and refusing on
@@ -116,11 +75,14 @@ export function handleProxyUpload<TSchema extends StandardSchema<any, any> | und
 
       const body = await readBody(request, field, routeLimits.maxBytes);
       const file: UploadFile = { name: body.name, type: normalizeType(body.type), size: body.size };
+      details.file = file;
       enforce(routeLimits, file);
 
-      const input = (await validateInput(options.input, body.input)) as ProxyInput<TSchema>;
-      const decided = await options.onBeforeUpload({ request, file, input });
+      const input = await validateInput(options.input, body.input);
+      const decided = await options.onBeforeUpload({ request, route: options.route, file, input });
       if (!decided || typeof decided.path !== 'string') throw new TypeError('onBeforeUpload must return { path }');
+      details.path = decided.path;
+      details.state = decided.state;
 
       let limits = routeLimits;
       if (decided.limits) {
@@ -142,6 +104,7 @@ export function handleProxyUpload<TSchema extends StandardSchema<any, any> | und
       }
 
       const metadata = decided.metadata ?? {};
+      details.metadata = metadata;
       // put() sniffs the leading bytes against allowedContentTypes and caps the stream at maxBytes,
       // both before the first byte reaches the bucket. A refusal here stored nothing.
       let blob;
@@ -155,28 +118,31 @@ export function handleProxyUpload<TSchema extends StandardSchema<any, any> | und
           metadata,
         });
       } catch (e) {
-        // The path is onBeforeUpload's to decide, so the row it reserved exists before the bytes do;
-        // a put that fails afterwards is told back to the app instead of stranding it.
-        const error = BlobError.is(e) ? e : new BlobError('request_failed', { message: 'could not store the upload', status: 502, cause: e });
-        await options.onBeforeUploadFailed?.({ request, file, input, decided, error });
-        throw error;
+        // The path is onBeforeUpload's to decide, so whatever it reserved exists before the bytes do;
+        // a put that fails afterwards reaches onError with that path instead of stranding it.
+        throw BlobError.is(e) ? e : new BlobError('request_failed', { message: 'could not store the upload', status: 502, cause: e });
       }
 
-      const state = stateOf(decided) as TState;
-      let data: TData = undefined as TData;
-      if (options.onUploadCompleted) {
-        data = await options.onUploadCompleted({ request, ...blob, contentType: blob.contentType, metadata, state, context: state });
+      let data: unknown;
+      if (options.onUploadComplete) {
+        try {
+          data = await options.onUploadComplete({ request, route: options.route, file, ...blob, contentType: blob.contentType, metadata, state: decided.state });
+        } catch (e) {
+          // The invariant: the object exists only if onUploadComplete returned.
+          await options.bucket.del(decided.path).catch(() => {});
+          throw e;
+        }
       }
       // The envelope phase 'end' answers with, so a proxied upload and a direct one land in the same
       // shape on the client and the two hooks stay interchangeable.
-      const response: ProxyUploadResponse<TData> = { blob: { ...blob, uploadedAt: blob.uploadedAt.toISOString() }, data };
+      const response: ProxyUploadResponse<unknown> = { blob: { ...blob, uploadedAt: blob.uploadedAt.toISOString() }, data };
       return Response.json(response);
     } catch (e) {
-      return await answerError(e, request, options.onError);
+      return await answerError(e, request, options.onError, details);
     }
   };
 
-  return { GET, POST: POST as UploadRoute<ProxyInput<TSchema>, TData, TRoute, true> };
+  return { GET, POST };
 }
 
 /**

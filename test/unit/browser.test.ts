@@ -17,12 +17,9 @@ const restore: (() => void)[] = [];
 
 const BLOB = { path: 'p', url: 'https://h/p', versionedUrl: 'https://h/p?v=%22x%22', size: 3, etag: '"x"', uploadedAt: '2026-08-24T00:00:00.000Z' };
 
-function singleBegin() {
-  return { completionToken: 'tok', path: 'p', upload: { kind: 'single', url: 'https://r2.test/put', headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=3600' } } };
-}
-
+// Every direct upload is multipart, one part when the file fits one, so there is only one shape.
 function multipartBegin(size: number, partSize = 5 * MIB) {
-  return { completionToken: 'tok', path: 'p', upload: { kind: 'multipart', partSize, parts: partUrls(1, size, partSize) } };
+  return { completionToken: 'tok', path: 'p', upload: { partSize, parts: partUrls(1, size, partSize) } };
 }
 
 function partUrls(from: number, size: number, partSize: number, gen = 0) {
@@ -35,11 +32,10 @@ function partUrls(from: number, size: number, partSize: number, gen = 0) {
 function defaultRoute(size: number, landed: { n: number; etag: string }[] = []) {
   let gen = 0;
   return (body: any) => {
-    if (body.phase === 'begin') return size > 16_000_000 ? multipartBegin(size) : singleBegin();
+    if (body.phase === 'begin') return multipartBegin(size);
     if (body.phase === 'parts') {
       gen++;
-      if (size <= 16_000_000) return { kind: 'single', url: `https://r2.test/put?g=${gen}`, headers: { 'content-type': 'image/png' } };
-      return { kind: 'multipart', partSize: 5 * MIB, size, parts: partUrls(body.from, size, 5 * MIB, gen), landed };
+      return { partSize: 5 * MIB, size, parts: partUrls(body.from, size, 5 * MIB, gen), landed };
     }
     if (body.phase === 'end') return { blob: { ...BLOB, size }, data: { rowId: '1', parts: body.parts } };
     if (body.phase === 'cancel') return { ok: true };
@@ -123,11 +119,12 @@ async function wake() {
 const png = () => new File([new Uint8Array(3)], 'a.png', { type: 'image/png', lastModified: 1 });
 const big = (size: number) => new File([new ArrayBuffer(size)], 'big.bin', { type: 'application/octet-stream', lastModified: 2 });
 
-describe('single PUT', () => {
-  test('begin, PUT with the signed headers, progress, end, done with typed data', async () => {
+describe('one part', () => {
+  test('begin, PUT the one part, progress, end, done with typed data', async () => {
     onPhase = defaultRoute(3);
     const task = upload(png(), { route: '/api/upload', headers: () => ({ authorization: 'Bearer j' }), input: { threadId: 't' } });
-    expect(task.snapshot()).toMatchObject({ status: 'queued', loaded: 0, total: 3, percent: 0, canPause: false, stalled: false });
+    // A three-byte file is a multipart of one part, so it pauses and resumes like any other upload.
+    expect(task.snapshot()).toMatchObject({ status: 'queued', loaded: 0, total: 3, percent: 0, canPause: true, stalled: false });
     const same = task.snapshot();
     expect(task.snapshot()).toBe(same);
     await settle();
@@ -135,10 +132,11 @@ describe('single PUT', () => {
     expect(ManualXhr.pending.length).toBe(1);
     const xhr = ManualXhr.pending[0]!;
     expect(xhr.method).toBe('PUT');
-    expect(xhr.url).toBe('https://r2.test/put');
-    expect(xhr.headers['content-type']).toBe('image/png');
-    expect(xhr.headers['cache-control']).toBe('public, max-age=3600');
-    expect(xhr.body).toBeInstanceOf(File);
+    expect(xhr.url).toBe('https://r2.test/part/1?g=0');
+    // A part url signs content-length and nothing else: the type and the cache header were pinned
+    // when the multipart was created, so the browser sends no headers of its own.
+    expect(xhr.headers).toEqual({});
+    expect(xhr.body).toBeInstanceOf(Blob);
     expect(task.snapshot().status).toBe('uploading');
     xhr.progress(2);
     expect(task.snapshot()).toMatchObject({ loaded: 2, percent: 66 });
@@ -150,7 +148,7 @@ describe('single PUT', () => {
     expect(blob).toMatchObject({ path: 'p', size: 3, etag: '"x"', data: { rowId: '1' } });
     expect(blob.uploadedAt).toBeInstanceOf(Date);
     expect(calls.map((c) => c.phase)).toEqual(['begin', 'end']);
-    expect(calls[1]!.body).toEqual({ phase: 'end', completionToken: 'tok' });
+    expect(calls[1]!.body).toEqual({ phase: 'end', completionToken: 'tok', parts: [{ n: 1, etag: '"x"' }] });
     await settle();
     expect(task.snapshot()).toMatchObject({ status: 'done', percent: 100, loaded: 3 });
     expect(notified).toBeGreaterThan(0);
@@ -233,7 +231,7 @@ describe('single PUT', () => {
     ManualXhr.pending[0]!.respond(403);
     await settle();
     expect(calls.map((c) => c.phase)).toEqual(['begin', 'parts']);
-    expect(ManualXhr.pending[0]!.url).toBe('https://r2.test/put?g=1');
+    expect(ManualXhr.pending[0]!.url).toBe('https://r2.test/part/1?g=1');
     ManualXhr.pending[0]!.respond(403);
     await expect(task.done).rejects.toMatchObject({ code: 'signature_mismatch', status: 403 });
     expect(task.snapshot().status).toBe('error');
@@ -408,11 +406,12 @@ describe('single PUT', () => {
   test('the controls answer false instead of throwing when they cannot act', async () => {
     onPhase = defaultRoute(3);
     const task = upload(png(), { route: '/api/upload' });
+    // Queued: pause has nothing on the wire to hold back yet, though the upload is pausable.
     expect(task.pause()).toBe(false);
     expect(task.resume()).toBe(false);
     await settle();
-    expect(task.snapshot().canPause).toBe(false);
-    expect(task.pause()).toBe(false);
+    expect(task.snapshot().canPause).toBe(true);
+    expect(task.resume()).toBe(false);
     ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
     await task.done;
     expect(task.cancel()).toBe(false);
@@ -447,8 +446,8 @@ describe('single PUT', () => {
     const token = 'tok-SECRET';
     const url = 'https://r2.test/put?X-Amz-Signature=DEADBEEF';
     onPhase = (body) => {
-      if (body.phase === 'begin') return { completionToken: token, path: 'p', upload: { kind: 'single', url, headers: {} } };
-      if (body.phase === 'parts') return { kind: 'single', url, headers: {} };
+      if (body.phase === 'begin') return { completionToken: token, path: 'p', upload: { partSize: 5 * MIB, parts: [{ n: 1, url }] } };
+      if (body.phase === 'parts') return { partSize: 5 * MIB, size: 3, parts: [{ n: 1, url }], landed: [] };
       throw new Error('unexpected phase');
     };
     const messages: string[] = [];

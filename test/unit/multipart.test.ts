@@ -1,11 +1,18 @@
 import { describe, expect, test } from 'bun:test';
-import { MULTIPART_THRESHOLD, partCount, partSizeFor } from '../../src/server/multipart.ts';
+import { partCount, partSizeFor, PUT_MULTIPART_THRESHOLD } from '../../src/server/multipart.ts';
 
 const MIB = 1024 * 1024;
 
-describe('MULTIPART_THRESHOLD', () => {
+describe('PUT_MULTIPART_THRESHOLD', () => {
   test('is 16MB decimal, like every other user-facing size', () => {
-    expect(MULTIPART_THRESHOLD).toBe(16_000_000);
+    expect(PUT_MULTIPART_THRESHOLD).toBe(16_000_000);
+  });
+
+  test('governs bucket.put() alone: a browser upload is multipart at every size', () => {
+    // One part when the file fits one, which is what makes pause, resume and retry work for a 3kb
+    // avatar as well as a 3gb video, and what keeps the object from existing before phase 'end'.
+    expect(partCount(3_000, partSizeFor(3_000))).toBe(1);
+    expect(partCount(1, partSizeFor(1))).toBe(1);
   });
 });
 
@@ -15,8 +22,9 @@ describe('partSizeFor', () => {
     expect(partCount(16_000_000, partSizeFor(16_000_000))).toBe(4);
   });
 
-  test('floors at 5 MiB for anything the threshold lets through', () => {
-    expect(partSizeFor(MULTIPART_THRESHOLD + 1)).toBe(5 * MIB);
+  test('floors at 5 MiB, the R2 minimum for every part but the last', () => {
+    expect(partSizeFor(1)).toBe(5 * MIB);
+    expect(partSizeFor(16_000_001)).toBe(5 * MIB);
     expect(partSizeFor(100_000_000)).toBe(5 * MIB);
     expect(partSizeFor(1_310_720_000)).toBe(5 * MIB);
   });

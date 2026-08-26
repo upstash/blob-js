@@ -10,18 +10,25 @@ interface TokenBase {
   /** Upload id: what makes an at-least-once phase 'end' idempotent for the app. */
   id: string;
   path: string;
+  /** The file's name as the browser gave it, so `file` reaches onUploadComplete unchanged. */
+  n: string;
   type: string;
   size: number;
   /** Headers pinned into the signature: content-type, cache-control, x-amz-meta-*. */
   headers: Record<string, string>;
   /** Expanded allowed types, sniffed at phase 'end'. */
   allowed: string[] | undefined;
+  /** What onBeforeUpload returned as `state`. */
   ctx: unknown;
   /** Unix ms. */
   exp: number;
 }
 
-export type TokenPayload = (TokenBase & { kind: 'single' }) | (TokenBase & { kind: 'multipart'; uploadId: string; partSize: number });
+export interface TokenPayload extends TokenBase {
+  /** R2's own multipart id, so phase 'end' can complete it and a cancel can abort it. */
+  uploadId: string;
+  partSize: number;
+}
 
 const enc = new TextEncoder();
 

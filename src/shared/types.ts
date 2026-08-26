@@ -33,19 +33,17 @@ export interface WireLimits {
   maxBytes?: number;
 }
 
-export interface WireSingle {
-  kind: 'single';
-  url: string;
-  headers: Record<string, string>;
-}
-
 export interface WirePart {
   n: number;
   url: string;
 }
 
+/**
+ * Every direct upload is multipart, one part when the file fits one: the object does not exist until
+ * phase 'end' completes it, so no callback can be handed an object it never saw, and pause, resume
+ * and retry work at every size instead of only past a threshold.
+ */
 export interface WireMultipart {
-  kind: 'multipart';
   partSize: number;
   parts: WirePart[];
 }
@@ -53,7 +51,7 @@ export interface WireMultipart {
 export interface WireBeginResponse {
   completionToken: string;
   path: string;
-  upload: WireSingle | WireMultipart;
+  upload: WireMultipart;
 }
 
 export interface WireLanded {
@@ -61,9 +59,12 @@ export interface WireLanded {
   etag: string;
 }
 
-export type WirePartsResponse =
-  | { kind: 'single'; url: string; headers: Record<string, string> }
-  | { kind: 'multipart'; partSize: number; size: number; parts: WirePart[]; landed: WireLanded[] };
+export interface WirePartsResponse {
+  partSize: number;
+  size: number;
+  parts: WirePart[];
+  landed: WireLanded[];
+}
 
 export interface WireEndResponse<TData = unknown> {
   blob: Omit<BlobObject, 'uploadedAt'> & { uploadedAt: string };

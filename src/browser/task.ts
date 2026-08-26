@@ -59,15 +59,11 @@ class Task implements InternalTask {
   private status: Status = 'queued';
   private error: BlobError | undefined;
   private blob: (BlobObject & { data: unknown }) | undefined;
-  private kind: 'single' | 'multipart' | undefined;
   private token: string | undefined;
   private storeKey: string;
   private partSize = 0;
-  /** Bytes R2 has accepted on the single-PUT path; a part carries its own etag instead. */
-  private sent = 0;
   private parts = new Map<number, PartState>();
   private urls = new Map<number, string>();
-  private single: { url: string; headers: Record<string, string> } | undefined;
   private batch: Promise<void> | undefined;
   private inflight = new Map<number, InFlight>();
   private represigned = new Set<number>();
@@ -110,7 +106,7 @@ class Task implements InternalTask {
   snapshot(): UploadSnapshot {
     if (this.cached) return this.cached;
     const total = this.file.size;
-    let loaded = this.sent;
+    let loaded = 0;
     for (const p of this.parts.values()) if (p.etag) loaded += p.size;
     for (const f of this.inflight.values()) loaded += f.loaded;
     if (this.status === 'done') loaded = total;
@@ -118,7 +114,7 @@ class Task implements InternalTask {
       loaded,
       total,
       percent: this.status === 'done' ? 100 : total > 0 ? Math.min(99, Math.floor((loaded / total) * 100)) : 0,
-      canPause: this.kind === 'multipart' && (this.status === 'queued' || this.status === 'uploading' || this.status === 'paused'),
+      canPause: this.status === 'queued' || this.status === 'uploading' || this.status === 'paused',
       stalled: this.inflight.size > 0 && [...this.inflight.values()].every((f) => f.backingOff),
     };
     switch (this.status) {
@@ -163,7 +159,7 @@ class Task implements InternalTask {
   pause(): boolean {
     // Status 'finishing' is not pausable: every part has landed and phase 'end' is running, so there
     // is nothing left to hold back. Pausing there only mislabelled an upload that completed anyway.
-    if (this.kind !== 'multipart' || this.status !== 'uploading' || this.paused) return false;
+    if (this.status !== 'uploading' || this.paused) return false;
     this.paused = true;
     this.status = 'paused';
     for (const f of this.inflight.values()) if (f.loaded === 0) f.controller.abort();
@@ -266,14 +262,8 @@ class Task implements InternalTask {
     this.status = 'uploading';
     this.notify();
 
-    let landed: WireLanded[] | undefined;
-    if (this.kind === 'single') {
-      await this.putWithRetry(0, this.file.size, this.file);
-      this.notify();
-    } else {
-      await this.runMultipart();
-      landed = [...this.parts.values()].map((p) => ({ n: p.n, etag: p.etag! }));
-    }
+    await this.runMultipart();
+    const landed: WireLanded[] = [...this.parts.values()].map((p) => ({ n: p.n, etag: p.etag! }));
     if (signal.aborted) throw abortError();
 
     this.status = 'finishing';
@@ -294,13 +284,6 @@ class Task implements InternalTask {
       1,
     )) as WireBeginResponse;
     this.token = res.completionToken;
-    if (res.upload.kind === 'single') {
-      this.kind = 'single';
-      this.single = { url: res.upload.url, headers: res.upload.headers };
-      this.urlsMintedAt = clock.now();
-      return;
-    }
-    this.kind = 'multipart';
     this.partSize = res.upload.partSize;
     this.layoutParts();
     for (const p of res.upload.parts) this.urls.set(p.n, p.url);
@@ -315,9 +298,8 @@ class Task implements InternalTask {
     if (!rec) return false;
     try {
       const res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal, 1)) as WirePartsResponse;
-      if (res.kind !== 'multipart' || res.size !== this.file.size) throw new Error('not resumable');
+      if (res.size !== this.file.size) throw new Error('not resumable');
       this.token = rec.completionToken;
-      this.kind = 'multipart';
       this.partSize = res.partSize;
       this.layoutParts();
       this.applyBatch(res);
@@ -341,7 +323,7 @@ class Task implements InternalTask {
     }
   }
 
-  private applyBatch(res: WirePartsResponse & { kind: 'multipart' }): void {
+  private applyBatch(res: WirePartsResponse): void {
     for (const p of res.parts) this.urls.set(p.n, p.url);
     this.urlsMintedAt = clock.now();
     for (const l of res.landed) {
@@ -390,7 +372,6 @@ class Task implements InternalTask {
   }
 
   private async urlFor(n: number): Promise<{ url: string; headers: Record<string, string> }> {
-    if (n === 0) return this.single!;
     const cached = this.urls.get(n);
     if (cached) return { url: cached, headers: {} };
     this.batch ??= this.fetchBatch(n).finally(() => {
@@ -404,19 +385,10 @@ class Task implements InternalTask {
 
   private async fetchBatch(from: number): Promise<void> {
     const res = (await this.routeCall({ phase: 'parts', completionToken: this.token, from }, this.cancelController.signal)) as WirePartsResponse;
-    if (res.kind === 'single') {
-      this.single = { url: res.url, headers: res.headers };
-      this.urlsMintedAt = clock.now();
-      return;
-    }
     this.applyBatch(res);
   }
 
   private async represign(n: number): Promise<void> {
-    if (n === 0) {
-      await this.fetchBatch(1);
-      return;
-    }
     // Every url from the same batch expires together, so drop them all.
     this.urls.clear();
     await this.fetchBatch(n);
@@ -476,8 +448,7 @@ class Task implements InternalTask {
         if (status >= 200 && status < 300) {
           // Bank the bytes before the finally drops this part from the in-flight map: a notify()
           // between the two reads a snapshot that counts neither, and the bar dips to zero.
-          if (n === 0) this.sent = size;
-          else this.parts.get(n)!.etag = etag ?? '';
+          this.parts.get(n)!.etag = etag ?? '';
           return etag ?? '';
         }
 
@@ -511,7 +482,7 @@ class Task implements InternalTask {
       throw new BlobError('request_failed', {
         message: `upload failed after ${httpAttempts + netAttempts} attempts${lastStatus ? ` (last status ${lastStatus})` : ''}`,
         status: 503,
-        hint: netAttempts > 0 && !sentBytes ? CORS_HINT : this.kind === 'multipart' ? 'the parts that landed are kept: task.retry(), or pick the same file again' : undefined,
+        hint: netAttempts > 0 && !sentBytes ? CORS_HINT : 'the parts that landed are kept: task.retry(), or pick the same file again',
       });
     } finally {
       cancel.removeEventListener('abort', onCancel);

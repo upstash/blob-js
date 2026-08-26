@@ -1,8 +1,8 @@
 import type { HeadersProvider } from '../browser/task.ts';
 import type { BlobError } from '../shared/errors.ts';
-import type { AnyUploadRoute, RouteAt, RouteKey } from './routes.ts';
+import type { AnyUploadRoute, RouteAt, RouteKey, SoleRoute } from './routes.ts';
 import { useUploadProxy, type UseUploadProxyOptions, type UseUploadProxyResult } from './use-upload-proxy.ts';
-import { useUpload, type RoutePath, type UseUploadOptions, type UseUploadResult } from './use-upload.ts';
+import { useUpload, type UseUploadOptions, type UseUploadResult } from './use-upload.ts';
 
 /** The part of a failed upload both hooks agree on. */
 export interface FailedAnyUpload {
@@ -16,7 +16,7 @@ export interface UploadDefaults {
   headers?: HeadersProvider;
   /** Files in flight. The rest queue. */
   concurrency?: number;
-  /** Where the router is mounted; a route *name* resolves against it. Default '/api/upload'. */
+  /** Where the handler is mounted; a route *name* resolves against it. Default '/api/upload'. */
   endpoint?: string;
   /**
    * Runs for every failed upload from either hook, before the call's own onError rather than instead
@@ -28,12 +28,13 @@ export interface UploadDefaults {
 
 /**
  * `useUpload` bound to a route map: the name is checked against it, and the record, the data and the
- * input come from the route that name belongs to.
+ * input come from the route that name belongs to. A handler written with no `routes` mounts one
+ * route and this takes no name at all.
  */
 export interface BoundUseUpload<T> {
+  /** The handler is the route: no name to pass, and nothing to keep in step with the server. */
+  (...args: [SoleRoute<T>] extends [never] ? [route: never] : [options?: UseUploadOptions<SoleRoute<T>>]): UseUploadResult<SoleRoute<T>>;
   <K extends RouteKey<T>>(route: K, options?: UseUploadOptions<RouteAt<T, K>>): UseUploadResult<RouteAt<T, K>>;
-  /** @deprecated pass the route positionally: `useUpload(route, options)`. */
-  <K extends RouteKey<T>>(options: UseUploadOptions<RouteAt<T, K>> & { route: K }): UseUploadResult<RouteAt<T, K>>;
   /**
    * The escape hatch for a url the map does not name -- a dynamic route, or one from another app.
    * The type argument is required: without it there is nothing to check the url against, and an
@@ -49,8 +50,6 @@ export interface BoundUseUpload<T> {
 export interface BoundUseUploadProxy<T> {
   <K extends RouteKey<T>>(route: K, options?: UseUploadProxyOptions<RouteAt<T, K>>): UseUploadProxyResult<RouteAt<T, K>>;
   <R = unknown>(route: string, options?: UseUploadProxyOptions<R>): UseUploadProxyResult<R>;
-  /** @deprecated pass the route positionally: `useUploadProxy(route, options)`. */
-  <R = unknown>(options: UseUploadProxyOptions<R> & { route: RoutePath<R> }): UseUploadProxyResult<R>;
 }
 
 export interface UploadHooks<T> {
@@ -77,8 +76,8 @@ export interface UnboundUploadHooks {
  * const { start, upload } = useUpload('avatar');
  * ```
  *
- * `T` is a router (`typeof uploads`), a branded handler (`typeof POST`), or a union of those. With
- * no type argument the hooks keep their unbound signatures exactly.
+ * `T` is an upload handler (`typeof uploads`), a branded route, or a union of those. With no type
+ * argument the hooks keep their unbound signatures exactly.
  */
 export function createUploadHooks<T = never>(defaults?: UploadDefaults): [T] extends [never] ? UnboundUploadHooks : UploadHooks<T>;
 export function createUploadHooks(defaults: UploadDefaults = {}): any {
@@ -101,16 +100,11 @@ export function createUploadHooks(defaults: UploadDefaults = {}): any {
       : options?.onError,
   });
 
-  // Both call shapes reach the same hook: a name or url first, or the old single options object.
+  // A name (or url) first, or nothing at all: a handler with no `routes` is reached with neither.
   const bind =
     (hook: any) =>
-    (routeOrOptions: any, maybeOptions?: any): any =>
-      typeof routeOrOptions === 'string' ? hook(routeOrOptions, merge(maybeOptions ?? {})) : hook(merge(routeOrOptions ?? {}));
+    (routeOrOptions?: any, maybeOptions?: any): any =>
+      typeof routeOrOptions === 'string' ? hook(routeOrOptions, merge(maybeOptions ?? {})) : hook('', merge(routeOrOptions ?? {}));
 
   return { useUpload: bind(useUpload), useUploadProxy: bind(useUploadProxy) };
-}
-
-/** @deprecated renamed to `createUploadHooks`, which also takes the router type. Identical otherwise. */
-export function configureUpload(defaults: UploadDefaults): UnboundUploadHooks {
-  return createUploadHooks(defaults);
 }

@@ -1,5 +1,8 @@
-/** Decimal, like every user-facing size. Above this the browser client goes multipart. */
-export const MULTIPART_THRESHOLD = 16_000_000;
+/**
+ * Decimal, like every user-facing size. Only `bucket.put()` reads it: past this a server-side put
+ * splits into parts. Browser uploads are always multipart, whatever the file weighs.
+ */
+export const PUT_MULTIPART_THRESHOLD = 16_000_000;
 
 // Part math is binary: R2's floor for every part but the last is 5 MiB, checked at complete().
 const MIB = 1024 * 1024;

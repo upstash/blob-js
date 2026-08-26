@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import * as z from 'zod';
-import { BlobError, handleUpload, uniquePath } from '../../src/index.ts';
+import { BlobError, uniquePath, upload as uploadRoute, uploadHandler } from '../../src/index.ts';
 import { upload } from '../../src/browser/index.ts';
 import { clock } from '../../src/browser/clock.ts';
 import { FetchXhr, installRouter, installXhr } from '../helpers/xhr.ts';
@@ -27,49 +27,74 @@ afterAll(async () => {
   await Promise.all([cleanup(pub), cleanup(priv)]);
 });
 
-const chat = handleUpload({
+// No `routes`, so this handler is the route and the client reaches it with no ?route= at all.
+// `context` sits above the callbacks: the ordering rule in handler.ts.
+const chat = uploadHandler({
   bucket: pub,
   limits: { allowedContentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: '20mb' },
-  input: z.object({ threadId: z.string().uuid() }),
-  onBeforeUpload: async ({ request, file, input }) => {
-    const user = request.headers.get('authorization')?.slice(7);
-    if (!user) throw new BlobError('unauthorized');
-    const path = root + uniquePath`chat/${user}/${input.threadId}/${file.name}`;
-    rows[path] = 'pending';
-    return { path, cache: 'immutable', metadata: { uploadedBy: user }, context: { rowId: path, owner: user } };
+  context: (request) => {
+    const id = request.headers.get('authorization')?.slice(7);
+    if (!id) throw new BlobError('unauthorized');
+    return { id };
   },
-  onUploadCompleted: async ({ path, context }) => {
+  input: z.object({ threadId: z.string().uuid() }),
+  onBeforeUpload: ({ ctx, file, input }) => {
+    const path = root + uniquePath`chat/${ctx.id}/${input.threadId}/${file.name}`;
+    rows[path] = 'pending';
+    return { path, cache: 'immutable', metadata: { uploadedBy: ctx.id } };
+  },
+  onUploadComplete: ({ path }) => {
     rows[path] = 'ready';
-    return { rowId: context.rowId };
+    return { rowId: path };
   },
 });
 
 let begins = 0;
-const large = handleUpload({
+const large = uploadHandler({
   bucket: priv,
   limits: { maxBytes: '5gb' },
-  onBeforeUpload: async ({ file }) => {
+  onBeforeUpload: ({ file }) => {
     begins++;
-    return { path: p(`large/${crypto.randomUUID()}-${file.name}`), context: { n: begins } };
+    return { path: p(`large/${crypto.randomUUID()}-${file.name}`) };
   },
-  onUploadCompleted: async ({ path, size }) => {
+  onUploadComplete: ({ path, size }) => {
     rows[path] = size;
   },
 });
 
-restore.push(installRouter({ '/api/upload': chat, '/api/upload/large': large }));
+const avatarRoute = uploadRoute()({
+  onBeforeUpload: ({ route, file }) => ({ path: p(`${route}/${file.name}`), metadata: { route } }),
+  onUploadComplete: ({ route, path }) => ({ route, path }),
+});
+
+// The other form: names in the query, one handler for all of them.
+const uploads = uploadHandler({
+  bucket: pub,
+  endpoint: '/api/uploads',
+  limits: { allowedContentTypes: ['image/png'], maxBytes: '5mb' },
+  routes: { avatar: avatarRoute },
+});
+
+restore.push(
+  installRouter({
+    '/api/upload': chat,
+    '/api/upload/large': large,
+    '/api/uploads?route=avatar': uploads,
+  }),
+);
 
 const tid = '4d4a2a2c-5d6e-4f7a-8b9c-0d1e2f3a4b5c';
 const headers = () => ({ authorization: 'Bearer u7' });
 
 describe('upload()', () => {
-  test('single PUT: queued -> uploading -> done, blob.data typed by the route', async () => {
+  test('one part: queued -> uploading -> done, blob.data typed by the route', async () => {
     const png = new Uint8Array(new ArrayBuffer(2000));
     png.set(PNG);
     const file = new File([png], 'Pic One.png', { type: 'image/png' });
     const task = upload(file, { route: '/api/upload', headers, input: { threadId: tid } });
     expect(task.snapshot().status).toBe('queued');
-    expect(task.snapshot().canPause).toBe(false);
+    // Every upload is multipart now, so every upload is pausable, whatever the file weighs.
+    expect(task.snapshot().canPause).toBe(true);
     const seen: string[] = [];
     task.subscribe(() => seen.push(task.snapshot().status));
     const blob = await task.done;
@@ -80,9 +105,20 @@ describe('upload()', () => {
     expect(task.snapshot().status).toBe('done');
     expect(task.snapshot().percent).toBe(100);
     expect(seen).toContain('uploading');
+    // The stretch where every byte is sent and phase 'end' is completing the object.
+    expect(seen).toContain('finishing');
     expect(task.pause()).toBe(false);
     expect(task.cancel()).toBe(false);
     expect((await fetch(blob.url!)).status).toBe(200);
+  });
+
+  test('a named route is reached by its name in the query', async () => {
+    const png = new Uint8Array(new ArrayBuffer(1200));
+    png.set(PNG);
+    const file = new File([png], 'me.png', { type: 'image/png' });
+    const blob = await upload(file, { route: '/api/uploads?route=avatar', headers }).done;
+    expect(blob.data).toEqual({ route: 'avatar', path: p('avatar/me.png') });
+    expect((await pub.info(blob.path)).metadata.route).toBe('avatar');
   });
 
   test('route errors surface as BlobError with the route status', async () => {
@@ -98,7 +134,7 @@ describe('upload()', () => {
     await expect(noAuth.done).rejects.toMatchObject({ code: 'unauthorized', status: 401 });
   });
 
-  test('multipart: pause, resume, cancel, and resume by fingerprint after a reload', async () => {
+  test('many parts: pause, resume, cancel, and resume by fingerprint after a reload', async () => {
     const size = 17_000_000;
     const data = bytes(size, 5);
     const file = new File([data], 'movie.bin', { type: 'application/octet-stream', lastModified: 1_700_000_000_000 });

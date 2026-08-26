@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { Bucket, BlobError, handleProxyUpload, handleUpload } from '../../src/index.ts';
+import { Bucket, BlobError, uploadHandler } from '../../src/index.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { deriveRouteId } from '../../src/server/handle-upload.ts';
 import { encodeToken } from '../../src/server/token.ts';
@@ -447,29 +447,47 @@ describe('multipart put', () => {
   });
 });
 
-describe('handleUpload', () => {
+describe('uploadHandler: the direct transport', () => {
   const post = (route: { POST: (r: Request) => Promise<Response> }, body: unknown) =>
     route.POST(new Request('https://app.test/api/upload', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }));
 
+  // Every direct upload is multipart now, so begin always creates one.
+  const initiated = (call: Call): Response | undefined =>
+    call.method === 'POST' && call.url.includes('uploads=') ? new Response('<InitiateMultipartUploadResult><UploadId>mp-1</UploadId></InitiateMultipartUploadResult>', { status: 200 }) : undefined;
+  const beginR2 = (call: Call): Response => initiated(call) ?? new Response('', { status: 200 });
+  /** begin, then complete, then the HEAD phase 'end' reads the stored object back with. */
+  const fullR2 =
+    (head: Record<string, string> = { 'content-length': '10', etag: '"e"', 'content-type': 'image/png' }) =>
+    (call: Call): Response => {
+      const created = initiated(call);
+      if (created) return created;
+      if (call.method === 'POST') return new Response('<CompleteMultipartUploadResult><ETag>"e"</ETag></CompleteMultipartUploadResult>', { status: 200 });
+      if (call.method === 'HEAD') return new Response('', { status: 200, headers: head });
+      return new Response('', { status: 204 });
+    };
+
+  const begin = async (route: { POST: (r: Request) => Promise<Response> }, file: { name: string; type: string; size: number }) =>
+    (await (await post(route, { phase: 'begin', file })).json()) as WireBeginResponse;
+
   test('a completion token is bound to its route, not just to the bucket', async () => {
     resetCredentialCaches();
+    r2Handler = beginR2;
     const b = bucket();
-    const avatars = handleUpload({ bucket: b, limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'avatars/1.png' }) });
-    const invoices = handleUpload({ bucket: b, limits: { maxBytes: '9mb' }, onBeforeUpload: () => ({ path: 'invoices/1.pdf' }) });
-    const twin = handleUpload({ bucket: b, id: 'avatars', limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
+    const avatars = uploadHandler({ bucket: b, limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'avatars/1.png' }) });
+    const invoices = uploadHandler({ bucket: b, limits: { maxBytes: '9mb' }, onBeforeUpload: () => ({ path: 'invoices/1.pdf' }) });
+    // Same limits, different endpoint: two handlers on one bucket do not share each other's tokens.
+    const twin = uploadHandler({ bucket: b, endpoint: '/api/twin', limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
 
-    const begin = (await (await post(avatars, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } })).json()) as WireBeginResponse;
-    const crossed = await post(invoices, { phase: 'end', completionToken: begin.completionToken });
-    expect(crossed.status).toBe(403);
-    // Same limits, different id: the id is what separates them.
-    expect((await post(twin, { phase: 'end', completionToken: begin.completionToken })).status).toBe(403);
+    const started = await begin(avatars, { name: 'a.png', type: 'image/png', size: 10 });
+    expect((await post(invoices, { phase: 'end', completionToken: started.completionToken })).status).toBe(403);
+    expect((await post(twin, { phase: 'end', completionToken: started.completionToken })).status).toBe(403);
     expect(deriveRouteId({ allowedContentTypes: undefined, maxBytes: 1 }, false)).not.toBe(deriveRouteId({ allowedContentTypes: undefined, maxBytes: 2 }, false));
     expect(deriveRouteId({ allowedContentTypes: ['image/png'], maxBytes: 1 }, false)).toBe(deriveRouteId({ allowedContentTypes: ['image/png'], maxBytes: 1 }, false));
   });
 
   test('the limits are revalidated, not cached forever', async () => {
     resetCredentialCaches();
-    const route = handleUpload({ bucket: bucket(), limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
+    const route = uploadHandler({ bucket: bucket(), limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
     const res = await route.GET(new Request('https://app.test/api/upload'));
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
     const etag = res.headers.get('etag')!;
@@ -479,10 +497,60 @@ describe('handleUpload', () => {
     expect(again.status).toBe(304);
   });
 
+  test('a file that fits one part is still a multipart, so it can be paused and resumed', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'small.png' }) });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    expect(started.upload.partSize).toBe(5 * 1024 * 1024);
+    expect(started.upload.parts.map((p) => p.n)).toEqual([1]);
+    expect(new URL(started.upload.parts[0]!.url).searchParams.get('partNumber')).toBe('1');
+    expect(new URL(started.upload.parts[0]!.url).searchParams.get('uploadId')).toBe('mp-1');
+    // The object does not exist yet: nothing has been completed, so nothing can be served.
+    expect(r2Calls().filter((c) => c.method === 'PUT')).toEqual([]);
+  });
+
+  test('an empty file is refused before anything is created', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'zero.bin' }) });
+    const res = await post(route, { phase: 'begin', file: { name: 'a', type: '', size: 0 } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('empty_body');
+    expect(r2Calls()).toEqual([]);
+  });
+
+  test('phase end hands the callback the file the browser declared at begin', async () => {
+    resetCredentialCaches();
+    r2Handler = fullR2();
+    let seen: unknown;
+    const route = uploadHandler({
+      bucket: bucket(),
+      onBeforeUpload: () => ({ path: 'a.png', state: { rowId: 7 } }),
+      onUploadComplete: ({ file, route: name, state, uploadId, multipartUploadId }) => {
+        seen = { file, name, state, hasUploadId: typeof uploadId === 'string', multipartUploadId };
+        return { ok: true };
+      },
+    });
+    const started = await begin(route, { name: 'Holiday Pic.PNG', type: 'image/png', size: 10 });
+    const res = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
+    expect(res.status).toBe(200);
+    expect((await res.json()).data).toEqual({ ok: true });
+    expect(seen).toEqual({
+      // The name is the one thing the stored object does not carry: it rides the completion token.
+      file: { name: 'Holiday Pic.PNG', type: 'image/png', size: 10 },
+      name: '',
+      state: { rowId: 7 },
+      hasUploadId: true,
+      multipartUploadId: 'mp-1',
+    });
+  });
+
   test('an app error that names a status becomes that status; onError maps the rest', async () => {
     resetCredentialCaches();
+    r2Handler = beginR2;
     const b = bucket();
-    const statusy = handleUpload({
+    const statusy = uploadHandler({
       bucket: b,
       onBeforeUpload: () => {
         throw Object.assign(new Error('no seats left'), { status: 402 });
@@ -492,21 +560,23 @@ describe('handleUpload', () => {
     expect(res.status).toBe(402);
     expect(await res.json()).toMatchObject({ code: 'request_failed', message: 'No seats left', status: 402 });
 
-    const mapped = handleUpload({
+    const mapped = uploadHandler({
       bucket: b,
       onBeforeUpload: () => {
         throw new Error('db down');
       },
-      onError: (e, request) => {
+      onError: ({ error, request, route, file }) => {
         expect(request).toBeInstanceOf(Request);
-        return new BlobError('not_ready', { message: String((e as Error).message) });
+        expect(route).toBe('');
+        expect(file).toEqual({ name: 'a', type: 'application/octet-stream', size: 1 });
+        return new BlobError('not_ready', { message: String((error as Error).message) });
       },
     });
     const res2 = await post(mapped, { phase: 'begin', file: { name: 'a', type: '', size: 1 } });
     expect(res2.status).toBe(503);
     expect(await res2.json()).toMatchObject({ code: 'not_ready', message: 'Db down' });
 
-    const responder = handleUpload({
+    const responder = uploadHandler({
       bucket: b,
       onBeforeUpload: () => {
         throw new Error('nope');
@@ -516,7 +586,7 @@ describe('handleUpload', () => {
     expect((await post(responder, { phase: 'begin', file: { name: 'a', type: '', size: 1 } })).status).toBe(418);
 
     // Nothing claimed it: still the framework's to log.
-    const bare = handleUpload({
+    const bare = uploadHandler({
       bucket: b,
       onBeforeUpload: () => {
         throw new Error('bug');
@@ -526,40 +596,70 @@ describe('handleUpload', () => {
     await expect(post(bare, { phase: 'begin', file: { name: 'a', type: '', size: 1 } })).rejects.toThrow('bug');
   });
 
-  test('a create that fails after onBeforeUpload tells the app, so its row is not stranded', async () => {
+  test('onError sees a refusal the SDK raised itself, with the path onBeforeUpload had reserved', async () => {
     resetCredentialCaches();
-    const released: unknown[] = [];
-    const route = handleUpload({
+    const seen: unknown[] = [];
+    const route = uploadHandler({
       bucket: bucket(),
       limits: { maxBytes: '5gb' },
-      onBeforeUpload: () => ({ path: 'big.bin', context: { rowId: 7 } }),
-      onBeforeUploadFailed: ({ decided, error }) => {
-        released.push({ context: decided.context, code: error.code });
+      onBeforeUpload: () => ({ path: 'big.bin', state: { rowId: 7 } }),
+      onError: ({ error, path, state }) => {
+        seen.push({ code: (error as BlobError).code, path, state });
       },
     });
     r2Handler = () => new Response('<Error><Code>InternalError</Code></Error>', { status: 500 });
     const res = await post(route, { phase: 'begin', file: { name: 'big.bin', type: '', size: 20_000_000 } });
     expect(res.status).toBe(502);
-    expect(released).toEqual([{ context: { rowId: 7 }, code: 'request_failed' }]);
+    // The create failed after onBeforeUpload ran, so whatever it reserved is reachable here.
+    expect(seen).toEqual([{ code: 'request_failed', path: 'big.bin', state: { rowId: 7 } }]);
   });
 
   test('bytes refused at the end are deleted, not left served', async () => {
     resetCredentialCaches();
-    const route = handleUpload({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
-    const begin = (await (await post(route, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } })).json()) as WireBeginResponse;
-    r2Handler = (call) => {
-      if (call.method === 'HEAD') return new Response('', { status: 200, headers: { 'content-length': '99', etag: '"e"', 'content-type': 'image/png' } });
-      return new Response('', { status: 204 });
-    };
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    r2Handler = fullR2({ 'content-length': '99', etag: '"e"', 'content-type': 'image/png' });
     calls = [];
-    const end = await post(route, { phase: 'end', completionToken: begin.completionToken });
+    const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
     expect(end.status).toBe(403);
     expect((await end.json()).code).toBe('signature_mismatch');
-    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'DELETE']);
+    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'DELETE']);
+  });
+
+  test('onUploadComplete throwing deletes the object: it exists only if the callback returned', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({
+      bucket: bucket(),
+      onBeforeUpload: () => ({ path: 'a.png' }),
+      onUploadComplete: () => {
+        throw new BlobError('conflict', { message: 'that thread was deleted' });
+      },
+    });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    r2Handler = fullR2();
+    calls = [];
+    const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
+    expect(end.status).toBe(409);
+    expect((await end.json()).message).toBe('That thread was deleted');
+    // complete, HEAD, and then the delete that keeps the invariant.
+    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'DELETE']);
+  });
+
+  test('cancel aborts the multipart the browser walked away from', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    calls = [];
+    expect((await post(route, { phase: 'cancel', completionToken: started.completionToken })).status).toBe(200);
+    const aborted = r2Calls().find((c) => c.method === 'DELETE')!;
+    expect(new URL(aborted.url).searchParams.get('uploadId')).toBe('mp-1');
   });
 });
 
-describe('handleProxyUpload', () => {
+describe('uploadHandler: the proxy transport', () => {
   // A real header: the magic, the IHDR length, then IHDR. put() sniffs, so 'looks like a png' is not enough.
   const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
   const png = (name = 'a.png', bytes: Uint8Array = PNG) => new File([bytes as BlobPart], name, { type: 'image/png' });
@@ -571,12 +671,12 @@ describe('handleProxyUpload', () => {
   }
 
   function route(extra: Record<string, unknown> = {}) {
-    return handleProxyUpload({
+    return uploadHandler({
       bucket: bucket(),
-      route: '/api/avatar',
+      proxy: true,
       limits: { allowedContentTypes: ['image/png'], maxBytes: '1mb' },
       onBeforeUpload: () => ({ path: 'avatar/demo', metadata: { owner: 'demo' } }),
-      onUploadCompleted: ({ path, contentType, size }) => ({ row: path, contentType, size }),
+      onUploadComplete: ({ path, contentType, size }) => ({ row: path, contentType, size }),
       ...extra,
     });
   }
@@ -601,13 +701,25 @@ describe('handleProxyUpload', () => {
     expect(r2Calls().some((c) => c.method === 'PUT')).toBe(true);
   });
 
+  test('onUploadComplete throwing deletes what put() stored', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
+    const res = await route({
+      onUploadComplete: () => {
+        throw new BlobError('conflict');
+      },
+    }).POST(form(png()));
+    expect(res.status).toBe(409);
+    expect(r2Calls().filter((c) => c.method === 'DELETE').length).toBe(1);
+  });
+
   test('bytes that do not prove their type are refused before anything is stored', async () => {
     resetCredentialCaches();
     const html = new File([new TextEncoder().encode('<html><script>x</script>') as BlobPart], 'a.png', { type: 'image/png' });
     const res = await route().POST(form(html));
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('content_type_not_allowed');
-    // The whole reason this handler exists: a stable path is not overwritten by a file it refused.
+    // The whole reason this transport exists: a stable path is not overwritten by a file it refused.
     expect(r2Calls().some((c) => c.method === 'PUT')).toBe(false);
   });
 
@@ -638,8 +750,9 @@ describe('handleProxyUpload', () => {
     resetCredentialCaches();
     r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
     let seen: { name: string; type: string; size: number } | undefined;
-    const res = await handleProxyUpload({
+    const res = await uploadHandler({
       bucket: bucket(),
+      proxy: true,
       limits: { allowedContentTypes: ['image/png'] },
       onBeforeUpload: ({ file }) => {
         seen = file;
@@ -702,8 +815,9 @@ describe('handleProxyUpload', () => {
     resetCredentialCaches();
     r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
     let seen = '';
-    const r = handleProxyUpload({
+    const r = uploadHandler({
       bucket: bucket(),
+      proxy: true,
       limits: { allowedContentTypes: ['image/png'] },
       onBeforeUpload: ({ file }) => {
         seen = file.name;
@@ -761,7 +875,7 @@ describe('handleProxyUpload', () => {
     expect(widened.POST(form(png()))).rejects.toThrow(/widened maxBytes/);
   });
 
-  test('the path separates two routes that declare identical limits', () => {
+  test('the endpoint separates two handlers that declare identical limits', () => {
     expect(deriveRouteId({ allowedContentTypes: undefined, maxBytes: 1 }, false, '/api/a')).not.toBe(
       deriveRouteId({ allowedContentTypes: undefined, maxBytes: 1 }, false, '/api/b'),
     );

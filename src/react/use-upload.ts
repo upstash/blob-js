@@ -89,9 +89,7 @@ export interface ProxyUploadStart<TInput, TData> {
 export type StartOf<R> = IsProxyRoute<R> extends true ? ProxyUploadStart<RouteInput<R>, RouteData<R>> : UploadStart<RouteInput<R>, RouteData<R>>;
 
 export interface UseUploadOptions<R> {
-  /** @deprecated pass the route positionally: `useUpload(route, options)`. */
-  route?: RoutePath<R>;
-  /** Where the router is mounted, for a route named rather than spelled out. Default '/api/upload'. */
+  /** Where the handler is mounted, for a route named rather than spelled out. Default '/api/upload'. */
   endpoint?: string;
   /**
    * A function is re-read per call to the route, so a rotated JWT still ends the upload. A throw
@@ -111,8 +109,6 @@ export interface UseUploadResult<R> {
   uploads: RecordOf<R>[];
   /** The newest record. */
   upload: RecordOf<R> | null;
-  /** @deprecated renamed to `upload`; the same record for one minor. */
-  task: RecordOf<R> | null;
   clear(id?: string): void;
   /** The route's allowedContentTypes, joined. Empty until GET lands, or when it serves none. */
   accept: string;
@@ -300,12 +296,9 @@ function proxyPayload(file: File | null, body: File | Blob | FormData | null | u
  * that serves its limits -- so a page names a route and never an upload strategy.
  */
 export function useUpload<R extends AnyUploadRoute = UploadRoute<undefined, unknown>>(route: RoutePath<R>, options?: UseUploadOptions<R>): UseUploadResult<R>;
-/** @deprecated pass the route positionally: `useUpload(route, options)`. */
-export function useUpload<R extends AnyUploadRoute = UploadRoute<undefined, unknown>>(options: UseUploadOptions<R> & { route: RoutePath<R> }): UseUploadResult<R>;
-export function useUpload(routeOrOptions: any, maybeOptions?: any): any {
-  const options: UseUploadOptions<any> = (typeof routeOrOptions === 'string' ? maybeOptions : routeOrOptions) ?? {};
-  const name: string = typeof routeOrOptions === 'string' ? routeOrOptions : (options.route ?? '');
-  const url = resolveRouteUrl(name, options.endpoint);
+export function useUpload(route: string, maybeOptions?: any): any {
+  const options: UseUploadOptions<any> = maybeOptions ?? {};
+  const url = resolveRouteUrl(route, options.endpoint);
 
   const headersRef = useRef<HeadersProvider | undefined>(options.headers);
   headersRef.current = options.headers;
@@ -316,7 +309,7 @@ export function useUpload(routeOrOptions: any, maybeOptions?: any): any {
 
   const { limitsRef, transportRef, limits, accept, load } = useLimits(url, options.headers);
 
-  const { uploads, task, add, clear } = useTaskList<AnyRecord>({
+  const { uploads, task: newest, add, clear } = useTaskList<AnyRecord>({
     concurrency: options.concurrency,
     onDone: (record) => {
       if (record.status === 'done') handlers.current.onDone?.(record as any);
@@ -367,5 +360,5 @@ export function useUpload(routeOrOptions: any, maybeOptions?: any): any {
     [add, url, limitsRef, transportRef, load],
   );
 
-  return { start, uploads, upload: task, task, clear, accept, limits };
+  return { start, uploads, upload: newest, clear, accept, limits };
 }
