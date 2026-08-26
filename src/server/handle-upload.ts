@@ -244,8 +244,11 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     try {
       const res = await r2.fetch({ method: 'DELETE', path });
       await res.body?.cancel();
-    } catch {
-      // The refusal is the answer; a delete that fails must not replace it with its own error.
+      if (!res.ok && res.status !== 404) throw new Error(`storage responded ${res.status}`);
+    } catch (e) {
+      // The refusal is the answer; a delete that fails must not replace it with its own error. But
+      // the object it leaves behind is one no callback accepted, so it is not left behind silently.
+      console.error(`[upstash-blob] refused upload ${JSON.stringify(path)} could not be deleted and is still stored`, e);
     }
   }
 

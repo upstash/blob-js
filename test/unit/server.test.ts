@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { Bucket, BlobError, upload, uploadHandler } from '../../src/index.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { deriveRouteId } from '../../src/server/handle-upload.ts';
@@ -653,6 +653,32 @@ describe('uploadHandler: the direct transport', () => {
     expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'DELETE']);
   });
 
+  test('a delete that fails after onUploadComplete threw keeps the refusal and says what it left behind', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({
+      bucket: bucket(),
+      onBeforeUpload: () => ({ path: 'a.png' }),
+      onUploadComplete: () => {
+        throw new BlobError('conflict', { message: 'that thread was deleted' });
+      },
+    });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    const full = fullR2();
+    r2Handler = (call) => (call.method === 'DELETE' ? new Response('<Error><Code>InternalError</Code></Error>', { status: 500 }) : full(call));
+    const logged = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
+      // The callback's refusal is the answer, not the delete's failure.
+      expect(end.status).toBe(409);
+      expect((await end.json()).code).toBe('conflict');
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(String(logged.mock.calls[0]![0])).toContain('"a.png" could not be deleted');
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   test('cancel aborts the multipart the browser walked away from', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
@@ -717,6 +743,24 @@ describe('uploadHandler: the proxy transport', () => {
     }).POST(form(png()));
     expect(res.status).toBe(409);
     expect(r2Calls().filter((c) => c.method === 'DELETE').length).toBe(1);
+  });
+
+  test('a delete that fails after onUploadComplete threw keeps the refusal, and is logged', async () => {
+    resetCredentialCaches();
+    r2Handler = (call) => (call.method === 'DELETE' ? new Response('<Error><Code>InternalError</Code></Error>', { status: 500 }) : new Response('', { status: 200, headers: { etag: '"e1"' } }));
+    const logged = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await route({
+        onUploadComplete: () => {
+          throw new BlobError('conflict');
+        },
+      }).POST(form(png()));
+      expect(res.status).toBe(409);
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(String(logged.mock.calls[0]![0])).toContain('"avatar/demo" could not be deleted');
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   test('bytes that do not prove their type are refused before anything is stored', async () => {

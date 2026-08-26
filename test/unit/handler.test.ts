@@ -148,9 +148,21 @@ describe('dispatch', () => {
     const begin = await began(uploads, undefined, { name: 'a.png', type: 'image/png', size: 10 });
     expect(begin.path).toBe('only/1.png');
     expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ limits: { maxBytes: 1_000_000 }, transport: 'direct' });
-    // There is nothing to look up, so a query nobody asked for cannot miss.
-    expect((await post(uploads, 'anything', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } })).status).toBe(200);
-    expect((await post(uploads, '__proto__', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } })).status).toBe(200);
+    // A name on the query is a client bound to some other handler: it does not silently get this
+    // route, for GET or for POST.
+    for (const name of ['anything', '__proto__', 'toString']) {
+      const res = await post(uploads, name, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } });
+      expect(res.status).toBe(404);
+      expect((await res.json()).code).toBe('not_found');
+      expect((await uploads.GET(new Request(url(name)))).status).toBe(404);
+    }
+    // An empty one is the same as none.
+    expect((await post(uploads, '', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } })).status).toBe(200);
+    expect(r2Calls().filter((c) => c.method === 'POST')).toHaveLength(2);
+  });
+
+  test('an empty routes map is a build error, not a handler that answers 404 to everything', () => {
+    expect(() => uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'x' }), routes: {} })).toThrow(/empty routes map/);
   });
 
   test('a name the query cannot carry is refused at build time, not at request time', () => {

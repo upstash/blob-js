@@ -128,8 +128,11 @@ export function handleProxyUpload(options: InternalProxyUploadOptions): Internal
         try {
           data = await options.onUploadComplete({ request, route: options.route, file, ...blob, contentType: blob.contentType, metadata, state: decided.state });
         } catch (e) {
-          // The invariant: the object exists only if onUploadComplete returned.
-          await options.bucket.del(decided.path).catch(() => {});
+          // The invariant: the object exists only if onUploadComplete returned. A delete that fails
+          // must not replace the callback's error with its own, but it is not swallowed either.
+          await options.bucket.del(decided.path).catch((cause: unknown) => {
+            console.error(`[upstash-blob] refused upload ${JSON.stringify(decided.path)} could not be deleted and is still stored`, cause);
+          });
           throw e;
         }
       }
