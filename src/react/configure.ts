@@ -63,7 +63,7 @@ export interface UnboundUploadHooks {
 }
 
 /**
- * The hooks with your app's defaults already applied, and -- given the router's type -- its route
+ * The hooks with your app's defaults already applied, and -- given the handler's type -- its route
  * names too. No context and no provider, so there is no client boundary to add at the root of the
  * tree and nothing to render before an upload can start; call-site options still win.
  *

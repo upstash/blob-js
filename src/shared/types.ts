@@ -111,14 +111,14 @@ export interface UploadTask {
   retry(): boolean;
 }
 
-/** Phantom types carried by a handleUpload POST handler so useUpload<typeof POST> can infer them. */
+/** Phantom types carried by an upload route so the hooks can infer its input, its data and its transport. */
 export interface UploadRouteTypes<TInput, TData, TRoute extends string = string, TProxy extends boolean = false> {
   input: TInput;
   data: TData;
   /** The url the route declared, when it declared one. `route` on the hooks is typed to it. */
   route: TRoute;
   /**
-   * True for a handleProxyUpload route. One hook serves both transports, so the record it hands back
+   * True for a `proxy: true` route. One hook serves both transports, so the record it hands back
    * -- pause and resume on a direct upload, `start({ body })` on a proxied one -- is chosen by this.
    */
   proxy: TProxy;

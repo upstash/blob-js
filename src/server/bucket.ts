@@ -147,7 +147,7 @@ function safeContentType(type: string): string {
 
 const INTERNALS = new WeakMap<Bucket, R2>();
 
-/** Not exported from the package: handleUpload's access to the signing core. */
+/** Not exported from the package: the upload handler's access to the signing core. */
 export function r2Of(bucket: Bucket): R2 {
   const r2 = INTERNALS.get(bucket);
   if (!r2) throw new TypeError('expected a Bucket');

@@ -14,10 +14,10 @@ export type AnyUploadHandler = { readonly __upstashUploadHandler: Record<string,
 type UnionToIntersection<U> = (U extends unknown ? (k: U) => void : never) extends (k: infer I) => void ? I : never;
 
 /**
- * Every route `T` names, keyed by what `useUpload` takes for it: a router contributes its route
- * names, a handler contributes the url it declared. A handler that declared none contributes
- * nothing at all -- returning `{ [k: string]: R }` for it would widen the key union to `string` and
- * silently turn off the typo check for every other route in the union.
+ * Every route `T` names, keyed by what `useUpload` takes for it: a handler contributes its route
+ * names, a branded route contributes the url it declared. A branded route that declared none
+ * contributes nothing at all -- returning `{ [k: string]: R }` for it would widen the key union to
+ * `string` and silently turn off the typo check for every other route in the union.
  */
 export type RoutesOf<T> = UnionToIntersection<
   T extends AnyUploadHandler
@@ -41,15 +41,15 @@ export type RouteAt<T, K> = K extends keyof RoutesOf<T> ? RoutesOf<T>[K] : never
  */
 export type SoleRoute<T> = RoutesOf<T> extends { readonly '': infer R } ? R : never;
 
-/** True for a handleProxyUpload route, or a router route declared with `proxy: true`. */
+/** True for a route declared with `proxy: true`, or a branded route whose brand says so. */
 export type IsProxyRoute<R> = [R] extends [{ readonly __upstashUploadRoute: UploadRouteTypes<any, any, any, infer TProxy> }] ? ([TProxy] extends [true] ? true : false) : false;
 
-/** Where a router is mounted when nothing says otherwise. One flat endpoint, names in the query. */
+/** Where a handler is mounted when nothing says otherwise. One flat endpoint, names in the query. */
 export const DEFAULT_ENDPOINT = '/api/upload';
 
 /**
- * A route *name* is resolved against the endpoint the router is mounted at; anything that already
- * looks like a url is used as it stands, which is what an unrouted `handleUpload` route passes.
+ * A route *name* is resolved against the endpoint the handler is mounted at; anything that already
+ * looks like a url is used as it stands, which is what a branded route with its own url passes.
  */
 export function resolveRouteUrl(route: string, endpoint?: string): string {
   const base = endpoint || DEFAULT_ENDPOINT;

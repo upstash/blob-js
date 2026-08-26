@@ -66,8 +66,8 @@ async function fetchFacts(route: string, headers: HeadersProvider | undefined): 
   } catch (e) {
     return { limits: undefined, transport: undefined, error: new BlobError('request_failed', { message: 'could not reach the route', status: 503, cause: e }) };
   }
-  // A route with no GET half is one the SDK presigns against: every handleUpload route did before
-  // the proxy transport existed. Any other refusal is the route's own, and the upload carries it.
+  // A route with no GET half is one the SDK presigns against: a branded route from before the
+  // proxy transport existed. Any other refusal is the route's own, and the upload carries it.
   if (res.status === 404 || res.status === 405) return remember(route, { limits: undefined, transport: 'direct' });
   if (!res.ok) {
     let body: unknown;

@@ -41,7 +41,7 @@ export type ProxyStartArgs = { file?: File | null } | { body?: File | Blob | For
 export interface UseUploadProxyOptions<R> {
   /** @deprecated pass the route positionally: `useUploadProxy(route, options)`. */
   route?: RoutePath<R>;
-  /** Where the router is mounted, for a route named rather than spelled out. Default '/api/upload'. */
+  /** Where the handler is mounted, for a route named rather than spelled out. Default '/api/upload'. */
   endpoint?: string;
   /**
    * A function is re-read per request, so a rotated JWT is never stale. A throw from it ends the
