@@ -11,16 +11,15 @@ import { answerError, deriveRouteId, handleUpload, resolveLimits, type ErrorDeta
  * -- `useUpload('avatar')` -- and the client reads each route's input, its data and its transport off
  * `typeof uploads`, so a page never spells out a url and a typo does not compile.
  *
- * `bucket`, `limits`, `input`, `onBeforeUpload`, `onUploadComplete` and `onError` at the top are
- * DEFAULTS: a route replaces them key by key and inherits the rest.
+ * `bucket`, `limits`, `input`, `proxy`, `field`, `onBeforeUpload`, `onUploadComplete` and `onError`
+ * at the top are DEFAULTS: a route replaces them key by key and inherits the rest.
  *
- * One rule about `context`: annotate its parameter, `context: (request: Request) => ...`. An
- * unannotated one makes the whole function context-sensitive, which TypeScript types in a later pass
- * than the route callbacks that read `ctx` -- so `ctx` in them falls back to `undefined` and the
- * first line that uses it as anything else stops compiling. It degrades to an error, never to a
- * silent `unknown`, but the error is about the callback and the cause is up here. (A handler-level
- * `onBeforeUpload` or `onUploadComplete` written above `routes` pins it too, which is why the
- * annotation is the rule and not the exception.)
+ * One rule about `context`: write it above the callbacks that read `ctx`. `(request) =>` with no
+ * annotation is fine there. Written below `routes`, TypeScript has already typed the routes with
+ * `ctx: undefined` by the time it reads what `context` returns, and the error lands on `context`
+ * itself: "Promise<Session> is not assignable to undefined". Annotating the parameter,
+ * `(request: Request) =>`, lifts the order rule, because TypeScript reads an annotated function's
+ * return before it types anything else in the literal.
  */
 
 type InferOutput<S> = S extends StandardSchema<any, infer O> ? O : never;
@@ -132,6 +131,12 @@ interface PlainRouteBase<TCtx, TInput, TProxy extends boolean> {
 /** A route written as a plain object. Presigned: the bytes go straight to storage. */
 export interface DirectUploadRoute<TCtx = unknown, TInput = undefined> extends PlainRouteBase<TCtx, TInput, false> {
   proxy?: false;
+  /**
+   * Proxy only. Typed out here rather than left off: `routes` is checked as an intersection, and
+   * TypeScript skips the "no properties in common" check inside one, so an absent key would let
+   * `{ field: 'x' }` through on a direct route.
+   */
+  field?: never;
 }
 
 /** A route written as a plain object whose bytes go through your function as one POST. */
@@ -155,6 +160,13 @@ export interface UploadRouteDefinition<TInput = undefined, TData = void, TProxy 
 export type AnyUploadRouteConfig<TCtx = unknown, TInput = undefined> = DirectUploadRoute<TCtx, TInput> | ProxyUploadRoute<TCtx, TInput> | UploadRouteDefinition<any, any, any>;
 
 export type UploadRouteMap = Record<string, UploadRouteDefinition<any, any, any>>;
+
+/**
+ * What `routes` is checked against: every route as a plain object or an `upload()`, with the ctx
+ * the handler's `context` returned. Written as a separate type so that TypeScript keeps `TCtx` in
+ * the route callbacks' contextual type (see the note at `routes` in UploadHandlerOptions).
+ */
+export type UploadRoutes<TCtx = unknown, TInput = undefined> = Record<string, AnyUploadRouteConfig<TCtx, TInput>>;
 
 /* -------------------------------------------------------------- builder -- */
 
@@ -240,12 +252,15 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    * `ctx` in every callback, typed. Throw to refuse: a BlobError('unauthorized') is the 401.
    * Not run for GET, which serves a public, cacheable limits document and reads nothing.
    *
-   * Annotate the parameter: see the note at the top of this file.
+   * Write it above the callbacks: see the note at the top of this file.
    */
   context?: (request: Request) => TCtx;
   /** Every route inherits it. A Standard Schema for the browser's `input`. */
   input?: TSchema;
-  /** With no `routes`, whether the one route this handler is takes its bytes through your function. */
+  /**
+   * Whether the bytes go through your function as one POST. With no `routes` it is the one route's
+   * transport; with them it is the default, and a route's own `proxy` replaces it.
+   */
   proxy?: TProxy;
   /** Every proxy route inherits it: the multipart field the file arrives in. Default 'file'. */
   field?: string;
@@ -264,11 +279,16 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
   /**
    * Omit it and the handler is one route, reached with no `?route=` and no name on the client.
    *
-   * The intersection is not decoration. `Awaited<TCtx>` has to appear in a PARAMETER position in
-   * this property's own contextual type, or TypeScript will not fix TCtx before it types the route
-   * callbacks, and every `ctx` in them comes out `undefined`.
+   * The intersection is not decoration. `TRoutes` alone is a type parameter, and TypeScript
+   * instantiates a type parameter in a contextual type eagerly, with whatever it has inferred for
+   * `TCtx` at that moment -- which, when `context` is `(request) => ...`, is nothing yet: the return
+   * of an unannotated function only reaches the inference when something forces `TCtx` to be fixed.
+   * An object type in the intersection is left alone, so the route callbacks are contextually typed
+   * with `Awaited<TCtx>` still in them, and typing the first one fixes `TCtx` from what `context`
+   * returned. That is what lets `context: (request) => requireUser(request)` stay unannotated, as
+   * long as it is written above `routes`.
    */
-  routes?: TRoutes;
+  routes?: TRoutes & UploadRoutes<Awaited<TCtx>, RouteInputOf<TSchema>>;
 }
 
 export interface UploadHandler<TRoutes = UploadRouteMap, TCtx = unknown> {
@@ -307,10 +327,13 @@ interface AnyRouteSpec {
 
 /**
  * `TRoutes` is first and has no default on purpose: with a default, or behind `TCtx`, TypeScript
- * stops reading the route literal and every route's data comes back `unknown`.
+ * stops reading the route literal and every route's data comes back `unknown`. Its constraint is
+ * deliberately shapeless: the route shape, with the ctx, is the `UploadRoutes` half of `routes`,
+ * and a constraint that repeated it would be intersected with that half in every callback's
+ * contextual type, which TypeScript cannot discriminate by `proxy`.
  */
 export function uploadHandler<
-  TRoutes extends Record<string, AnyUploadRouteConfig<Awaited<TCtx>, RouteInputOf<TSchema>>>,
+  TRoutes extends Record<string, object>,
   TCtx = undefined,
   TData = void,
   TSchema extends StandardSchema<any, any> | undefined = undefined,
@@ -318,6 +341,7 @@ export function uploadHandler<
 >(options: UploadHandlerOptions<TCtx, TRoutes, TData, TSchema, TProxy>): UploadHandler<HandlerRoutes<TRoutes, TData, RouteInputOf<TSchema>, TProxy>, Awaited<TCtx>> {
   const named = options.routes !== undefined;
   const definitions = (options.routes ?? { '': {} }) as unknown as Record<string, unknown>;
+  if (named && Object.keys(definitions).length === 0) throw new TypeError('uploadHandler was given an empty routes map: name at least one route, or omit routes to make the handler the route');
 
   // The request is the key, so `ctx` reaches callbacks the transports own without either of them
   // learning about the other. Weak: nothing here outlives the request it belongs to.
@@ -373,13 +397,15 @@ export function uploadHandler<
   };
 
   function pick(request: Request): { name: string; mounted: Mounted | undefined } {
-    if (sole) return { name: '', mounted: sole };
     let name = '';
     try {
       name = new URL(request.url).searchParams.get('route') ?? '';
     } catch {
       // A url the runtime will not parse names no route.
     }
+    // A handler with no routes is reached with no name. A name on its query is a client bound to
+    // a different handler, and serving it here would upload through a route it never asked for.
+    if (sole) return { name, mounted: name ? undefined : sole };
     return { name, mounted: name && Object.hasOwn(table, name) ? table[name] : undefined };
   }
 

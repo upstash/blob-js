@@ -104,8 +104,8 @@ export const uploads = uploadHandler({
   limits: { maxBytes: '20mb', allowedContentTypes: ['image/*', 'application/pdf'] },
 
   // runs once per request, before any body is read. What it returns is `ctx` in every callback,
-  // typed. Throw to refuse: a BlobError('unauthorized') is the 401. Annotate the parameter.
-  context: (request: Request) => requireUser(request),
+  // typed. Throw to refuse: a BlobError('unauthorized') is the 401.
+  context: (request) => requireUser(request),
 
   onBeforeUpload: ({ ctx, file }) => ({ path: uniquePath`${ctx.id}/${file.name}` }),
   onUploadComplete: ({ ctx, path, url, size }) => db.files.insert({ owner: ctx.id, path, url, size }),
@@ -156,14 +156,14 @@ export default function Page() {
 ### More than one route
 
 Add `routes` and the same handler mounts several at the same endpoint, the name in the query. What
-is written at the top -- `bucket`, `limits`, `input`, `onBeforeUpload`, `onUploadComplete`,
-`onError` -- is the DEFAULT: a route replaces a key and inherits the rest.
+is written at the top -- `bucket`, `limits`, `input`, `proxy`, `field`, `onBeforeUpload`,
+`onUploadComplete`, `onError` -- is the DEFAULT: a route replaces a key and inherits the rest.
 
 ```ts
 export const uploads = uploadHandler({
   bucket: pub,
   limits: { maxBytes: '20mb', allowedContentTypes: ['image/*', 'application/pdf'] },
-  context: (request: Request) => requireUser(request),
+  context: (request) => requireUser(request),
 
   // inherited by every route below, and `route` is the name the browser asked for
   onBeforeUpload: ({ ctx, route, file }) => ({ path: uniquePath`${route}/${ctx.id}/${file.name}` }),
@@ -196,7 +196,8 @@ const { start, upload, accept } = useUpload('avatar');
   body *is* the file, so the query is the only place it can go. Nothing is ever read from the body to
   decide where a request goes, the table has a null prototype, and a name it does not mount is a
   `not_found` -- never a 500, and never a list of the names it does mount. With no `routes` there is
-  no query at all and the client calls `useUpload()` with no name.
+  no query at all and the client calls `useUpload()` with no name; a `?route=` that reaches such a
+  handler anyway is a client bound to some other handler, and is a `not_found` too.
 - **Route names** must match `/^[A-Za-z_][\w-]*$/`; `uploadHandler()` throws otherwise. The name is
   also the completion token's route id, so two routes with identical limits do not collide. Set
   `endpoint` when two handlers share one bucket.
@@ -210,10 +211,11 @@ const { start, upload, accept } = useUpload('avatar');
   file picked before that GET has answered waits for it as `queued`; if the GET cannot be reached or
   refuses, the upload fails with that error rather than guessing a transport.
 - **`context`** runs once per request, before the route. It does not run for GET, which serves a
-  public, cacheable document and reads nothing. **Annotate its parameter** -- `(request: Request)`.
-  An unannotated one is context-sensitive, TypeScript types the route callbacks before it has
-  inferred `ctx`, and every `ctx` in them comes out `undefined`. The failure is a compile error, not
-  a silent `unknown`, but it is reported on the callback and the cause is the annotation.
+  public, cacheable document and reads nothing. **Write it above the callbacks that read `ctx`.**
+  TypeScript types an object literal top to bottom, and a `context` written below `routes` reaches
+  it after the routes were typed with `ctx: undefined`; the error then lands on `context` itself
+  ("Promise<Session> is not assignable to undefined"), never as a silent `unknown`. Annotating the
+  parameter, `(request: Request) =>`, lifts the order rule if you need it lifted.
 - **Callbacks** are `onBeforeUpload`, `onUploadComplete` and `onError`, at the top as defaults or on
   a route to replace one. All of them get `ctx`, `route`, `request` and `file`. What
   `onUploadComplete` returns is `upload.blob.data` in the browser, typed per route: a route with its
@@ -265,7 +267,7 @@ const thread = upload<Session>()({
   onUploadComplete: ({ ctx, state, path, uploadId }) => db.files.insert({ owner: ctx.id, name: state.name, path, uploadId }),
 });
 
-export const uploads = uploadHandler({ bucket, context: (request: Request): Session => getSession(request), routes: { thread } });
+export const uploads = uploadHandler({ bucket, context: (request) => getSession(request), routes: { thread } });
 ```
 
 A handler-level `onBeforeUpload` and `onUploadComplete` are shared by both transports, so they carry

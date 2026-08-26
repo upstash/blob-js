@@ -8,6 +8,8 @@ import { createUploadHooks, useUpload, useUploadProxy, type RoutesOf } from '../
 
 declare const bucket: Bucket;
 declare const file: File;
+declare function requireUser(request: Request): Promise<Session>;
+declare function saveRow(args: { ctx: Session; path: string }): Promise<{ id: string }>;
 
 interface Session {
   id: string;
@@ -17,8 +19,8 @@ function _uploads(bucket: Bucket) {
   return uploadHandler({
     bucket,
     limits: { maxBytes: '20mb', allowedContentTypes: ['image/png'] },
-    // The parameter is annotated on purpose: see the note at the top of src/server/handler.ts.
-    context: (request: Request) => Promise.resolve({ id: request.headers.get('x') ?? 'anon' }),
+    // Unannotated, above the callbacks: the shape the README shows.
+    context: (request) => Promise.resolve({ id: request.headers.get('x') ?? 'anon' }),
     onBeforeUpload: ({ ctx, route, file: picked }) => ({ path: `${route}/${ctx.id}/${picked.name}` }),
     onUploadComplete: ({ ctx, route, path, size }) => ({ owner: ctx.id, route, path, size }),
     routes: {
@@ -69,37 +71,50 @@ function _ctx() {
 }
 
 /**
- * The one rule about `context`, as a test. Annotated, it is typed in the same pass as everything
- * else and ctx reaches every route whatever order the keys are written in.
+ * The one rule about `context`, as a test: written above the callbacks, an unannotated
+ * `(request) => ...` types ctx in every route, with or without a handler-level callback between.
  */
-function _contextAnnotated() {
+function _contextUnannotated() {
+  // Only routes read ctx: nothing between `context` and them.
   uploadHandler({
     bucket,
-    context: (request: Request) => ({ id: request.url }),
+    context: (request) => requireUser(request),
     routes: { a: { onBeforeUpload: ({ ctx }) => ({ path: `${ctx satisfies Session}` }) } },
   });
-  // Order-independent once it is annotated: the same handler with the keys the other way round.
+  // A handler-level callback reads it too.
   uploadHandler({
-    routes: { a: { onBeforeUpload: ({ ctx }) => ({ path: `${ctx satisfies Session}` }) } },
     bucket,
-    context: (request: Request) => ({ id: request.url }),
+    context: (request) => requireUser(request),
+    onBeforeUpload: ({ ctx }) => ({ path: `${ctx satisfies Session}` }),
+    routes: { a: { onUploadComplete: ({ ctx, uploadId }) => ({ owner: ctx.id, uploadId }) }, b: { proxy: true, onUploadComplete: ({ ctx }) => ctx.id } },
   });
-  // No parameter at all is not context-sensitive either, so it needs no annotation.
-  uploadHandler({ bucket, context: () => ({ id: 'x' }), routes: { a: { onBeforeUpload: ({ ctx }) => ({ path: `${ctx satisfies Session}` }) } } });
+  // A callback passed by reference, and an `upload()` route, beside plain ones.
+  uploadHandler({
+    bucket,
+    context: (request) => requireUser(request),
+    routes: { a: { onUploadComplete: saveRow }, t: upload<Session>()({ onBeforeUpload: ({ ctx }) => ({ path: ctx.id }) }) },
+  });
+  // No parameter at all is not context-sensitive, so it needs neither the order nor an annotation.
+  uploadHandler({ routes: { a: { onBeforeUpload: ({ ctx }) => ({ path: `${ctx satisfies Session}` }) } }, bucket, context: () => ({ id: 'x' }) });
 }
 
 /**
- * Unannotated, `context` is context-sensitive: TypeScript types it in a later pass than the route
- * callbacks, ctx in them falls back to `undefined`, and the first use of it as anything else stops
- * compiling. It degrades to an error, never to a silent `unknown`, which is what makes the rule
- * enforceable rather than a trap.
+ * Below the callbacks, an unannotated `context` is read after the routes were typed with
+ * `ctx: undefined`, and the error lands on `context` itself: never a silent `unknown`, and never
+ * an error on a callback that has nothing wrong with it.
  */
-function _contextUnannotatedDegradesLoudly() {
+function _contextBelowRoutesFailsOnContext() {
   uploadHandler({
     bucket,
-    context: (request) => ({ id: request.url }),
-    // @ts-expect-error ctx is undefined here, because `context` left its parameter unannotated
+    routes: { a: { onBeforeUpload: ({ ctx }) => ({ path: `${ctx satisfies undefined}` }) } },
+    // @ts-expect-error Promise<Session> is not assignable to undefined: the routes above were typed first
+    context: (request) => requireUser(request),
+  });
+  // Annotated, the order rule is lifted: TypeScript reads an annotated function's return first.
+  uploadHandler({
     routes: { a: { onBeforeUpload: ({ ctx }) => ({ path: `${ctx satisfies Session}` }) } },
+    bucket,
+    context: (request: Request) => requireUser(request),
   });
 }
 
@@ -344,6 +359,6 @@ function _unbound() {
 test('the handler types compile', () => {
   expect(typeof uploadHandler).toBe('function');
   expect(typeof useUpload).toBe('function');
-  void [_ctx, _contextAnnotated, _contextUnannotatedDegradesLoudly, _routeShapes, _names, _input, _data, _transports, _single, _union, _unnamedContributesNothing, _escapeHatch, _unbound];
+  void [_ctx, _contextUnannotated, _contextBelowRoutesFailsOnContext, _routeShapes, _names, _input, _data, _transports, _single, _union, _unnamedContributesNothing, _escapeHatch, _unbound];
   void ({} as UploadCompleteArgs<Uploads>);
 });

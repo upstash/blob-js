@@ -36,6 +36,7 @@ export type {
   UploadRouteDefinition,
   UploadRouteMap,
   UploadRouteOptions,
+  UploadRoutes,
 } from './server/handler.ts';
 export { uniquePath } from './server/unique-path.ts';
 export { BlobError } from './shared/errors.ts';
