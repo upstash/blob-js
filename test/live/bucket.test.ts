@@ -43,18 +43,18 @@ describe('put', () => {
 
   test('File carries type and size; sniff accepts matching bytes', async () => {
     const file = new File([PNG as BlobPart], 'x.png', { type: 'image/png' });
-    const blob = await pub.put(p('x.png'), file, { allowedContentTypes: ['image/*'], maxBytes: '2mb' });
+    const blob = await pub.put(p('x.png'), file, { contentTypes: ['image/*'], maxBytes: '2mb' });
     expect(blob.size).toBe(PNG.byteLength);
     expect((await pub.info(p('x.png'))).contentType).toBe('image/png');
   });
 
   test('sniff rejects lying bytes and disallowed declarations', async () => {
     const html = new File(['<html><body>hi</body></html>'], 'x.png', { type: 'image/png' });
-    await expect(pub.put(p('lie.png'), html, { allowedContentTypes: ['image/png'] })).rejects.toMatchObject({ code: 'content_type_not_allowed' });
+    await expect(pub.put(p('lie.png'), html, { contentTypes: ['image/png'] })).rejects.toMatchObject({ code: 'content_type_not_allowed' });
     const svg = new File(['<svg/>'], 'x.svg', { type: 'image/svg+xml' });
-    await expect(pub.put(p('x.svg'), svg, { allowedContentTypes: ['image/*'] })).rejects.toMatchObject({ code: 'content_type_not_allowed' });
-    expect(() => pub.put(p('x'), 'x', { allowedContentTypes: ['*/*'] })).toThrow();
-    await expect(pub.put(p('x'), 'x', { allowedContentTypes: [] })).rejects.toMatchObject({ code: 'invalid_content_type_pattern' });
+    await expect(pub.put(p('x.svg'), svg, { contentTypes: ['image/*'] })).rejects.toMatchObject({ code: 'content_type_not_allowed' });
+    expect(() => pub.put(p('x'), 'x', { contentTypes: ['*/*'] })).toThrow();
+    await expect(pub.put(p('x'), 'x', { contentTypes: [] })).rejects.toMatchObject({ code: 'invalid_content_type_pattern' });
     expect(await pub.exists(p('lie.png'))).toBe(false);
   });
 
@@ -67,7 +67,7 @@ describe('put', () => {
   test('Request body streams with content-length; empty body and unknown length are errors', async () => {
     const body = bytes(70_000, 7);
     const req = new Request('https://x/', { method: 'POST', body, headers: { 'content-type': 'application/octet-stream' } });
-    const blob = await pub.put(p('req.bin'), req, { allowedContentTypes: ['application/octet-stream'], maxBytes: '1mb' });
+    const blob = await pub.put(p('req.bin'), req, { contentTypes: ['application/octet-stream'], maxBytes: '1mb' });
     expect(blob.size).toBe(70_000);
     const back = new Uint8Array(await new Response((await pub.get(p('req.bin'))).body).arrayBuffer());
     expect(back).toEqual(body);
@@ -127,10 +127,9 @@ describe('read', () => {
     const cap = await priv.signedReadCap();
     expect(cap).toBeGreaterThanOrEqual(30);
     const asked = Math.min(120, cap);
-    const read = await priv.signedRead(p('secret.txt'), { expiresIn: asked, download: 'Report Q3.txt' });
+    const read = await priv.signedRead(p('secret.txt'), { expiresIn: asked, downloadAs: 'Report Q3.txt' });
     expect(Number(new URL(read.url).searchParams.get('X-Amz-Expires'))).toBe(asked);
-    // The old signedReadUrl clamped to whatever the credential had left, so a link could come back
-    // already dead. expiresAt is the truth now, and it is never later than the credential.
+    // expiresAt is the truth, including when the current credential shortened what was requested.
     expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + (asked - 10) * 1000);
     const res = await fetch(read.url);
     expect(res.status).toBe(200);
@@ -143,16 +142,12 @@ describe('read', () => {
     expect(tampered.status).toBe(403);
   });
 
-  test('an expiresIn the backend cannot sign is refused, or clamped when asked', async () => {
+  test('an expiresIn over the credential cap is shortened transparently', async () => {
     await priv.put(p('capped.txt'), 'shh', { contentType: 'text/plain' });
     const cap = await priv.signedReadCap();
-    const e = await priv.signedRead(p('capped.txt'), { expiresIn: '1h' }).catch((x) => x);
-    expect(BlobError.is(e)).toBe(true);
-    expect(e.code).toBe('invalid_input');
-    expect(e.message).toMatch(/over the \d+s this credential can sign for/);
-    const clamped = await priv.signedRead(p('capped.txt'), { expiresIn: '1h', clamp: true });
-    expect(Number(new URL(clamped.url).searchParams.get('X-Amz-Expires'))).toBeLessThanOrEqual(cap + 2);
-    expect((await fetch(clamped.url)).status).toBe(200);
+    const capped = await priv.signedRead(p('capped.txt'), { expiresIn: '1h' });
+    expect(Number(new URL(capped.url).searchParams.get('X-Amz-Expires'))).toBeLessThanOrEqual(cap + 2);
+    expect((await fetch(capped.url)).status).toBe(200);
   });
 });
 

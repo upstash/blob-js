@@ -18,7 +18,7 @@ interface Session {
 function _uploads(bucket: Bucket) {
   return uploadHandler({
     bucket,
-    limits: { maxBytes: '20mb', allowedContentTypes: ['image/png'] },
+    constraints: { maxBytes: '20mb', contentTypes: ['image/png'] },
     // Unannotated, above the callbacks: the shape the README shows.
     context: (request) => Promise.resolve({ id: request.headers.get('x') ?? 'anon' }),
     onBeforeUpload: ({ ctx, route, file: picked }) => ({ path: `${route}/${ctx.id}/${picked.name}` }),
@@ -26,12 +26,12 @@ function _uploads(bucket: Bucket) {
     routes: {
       // Inherits both defaults, so its data is the handler's.
       attachment: {},
-      large: { limits: { maxBytes: '2gb', allowedContentTypes: null } },
+      large: { constraints: { maxBytes: '2gb', contentTypes: null } },
       // Its own completion, so its own data.
       audit: { onUploadComplete: ({ ctx, uploadId }) => ({ owner: ctx.id, dedupe: uploadId }) },
       avatar: {
         proxy: true,
-        limits: { maxBytes: '2mb' },
+        constraints: { maxBytes: '2mb' },
         onBeforeUpload: ({ ctx }) => ({ path: `avatar/${ctx.id}`, overwrite: false }),
         onUploadComplete: ({ ctx, versionedUrl }) => ({ owner: ctx.id, url: versionedUrl }),
       },
@@ -130,7 +130,7 @@ function _routeShapes() {
       // @ts-expect-error overwrite belongs to a proxy route
       b: { onBeforeUpload: () => ({ path: 'p', overwrite: false }) },
       c: { proxy: true, onBeforeUpload: () => ({ path: 'p', overwrite: false }) },
-      // @ts-expect-error a proxy route completes with no uploadId: nothing presigned it
+      // Both transports expose the SDK's logical upload id.
       d: { proxy: true, onUploadComplete: ({ uploadId }) => uploadId },
       // A direct route reaches it through the same discriminated union.
       e: { onUploadComplete: ({ uploadId }) => uploadId satisfies string },
@@ -140,7 +140,7 @@ function _routeShapes() {
   uploadHandler({
     bucket,
     routes: { a: { onBeforeUpload: () => ({ path: 'p' }) } },
-    // @ts-expect-error uploadId is direct-only, and a default is shared by both transports
+    // A shared default receives the logical upload id on either transport.
     onUploadComplete: ({ uploadId }) => uploadId,
   });
 

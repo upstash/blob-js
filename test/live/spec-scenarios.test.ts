@@ -31,7 +31,7 @@ const POST_avatar = route(async (req: Request) => {
   const file = (await req.formData()).get('file');
   if (!(file instanceof File)) return Response.json({ error: 'file field required' }, { status: 400 });
   const blob = await pub.put(p(`avatar/${user.id}`), file, {
-    allowedContentTypes: ['image/png', 'image/jpeg', 'image/webp'],
+    contentTypes: ['image/png', 'image/jpeg', 'image/webp'],
     maxBytes: '2mb',
     cache: '1m',
     metadata: { uploadedBy: user.id },
@@ -42,7 +42,7 @@ const POST_avatar = route(async (req: Request) => {
 
 const POST_avatarStreaming = route(async (req: Request) => {
   const user = requireUser(req);
-  const blob = await pub.put(p(`avatar/${user.id}`), req, { allowedContentTypes: ['image/png', 'image/jpeg', 'image/webp'], maxBytes: '2mb' });
+  const blob = await pub.put(p(`avatar/${user.id}`), req, { contentTypes: ['image/png', 'image/jpeg', 'image/webp'], maxBytes: '2mb' });
   return Response.json({ url: blob.versionedUrl });
 });
 
@@ -99,7 +99,7 @@ describe('4. files', () => {
       if (!row || row.owner !== user.id || row.status !== 'ready') return Response.json({ error: 'not found' }, { status: 404 });
       // No expiresIn: 15m was answered with a link that quietly died with the credential, and the
       // cap moves, so the default asks for the shorter of five minutes and what it can actually sign.
-      const url = await priv.signedReadUrl(row.path, { download: row.name });
+      const url = await priv.signedReadUrl(row.path, { downloadAs: row.name });
       return Response.json({ url });
     });
     const ok = await GET_fileUrl(new Request('https://app/api/file?id=r1', { headers: { authorization: 'Bearer 7' } }));

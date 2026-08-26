@@ -159,7 +159,7 @@ describe('r2 retries', () => {
 });
 
 describe('signedRead', () => {
-  test('answers a url and when it dies, and refuses an ask over the cap', async () => {
+  test('answers a url and transparently uses the credential cap', async () => {
     resetCredentialCaches();
     const b = bucket();
     const read = await b.signedRead('secret.txt', { expiresIn: '2m' });
@@ -171,12 +171,8 @@ describe('signedRead', () => {
     expect(cap).toBeLessThanOrEqual(600);
     expect(mints).toBe(1);
 
-    const e = await b.signedRead('secret.txt', { expiresIn: '1h' }).catch((x) => x);
-    expect(BlobError.is(e)).toBe(true);
-    expect(e.code).toBe('invalid_input');
-    expect(e.message).toMatch(/over the \d+s this credential can sign for/);
-    const clamped = await b.signedRead('secret.txt', { expiresIn: '1h', clamp: true });
-    expect(Number(new URL(clamped.url).searchParams.get('X-Amz-Expires'))).toBeGreaterThanOrEqual(cap - 2);
+    const capped = await b.signedRead('secret.txt', { expiresIn: '1h' });
+    expect(Number(new URL(capped.url).searchParams.get('X-Amz-Expires'))).toBeGreaterThanOrEqual(cap - 2);
     // No expiresIn is the shorter of five minutes and the cap, so it never throws.
     expect(await b.signedReadUrl('secret.txt')).toContain('X-Amz-Expires=300');
   });
@@ -193,7 +189,7 @@ describe('signedRead', () => {
     const cache = (await import('../../src/server/credentials.ts')).credentialCacheFor(TOKEN, true);
     const held = cache.peek()!;
     held.expiresAt = Math.floor(Date.now() / 1000) + 100;
-    const asked = await b.signedRead('a', { expiresIn: 200, clamp: true });
+    const asked = await b.signedRead('a', { expiresIn: 200 });
     expect(mints).toBe(2);
     expect(Number(new URL(asked.url).searchParams.get('X-Amz-Expires'))).toBe(200);
     // The agent answered with the same credential, so asking again straight away would only spend
@@ -201,8 +197,8 @@ describe('signedRead', () => {
     expiresAt = Math.floor(Date.now() / 1000) + 100;
     cache.peek()!.expiresAt = expiresAt;
     cache.peek()!.lifetime = 600;
-    await b.signedRead('a', { expiresIn: 200, clamp: true });
-    await b.signedRead('a', { expiresIn: 200, clamp: true });
+    await b.signedRead('a', { expiresIn: 200 });
+    await b.signedRead('a', { expiresIn: 200 });
     expect(mints).toBe(3);
   });
 
@@ -232,22 +228,14 @@ describe('signedRead download', () => {
   const disposition = async (path: string, options: Parameters<Bucket['signedRead']>[1] = {}) =>
     new URL((await bucket().signedRead(path, options)).url).searchParams.get('response-content-disposition');
 
-  test('download: true saves it under the last segment of the path', async () => {
+  test('downloadAs: name is the name it saves as', async () => {
     resetCredentialCaches();
-    expect(await disposition('reports/2026/q3.pdf', { download: true })).toBe(`attachment; filename="q3.pdf"; filename*=UTF-8''q3.pdf`);
-    // A trailing slash leaves nothing to name it with, so it is still a download.
-    expect(await disposition('reports/', { download: true })).toBe(`attachment; filename="download"; filename*=UTF-8''download`);
-  });
-
-  test('download: name is the name it saves as', async () => {
-    resetCredentialCaches();
-    expect(await disposition('u/1/abc', { download: 'Report Q3.pdf' })).toBe(`attachment; filename="Report Q3.pdf"; filename*=UTF-8''Report%20Q3.pdf`);
+    expect(await disposition('u/1/abc', { downloadAs: 'Report Q3.pdf' })).toBe(`attachment; filename="Report Q3.pdf"; filename*=UTF-8''Report%20Q3.pdf`);
   });
 
   test('no download option is no disposition at all', async () => {
     resetCredentialCaches();
     expect(await disposition('a.txt')).toBeNull();
-    expect(await disposition('a.txt', { download: false })).toBeNull();
   });
 
   test('a name a header cannot carry cannot add a parameter or a second header', async () => {
@@ -255,7 +243,7 @@ describe('signedRead download', () => {
     // The quote, the semicolon and the CRLF are what an injection needs; filename* carries the
     // real name percent-encoded, where a parser finds nothing to read as syntax.
     const evil = 'a";x=1\r\nSet-Cookie: p=1.txt';
-    const value = (await disposition('u/1/abc', { download: evil }))!;
+    const value = (await disposition('u/1/abc', { downloadAs: evil }))!;
     expect(value).toBe(`attachment; filename="a_x_1_Set-Cookie_ p_1.txt"; filename*=UTF-8''a%22%3Bx%3D1%0D%0ASet-Cookie%3A%20p%3D1.txt`);
     // The quoted fallback ends where it is meant to, and the ext-value carries no syntax at all.
     expect(value.slice(value.indexOf('"') + 1, value.lastIndexOf('"'))).not.toMatch(/["\\;\r\n]/);
@@ -264,9 +252,9 @@ describe('signedRead download', () => {
 
   test('a unicode name crosses as an RFC 8187 ext-value with an ascii fallback', async () => {
     resetCredentialCaches();
-    expect(await disposition('u/1/abc', { download: 'café ☕.pdf' })).toBe(`attachment; filename="caf_ _.pdf"; filename*=UTF-8''caf%C3%A9%20%E2%98%95.pdf`);
+    expect(await disposition('u/1/abc', { downloadAs: 'café ☕.pdf' })).toBe(`attachment; filename="caf_ _.pdf"; filename*=UTF-8''caf%C3%A9%20%E2%98%95.pdf`);
     // encodeURIComponent leaves !'()* alone; only ! is an attr-char, so the rest are escaped.
-    expect(await disposition('u/1/abc', { download: "it's (a)*.pdf" })).toBe(`attachment; filename="it_s _a_.pdf"; filename*=UTF-8''it%27s%20%28a%29%2A.pdf`);
+    expect(await disposition('u/1/abc', { downloadAs: "it's (a)*.pdf" })).toBe(`attachment; filename="it_s _a_.pdf"; filename*=UTF-8''it%27s%20%28a%29%2A.pdf`);
   });
 
   test('contentType overrides what the object was stored as, and must be a media type', async () => {
@@ -285,7 +273,7 @@ describe('signedRead download', () => {
     resetCredentialCaches();
     const b = bucket();
     const plain = new URL((await b.signedRead('a.txt', { expiresIn: 60 })).url);
-    const named = new URL((await b.signedRead('a.txt', { expiresIn: 60, download: 'x.txt' })).url);
+    const named = new URL((await b.signedRead('a.txt', { expiresIn: 60, downloadAs: 'x.txt' })).url);
     expect(named.searchParams.get('X-Amz-Signature')).not.toBe(plain.searchParams.get('X-Amz-Signature'));
     // Sorted into the canonical query with everything else, before the signature is appended.
     expect(named.search.indexOf('response-content-disposition')).toBeLessThan(named.search.indexOf('X-Amz-Signature'));
@@ -345,6 +333,14 @@ describe('bucket guards', () => {
     r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
     expect((await bucket().put('a.png', 'x', { contentType: 'image/png' })).contentType).toBe('image/png');
     expect((await bucket().put('a.bin', 'x')).contentType).toBe('application/octet-stream');
+  });
+
+  test('publicUrl is local, encoded, and absent for a private bucket', () => {
+    resetCredentialCaches();
+    const pub = new Bucket({ token: TOKEN, private: false });
+    expect(pub.publicUrl('reports/Q3 final.pdf')).toMatch(/\/reports\/Q3%20final\.pdf$/);
+    expect(new Bucket({ token: TOKEN, private: true }).publicUrl('a.txt')).toBeUndefined();
+    expect(mints).toBe(0);
   });
 
   test('a private bucket has no public url', async () => {
@@ -473,26 +469,26 @@ describe('uploadHandler: the direct transport', () => {
     resetCredentialCaches();
     r2Handler = beginR2;
     const b = bucket();
-    const avatars = uploadHandler({ bucket: b, limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'avatars/1.png' }) });
-    const invoices = uploadHandler({ bucket: b, limits: { maxBytes: '9mb' }, onBeforeUpload: () => ({ path: 'invoices/1.pdf' }) });
-    // Same limits, different endpoint: two handlers on one bucket do not share each other's tokens.
-    const twin = uploadHandler({ bucket: b, endpoint: '/api/twin', limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
+    const avatars = uploadHandler({ bucket: b, constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'avatars/1.png' }) });
+    const invoices = uploadHandler({ bucket: b, constraints: { maxBytes: '9mb' }, onBeforeUpload: () => ({ path: 'invoices/1.pdf' }) });
+    // Same constraints, different endpoint: two handlers on one bucket do not share each other's tokens.
+    const twin = uploadHandler({ bucket: b, endpoint: '/api/twin', constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
 
     const started = await begin(avatars, { name: 'a.png', type: 'image/png', size: 10 });
     expect((await post(invoices, { phase: 'end', completionToken: started.completionToken })).status).toBe(403);
     expect((await post(twin, { phase: 'end', completionToken: started.completionToken })).status).toBe(403);
-    expect(deriveRouteId({ allowedContentTypes: undefined, maxBytes: 1 }, false)).not.toBe(deriveRouteId({ allowedContentTypes: undefined, maxBytes: 2 }, false));
-    expect(deriveRouteId({ allowedContentTypes: ['image/png'], maxBytes: 1 }, false)).toBe(deriveRouteId({ allowedContentTypes: ['image/png'], maxBytes: 1 }, false));
+    expect(deriveRouteId({ contentTypes: undefined, maxBytes: 1 }, false)).not.toBe(deriveRouteId({ contentTypes: undefined, maxBytes: 2 }, false));
+    expect(deriveRouteId({ contentTypes: ['image/png'], maxBytes: 1 }, false)).toBe(deriveRouteId({ contentTypes: ['image/png'], maxBytes: 1 }, false));
   });
 
-  test('the limits are revalidated, not cached forever', async () => {
+  test('the constraints are revalidated, not cached forever', async () => {
     resetCredentialCaches();
-    const route = uploadHandler({ bucket: bucket(), limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
+    const route = uploadHandler({ bucket: bucket(), constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
     const res = await route.GET(new Request('https://app.test/api/upload'));
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
     const etag = res.headers.get('etag')!;
     expect(etag).toMatch(/^"[a-z0-9]+"$/);
-    expect(await res.json()).toEqual({ limits: { maxBytes: 1_000_000 }, transport: 'direct' });
+    expect(await res.json()).toEqual({ constraints: { maxBytes: 1_000_000 }, transport: 'direct' });
     const again = await route.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }));
     expect(again.status).toBe(304);
   });
@@ -541,7 +537,9 @@ describe('uploadHandler: the direct transport', () => {
     const started = await begin(named, { name: 'Holiday Pic.PNG', type: 'image/png', size: 10 });
     const res = await post(named, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
     expect(res.status).toBe(200);
-    expect((await res.json()).data).toEqual({ ok: true });
+    const completed = await res.json();
+    expect(completed.blob.contentType).toBe('image/png');
+    expect(completed.data).toEqual({ ok: true });
     expect(seen).toEqual({
       // The name is the one thing the stored object does not carry: it rides the completion token.
       file: { name: 'Holiday Pic.PNG', type: 'image/png', size: 10 },
@@ -550,6 +548,36 @@ describe('uploadHandler: the direct transport', () => {
       hasUploadId: true,
       multipartUploadId: 'mp-1',
     });
+  });
+
+  test('a repeated end delivers the callback again with the same uploadId', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const ids: string[] = [];
+    const route = uploadHandler({
+      bucket: bucket(),
+      onBeforeUpload: () => ({ path: 'a.png' }),
+      onUploadComplete: ({ uploadId }) => {
+        ids.push(uploadId);
+        return { uploadId };
+      },
+    });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    let completes = 0;
+    r2Handler = (call) => {
+      if (call.method === 'POST') {
+        completes++;
+        if (completes > 1) return new Response('<Error><Code>NoSuchUpload</Code></Error>', { status: 404 });
+        return new Response('<CompleteMultipartUploadResult><ETag>"e"</ETag></CompleteMultipartUploadResult>', { status: 200 });
+      }
+      if (call.method === 'HEAD') return new Response('', { status: 200, headers: { 'content-length': '10', etag: '"e"', 'content-type': 'image/png' } });
+      return new Response('', { status: 204 });
+    };
+    const end = { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] };
+    expect((await post(route, end)).status).toBe(200);
+    expect((await post(route, end)).status).toBe(200);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(1);
   });
 
   test('an app error that names a status becomes that status; onError maps the rest', async () => {
@@ -607,7 +635,7 @@ describe('uploadHandler: the direct transport', () => {
     const seen: unknown[] = [];
     const route = uploadHandler({
       bucket: bucket(),
-      limits: { maxBytes: '5gb' },
+      constraints: { maxBytes: '5gb' },
       onBeforeUpload: () => ({ path: 'big.bin', metadata: { rowId: '7' } }),
       onError: ({ error, path, metadata }) => {
         seen.push({ code: (error as BlobError).code, path, metadata });
@@ -706,18 +734,18 @@ describe('uploadHandler: the proxy transport', () => {
     return uploadHandler({
       bucket: bucket(),
       proxy: true,
-      limits: { allowedContentTypes: ['image/png'], maxBytes: '1mb' },
+      constraints: { contentTypes: ['image/png'], maxBytes: '1mb' },
       onBeforeUpload: () => ({ path: 'avatar/demo', metadata: { owner: 'demo' } }),
-      onUploadComplete: ({ path, contentType, size }) => ({ row: path, contentType, size }),
+      onUploadComplete: ({ uploadId, path, contentType, size }) => ({ uploadId, row: path, contentType, size }),
       ...extra,
     });
   }
 
-  test('it serves the same limits document a direct route does', async () => {
+  test('it serves the same constraints document a direct route does', async () => {
     resetCredentialCaches();
     const res = await route().GET(new Request('https://app.test/api/avatar'));
     // transport is how one hook knows to POST the bytes here rather than presign them.
-    expect(await res.json()).toEqual({ limits: { allowedContentTypes: ['image/png'], maxBytes: 1_000_000 }, transport: 'proxy' });
+    expect(await res.json()).toEqual({ constraints: { contentTypes: ['image/png'], maxBytes: 1_000_000 }, transport: 'proxy' });
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
   });
 
@@ -728,8 +756,9 @@ describe('uploadHandler: the proxy transport', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
     expect(body.blob.path).toBe('avatar/demo');
+    expect(body.blob.contentType).toBe('image/png');
     expect(typeof body.blob.uploadedAt).toBe('string');
-    expect(body.data).toEqual({ row: 'avatar/demo', contentType: 'image/png', size: PNG.byteLength });
+    expect(body.data).toEqual({ uploadId: expect.any(String), row: 'avatar/demo', contentType: 'image/png', size: PNG.byteLength });
     expect(r2Calls().some((c) => c.method === 'PUT')).toBe(true);
   });
 
@@ -784,7 +813,7 @@ describe('uploadHandler: the proxy transport', () => {
   test('a file over the limit is refused on its own size', async () => {
     resetCredentialCaches();
     const big = new File([new Uint8Array(20) as BlobPart], 'a.png', { type: 'image/png' });
-    const res = await route({ limits: { allowedContentTypes: ['image/png'], maxBytes: 10 } }).POST(form(big));
+    const res = await route({ constraints: { contentTypes: ['image/png'], maxBytes: 10 } }).POST(form(big));
     expect(res.status).toBe(413);
     expect((await res.json()).code).toBe('too_large');
   });
@@ -803,7 +832,7 @@ describe('uploadHandler: the proxy transport', () => {
     const res = await uploadHandler({
       bucket: bucket(),
       proxy: true,
-      limits: { allowedContentTypes: ['image/png'] },
+      constraints: { contentTypes: ['image/png'] },
       onBeforeUpload: ({ file }) => {
         seen = file;
         return { path: 'avatar/raw' };
@@ -819,13 +848,13 @@ describe('uploadHandler: the proxy transport', () => {
     expect(seen).toEqual({ name: 'shot.png', type: 'image/png', size: PNG.byteLength });
   });
 
-  // The bug this replaced: narrowing only maxBytes replaced the resolved limits wholesale, so
-  // allowedContentTypes went undefined, put() skipped the sniff, and html-as-png landed at the
+  // The bug this replaced: narrowing only maxBytes replaced the resolved constraints wholesale, so
+  // contentTypes went undefined, put() skipped the sniff, and html-as-png landed at the
   // stable avatar path with a 200.
   test('narrowing one limit keeps the other, so the byte sniff survives', async () => {
     resetCredentialCaches();
     r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
-    const narrowed = route({ onBeforeUpload: () => ({ path: 'avatar/demo', limits: { maxBytes: '500kb' } }) });
+    const narrowed = route({ onBeforeUpload: () => ({ path: 'avatar/demo', constraints: { maxBytes: '500kb' } }) });
     const html = new File([new TextEncoder().encode('<html><script>pwn</script>') as BlobPart], 'a.png', { type: 'image/png' });
     const res = await narrowed.POST(form(html));
     expect(res.status).toBe(400);
@@ -848,7 +877,7 @@ describe('uploadHandler: the proxy transport', () => {
     const declared = (await req.clone().arrayBuffer()).byteLength;
     // The envelope really is bigger than the file, or this test proves nothing.
     expect(declared).toBeGreaterThan(2000);
-    expect((await route({ limits: { allowedContentTypes: ['image/png'], maxBytes: 2000 } }).POST(req)).status).toBe(200);
+    expect((await route({ constraints: { contentTypes: ['image/png'], maxBytes: 2000 } }).POST(req)).status).toBe(200);
   });
 
   test('a body over the limit even allowing for the envelope is refused before it is read', async () => {
@@ -868,7 +897,7 @@ describe('uploadHandler: the proxy transport', () => {
     const r = uploadHandler({
       bucket: bucket(),
       proxy: true,
-      limits: { allowedContentTypes: ['image/png'] },
+      constraints: { contentTypes: ['image/png'] },
       onBeforeUpload: ({ file }) => {
         seen = file.name;
         return { path: 'x/1' };
@@ -919,15 +948,15 @@ describe('uploadHandler: the proxy transport', () => {
 
   // A TypeError, and it is rethrown rather than answered: widening is the app's bug, not the
   // caller's, so the framework logs it instead of it becoming a 500 the browser has to interpret.
-  test('onBeforeUpload cannot widen the route limits', async () => {
+  test('onBeforeUpload cannot widen the route constraints', async () => {
     resetCredentialCaches();
-    const widened = route({ onBeforeUpload: () => ({ path: 'avatar/demo', limits: { maxBytes: '5mb' } }) });
+    const widened = route({ onBeforeUpload: () => ({ path: 'avatar/demo', constraints: { maxBytes: '5mb' } }) });
     expect(widened.POST(form(png()))).rejects.toThrow(/widened maxBytes/);
   });
 
-  test('the endpoint separates two handlers that declare identical limits', () => {
-    expect(deriveRouteId({ allowedContentTypes: undefined, maxBytes: 1 }, false, '/api/a')).not.toBe(
-      deriveRouteId({ allowedContentTypes: undefined, maxBytes: 1 }, false, '/api/b'),
+  test('the endpoint separates two handlers that declare identical constraints', () => {
+    expect(deriveRouteId({ contentTypes: undefined, maxBytes: 1 }, false, '/api/a')).not.toBe(
+      deriveRouteId({ contentTypes: undefined, maxBytes: 1 }, false, '/api/b'),
     );
   });
 });

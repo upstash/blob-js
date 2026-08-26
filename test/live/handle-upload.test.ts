@@ -20,7 +20,7 @@ let lastLargeCompleted: { multipartUploadId: string; name: string; declared: num
 // `context` is written above the callbacks on purpose -- see the ordering rule in handler.ts.
 const chat = uploadHandler({
   bucket: pub,
-  limits: { allowedContentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: '20mb' },
+  constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: '20mb' },
   context: (request) => {
     const id = request.headers.get('authorization')?.slice(7);
     if (!id) throw new BlobError('unauthorized');
@@ -58,14 +58,14 @@ const fileRoute = upload()({
 
 // `thumb` narrows the handler's maxBytes and inherits the bucket and everything else.
 const thumbRoute = upload()({
-  limits: { maxBytes: '1mb' },
+  constraints: { maxBytes: '1mb' },
   onBeforeUpload: ({ file }) => ({ path: p(`thumb/${file.name}`) }),
 });
 
 // Two routes at one endpoint, told apart by ?route=.
 const large = uploadHandler({
   bucket: priv,
-  limits: { maxBytes: '5gb' },
+  constraints: { maxBytes: '5gb' },
   routes: { file: fileRoute, thumb: thumbRoute },
 });
 
@@ -83,28 +83,28 @@ const post = (handler: Postable, body: unknown, opts: { route?: string; auth?: s
 const toFile = (handler: Postable, body: unknown) => post(handler, body, { route: 'file' });
 
 describe('GET', () => {
-  test('serves expanded limits, cached for a minute and revalidated', async () => {
+  test('serves expanded constraints, cached for a minute and revalidated', async () => {
     const res = await chat.GET(new Request('https://app.test/api/upload'));
-    // Not immutable: the limits are the route's own code, and a deploy changes them.
+    // Not immutable: the constraints are the route's own code, and a deploy changes them.
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
     const etag = res.headers.get('etag')!;
     expect(etag).toMatch(/^"/);
     expect((await chat.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }))).status).toBe(304);
     expect(await res.json()).toEqual({
-      limits: { allowedContentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: 20_000_000 },
+      constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: 20_000_000 },
       transport: 'direct',
     });
-    const img = uploadHandler({ bucket: pub, limits: { allowedContentTypes: ['image/*'] }, onBeforeUpload: () => ({ path: 'x' }) });
-    const limits = (await (await img.GET(new Request('https://x'))).json()).limits;
-    expect(limits.allowedContentTypes).toContain('image/png');
-    expect(limits.allowedContentTypes).not.toContain('image/svg+xml');
-    expect(() => uploadHandler({ bucket: pub, limits: { allowedContentTypes: ['*/*'] }, onBeforeUpload: () => ({ path: 'x' }) })).toThrow();
+    const img = uploadHandler({ bucket: pub, constraints: { contentTypes: ['image/*'] }, onBeforeUpload: () => ({ path: 'x' }) });
+    const constraints = (await (await img.GET(new Request('https://x'))).json()).constraints;
+    expect(constraints.contentTypes).toContain('image/png');
+    expect(constraints.contentTypes).not.toContain('image/svg+xml');
+    expect(() => uploadHandler({ bucket: pub, constraints: { contentTypes: ['*/*'] }, onBeforeUpload: () => ({ path: 'x' }) })).toThrow();
   });
 
   test('a named handler answers per route, and 404s a name it does not mount', async () => {
     const url = (route?: string) => new Request(`https://app.test/api/upload${route ? `?route=${route}` : ''}`);
-    expect((await (await large.GET(url('thumb'))).json()).limits.maxBytes).toBe(1_000_000);
-    expect((await (await large.GET(url('file'))).json()).limits.maxBytes).toBe(5_000_000_000);
+    expect((await (await large.GET(url('thumb'))).json()).constraints.maxBytes).toBe(1_000_000);
+    expect((await (await large.GET(url('file'))).json()).constraints.maxBytes).toBe(5_000_000_000);
     // Never the names it does mount, and never a 500: an unknown route is an ordinary 404.
     const missing = await large.GET(url('nope'));
     expect(missing.status).toBe(404);
@@ -118,7 +118,7 @@ describe('GET', () => {
 describe('begin', () => {
   const tid = '4d4a2a2c-5d6e-4f7a-8b9c-0d1e2f3a4b5c';
 
-  test('rejects before any multipart is created: limits, input, auth, forbidden, empty', async () => {
+  test('rejects before any multipart is created: constraints, input, auth, forbidden, empty', async () => {
     const file = { name: 'a.png', type: 'image/png', size: 100 };
     let res = await post(chat, { phase: 'begin', file: { ...file, type: 'text/html' }, input: { threadId: tid } });
     expect(res.status).toBe(400);
@@ -228,7 +228,7 @@ describe('begin', () => {
     const path = p('rollback/receipt.png');
     const refuses = uploadHandler({
       bucket: pub,
-      limits: { maxBytes: '1mb' },
+      constraints: { maxBytes: '1mb' },
       onBeforeUpload: () => ({ path }),
       onUploadComplete: () => {
         throw new BlobError('forbidden', { message: 'the row this file belongs to is gone' });
@@ -311,7 +311,7 @@ describe('begin', () => {
     expect(after.status).toBe(404);
   });
 
-  test('routes at one endpoint are told apart by name, in the limits and in the token', async () => {
+  test('routes at one endpoint are told apart by name, in the constraints and in the token', async () => {
     const file = { name: 'shot.bin', type: '', size: 5_000_000 };
     // thumb narrowed maxBytes to 1mb; file inherited the handler's 5gb. Same handler, same bucket.
     expect((await post(large, { phase: 'begin', file }, { route: 'thumb' })).status).toBe(413);
@@ -323,11 +323,11 @@ describe('begin', () => {
   });
 
   test('a completion token is bound to its handler, not just to its bucket', async () => {
-    const one = uploadHandler({ bucket: pub, limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: p('routes/one') }) });
-    const two = uploadHandler({ bucket: pub, limits: { maxBytes: '2mb' }, onBeforeUpload: () => ({ path: p('routes/two') }) });
-    // Same bucket, same limits, same (empty) route name: `endpoint` is the only thing separating
+    const one = uploadHandler({ bucket: pub, constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: p('routes/one') }) });
+    const two = uploadHandler({ bucket: pub, constraints: { maxBytes: '2mb' }, onBeforeUpload: () => ({ path: p('routes/two') }) });
+    // Same bucket, same constraints, same (empty) route name: `endpoint` is the only thing separating
     // them, and it has to be enough.
-    const twin = uploadHandler({ bucket: pub, endpoint: '/api/twin', limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: p('routes/twin') }) });
+    const twin = uploadHandler({ bucket: pub, endpoint: '/api/twin', constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: p('routes/twin') }) });
     const begin = (await (await post(one, { phase: 'begin', file: { name: 'a.bin', type: '', size: 10 } })).json()) as WireBeginResponse;
     expect((await post(two, { phase: 'end', completionToken: begin.completionToken })).status).toBe(403);
     expect((await post(twin, { phase: 'end', completionToken: begin.completionToken })).status).toBe(403);
@@ -338,11 +338,11 @@ describe('begin', () => {
     expect((await post(one, { phase: 'cancel', completionToken: begin.completionToken })).status).toBe(200);
   });
 
-  test('onBeforeUpload may narrow limits, never widen them', async () => {
+  test('onBeforeUpload may narrow constraints, never widen them', async () => {
     const narrow = uploadHandler({
       bucket: pub,
-      limits: { maxBytes: '1mb', allowedContentTypes: ['image/*'] },
-      onBeforeUpload: ({ file }) => ({ path: p('n'), limits: file.name === 'wide' ? { maxBytes: '2mb' } : { maxBytes: '10kb', allowedContentTypes: ['image/png'] } }),
+      constraints: { maxBytes: '1mb', contentTypes: ['image/*'] },
+      onBeforeUpload: ({ file }) => ({ path: p('n'), constraints: file.name === 'wide' ? { maxBytes: '2mb' } : { maxBytes: '10kb', contentTypes: ['image/png'] } }),
     });
     let res = await post(narrow, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 20_000 } });
     expect(res.status).toBe(413);

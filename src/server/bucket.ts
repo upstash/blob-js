@@ -1,5 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
-import type { BlobObject } from '../shared/types.ts';
+import type { BlobObject, CompletedBlob } from '../shared/types.ts';
 import { cacheControl, formatBytes, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
@@ -30,7 +30,7 @@ export interface BucketOptions {
 
 export interface PutOptions {
   contentType?: string;
-  allowedContentTypes?: readonly string[];
+  contentTypes?: readonly string[];
   maxBytes?: Size;
   cache?: CacheOption;
   metadata?: Record<string, string>;
@@ -60,9 +60,7 @@ export interface ListPage {
 }
 
 /** What put() answers: the blob, plus the content type it was stored with. */
-export interface PutResult extends BlobObject {
-  contentType: string;
-}
+export type PutResult = CompletedBlob;
 
 export interface BlobInfo extends BlobObject {
   contentType: string;
@@ -75,22 +73,14 @@ export interface BlobBody extends BlobInfo {
 
 export interface SignedReadUrlOptions {
   /**
-   * How long the link lives. Capped by what the signing credential has left, which is at most ten
-   * minutes and often less (measured 2026-08-25: a fresh mint came back with 199 s on it), so an
-   * `expiresIn` over the cap throws unless `clamp` is set. Omit it for the shorter of 5m and the
-   * cap, which never throws; `expiresAt` says what you got either way.
+   * How long the link should live. If the current signing credential expires sooner, the SDK uses
+   * what is available; `expiresAt` always says when the returned link actually expires.
    */
   expiresIn?: Duration;
-  /**
-   * Save the file instead of showing it in the tab: `true` uses the last segment of the path,
-   * a string is the name to save it as. It rides on the signature as
-   * `response-content-disposition`, so the browser can be sent straight to storage.
-   */
-  download?: boolean | string;
+  /** Save the response as this filename instead of displaying it inline. */
+  downloadAs?: string;
   /** What storage answers with as `Content-Type`, overriding what the object was stored as. */
   contentType?: string;
-  /** Shorten a too-long `expiresIn` to the cap instead of throwing. */
-  clamp?: boolean;
 }
 
 export interface SignedRead {
@@ -173,11 +163,17 @@ export class Bucket {
     return new Bucket({ ...options, token });
   }
 
+  /** The public object URL, computed locally from the bucket token. Undefined for a private bucket. */
+  publicUrl(path: string): string | undefined {
+    encodeKey(path);
+    return this.r2.publicUrl(path);
+  }
+
   /* ------------------------------------------------------------------ put */
 
   async put(path: string, body: PutBody, options: PutOptions = {}): Promise<PutResult> {
     encodeKey(path);
-    const allowed = options.allowedContentTypes === undefined ? undefined : expandContentTypes(options.allowedContentTypes);
+    const allowed = options.contentTypes === undefined ? undefined : expandContentTypes(options.contentTypes);
     const maxBytes = options.maxBytes === undefined ? undefined : parseSize(options.maxBytes, 'maxBytes');
 
     const resolved = resolveBody(body);
@@ -358,12 +354,9 @@ export class Bucket {
   async signedRead(path: string, options: SignedReadUrlOptions = {}): Promise<SignedRead> {
     const expiresIn = options.expiresIn === undefined ? undefined : Math.max(1, Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000));
     const query: Record<string, string> = {};
-    if (options.download) {
-      const name = typeof options.download === 'string' ? options.download : (path.split('/').pop() ?? '');
-      query['response-content-disposition'] = attachmentDisposition(name);
-    }
+    if (options.downloadAs !== undefined) query['response-content-disposition'] = attachmentDisposition(options.downloadAs);
     if (options.contentType !== undefined) query['response-content-type'] = safeContentType(options.contentType);
-    return this.r2.presignRead({ path, query, expiresIn, clamp: options.clamp });
+    return this.r2.presignRead({ path, query, expiresIn });
   }
 
   /** signedRead(), url only. */

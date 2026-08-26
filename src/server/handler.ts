@@ -1,9 +1,9 @@
 import { BlobError } from '../shared/errors.ts';
-import type { BlobObject, UploadFile, UploadRouteTypes } from '../shared/types.ts';
+import type { CompletedBlob, UploadFile, UploadRouteTypes } from '../shared/types.ts';
 import type { CacheOption, Size } from '../shared/units.ts';
 import type { Bucket } from './bucket.ts';
 import { handleProxyUpload } from './handle-proxy-upload.ts';
-import { answerError, deriveRouteId, handleUpload, resolveLimits, type ErrorDetails, type StandardSchema, type UploadLimits } from './handle-upload.ts';
+import { answerError, deriveRouteId, handleUpload, resolveConstraints, type ErrorDetails, type StandardSchema, type UploadConstraints } from './handle-upload.ts';
 
 /**
  * One upload endpoint. With no `routes` it is the route: the client calls `useUpload()` and nothing
@@ -11,7 +11,7 @@ import { answerError, deriveRouteId, handleUpload, resolveLimits, type ErrorDeta
  * -- `useUpload('avatar')` -- and the client reads each route's input, its data and its transport off
  * `typeof uploads`, so a page never spells out a url and a typo does not compile.
  *
- * `bucket`, `limits`, `input`, `proxy`, `field`, `onBeforeUpload`, `onUploadComplete` and `onError`
+ * `bucket`, `constraints`, `input`, `proxy`, `field`, `onBeforeUpload`, `onUploadComplete` and `onError`
  * at the top are DEFAULTS: a route replaces them key by key and inherits the rest.
  *
  * One rule about `context`: write it above the callbacks that read `ctx`. `(request) =>` with no
@@ -25,9 +25,9 @@ import { answerError, deriveRouteId, handleUpload, resolveLimits, type ErrorDeta
 type InferOutput<S> = S extends StandardSchema<any, infer O> ? O : never;
 type RouteInputOf<TSchema> = TSchema extends StandardSchema<any, any> ? InferOutput<TSchema> : undefined;
 
-/** A route's limits REPLACE the handler's per key; `null` clears a key the handler set. */
-export interface RouteLimits {
-  allowedContentTypes?: readonly string[] | null;
+/** A route's constraints REPLACE the handler's per key; `null` clears a key the handler set. */
+export interface RouteConstraints {
+  contentTypes?: readonly string[] | null;
   maxBytes?: Size | null;
 }
 
@@ -54,29 +54,27 @@ interface BeforeResult<TState, TProxy extends boolean> {
   path: string;
   cache?: CacheOption;
   metadata?: Record<string, string>;
-  /** May narrow the route's limits per user, never widen them. */
-  limits?: UploadLimits;
+  /** May narrow the route's constraints per user, never widen them. */
+  constraints?: UploadConstraints;
   /** Carried to onUploadComplete and to onError. `metadata` is the way to carry an id. */
   state?: TState;
   /** Proxy routes only. false: If-None-Match: * server-side, so a second upload is a real 412. */
   overwrite?: TProxy extends true ? boolean : never;
 }
 
-interface CompleteBase<TCtx, TState> extends BlobObject {
+interface CompleteBase<TCtx, TState> extends CompletedBlob {
   ctx: TCtx;
   route: string;
   request: Request;
   /** What the browser declared before a byte was sent: the name is the only place it survives. */
   file: UploadFile;
-  /** What was stored, canonicalised and proven by the leading bytes: not what the browser claimed. */
-  contentType: string;
+  /** Identifies this upload. Direct completion retries preserve it across callback deliveries. */
+  uploadId: string;
   metadata: Record<string, string>;
   state: TState;
 }
 
 interface DirectCompleteExtras {
-  /** Stable for one upload across a retried phase 'end': the key to dedupe on. */
-  uploadId: string;
   /** R2's own multipart id, for a bucket.abortMultipart(). */
   multipartUploadId: string;
 }
@@ -98,18 +96,19 @@ interface ErrorArgs<TCtx> {
  * nothing needs writing; this is for the callback two routes share, written once elsewhere:
  * `({ ctx, file }: BeforeUploadArgs<typeof uploads>) => ...`.
  */
-export type BeforeUploadArgs<TCtx = unknown, TInput = undefined> = BeforeArgs<UploadContext<TCtx>, TInput>;
+export type BeforeUploadArgs<TCtx = unknown, TInput = undefined, TRoute extends string = string> = BeforeArgs<UploadContext<TCtx>, TInput> & { route: TRoute };
 export type BeforeUploadResult<TState = undefined, TProxy extends boolean = boolean> = BeforeResult<TState, TProxy>;
 
 /**
- * Flat: the stored object, plus what this route knows about it. Absent on proxy: the two ids, which
- * is why `TProxy` defaults to `boolean` -- the fields both transports carry, so one annotation fits
- * a shared callback mounted on either. Pass `false` to reach `uploadId` on a direct route.
+ * Flat: the stored object, plus what this route knows about it. Both transports receive an
+ * `uploadId`; direct completion retries preserve it as an idempotency key. Pass a route union as
+ * the second argument when a shared callback is declared outside its handler:
+ * `UploadCompleteArgs<Session, 'attachment' | 'large'>`.
  */
-export type UploadCompleteArgs<TCtx = unknown, TState = undefined, TProxy extends boolean = boolean> = CompleteBase<UploadContext<TCtx>, TState> & (TProxy extends true ? unknown : DirectCompleteExtras);
+export type UploadCompleteArgs<TCtx = unknown, TRoute extends string = string, TState = undefined, TProxy extends boolean = boolean> = CompleteBase<UploadContext<TCtx>, TState> & { route: TRoute } & (TProxy extends true ? unknown : DirectCompleteExtras);
 
 /** What `onError` is handed. Return a BlobError or a Response to answer with it; return nothing to fall through. */
-export type UploadErrorArgs<TCtx = unknown> = ErrorArgs<UploadContext<TCtx>>;
+export type UploadErrorArgs<TCtx = unknown, TRoute extends string = string> = ErrorArgs<UploadContext<TCtx>> & { route: TRoute };
 
 type ErrorReturn = BlobError | Response | void | Promise<BlobError | Response | void>;
 
@@ -119,7 +118,7 @@ interface PlainRouteBase<TCtx, TInput, TProxy extends boolean> {
   /** Defaults to the handler's. */
   bucket?: Bucket;
   /** Replaces the handler's per key; `null` clears one the handler set. */
-  limits?: RouteLimits;
+  constraints?: RouteConstraints;
   /** Replaces the handler's. */
   onBeforeUpload?: (args: BeforeArgs<TCtx, TInput>) => BeforeResult<undefined, TProxy> | Promise<BeforeResult<undefined, TProxy>>;
   /** Replaces the handler's. What it returns is `upload.blob.data` in the browser, typed. */
@@ -178,7 +177,7 @@ export interface UploadRouteOptions<TCtx, TSchema extends StandardSchema<any, an
   /** The bytes go through this route as one POST. Bounded by the platform's request body cap. */
   proxy?: TProxy;
   bucket?: Bucket;
-  limits?: RouteLimits;
+  constraints?: RouteConstraints;
   /** A Standard Schema the browser's `input` is validated against before onBeforeUpload runs. */
   input?: TSchema;
   /** Proxy routes only: the multipart field the file arrives in. Default 'file'. */
@@ -240,17 +239,18 @@ export type HandlerRoutes<TRoutes, TData, TInput, TProxy extends boolean> = stri
 export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends StandardSchema<any, any> | undefined, TProxy extends boolean> {
   /** Every route inherits it; a route may name its own. */
   bucket?: Bucket;
-  /** Every route inherits it; a route's `limits` replaces per key and `null` clears one. */
-  limits?: RouteLimits;
+  /** Every route inherits it; a route's `constraints` replaces per key and `null` clears one. */
+  constraints?: RouteConstraints;
   /**
    * Where this handler is mounted. Only used to separate two handlers on one bucket, whose route
    * names would otherwise derive the same completion-token id.
    */
   endpoint?: string;
   /**
-   * Runs once per request, before the route does and before any body is read. What it returns is
-   * `ctx` in every callback, typed. Throw to refuse: a BlobError('unauthorized') is the 401.
-   * Not run for GET, which serves a public, cacheable limits document and reads nothing.
+   * Runs once per request, before the route does and before any body is read. It may be synchronous
+   * or async; its resolved value is `ctx` in every callback, typed. Throw to refuse: a
+   * BlobError('unauthorized') is the 401.
+   * Not run for GET, which serves a public, cacheable constraints document and reads nothing.
    *
    * Write it above the callbacks: see the note at the top of this file.
    */
@@ -268,7 +268,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
   onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<undefined, boolean> | Promise<BeforeResult<undefined, boolean>>;
   /**
    * The default. A route with its own onUploadComplete replaces it, and answers the browser with its
-   * own return instead of this one. `uploadId` is not here: it is direct-only and this is shared.
+   * own return instead of this one. Direct completion is at-least-once; use `uploadId` atomically.
    */
   onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, undefined>) => TData | Promise<TData>;
   /**
@@ -316,7 +316,7 @@ interface Slot {
 
 interface AnyRouteSpec {
   bucket?: Bucket;
-  limits?: RouteLimits;
+  constraints?: RouteConstraints;
   input?: StandardSchema<any, any>;
   proxy?: boolean;
   field?: string;
@@ -364,7 +364,7 @@ export function uploadHandler<
     const onUploadComplete = route.onUploadComplete ?? (options.onUploadComplete as ((args: any) => any) | undefined);
     const onRouteError = route.onError ?? (options.onError as ((args: any) => ErrorReturn) | undefined);
     const input = route.input ?? options.input;
-    const limits = mergeLimits(options.limits, route.limits);
+    const constraints = mergeConstraints(options.constraints, route.constraints);
 
     const ctxOf = (request: Request): unknown => slots.get(request)?.ctx;
     const onError = onRouteError
@@ -374,10 +374,10 @@ export function uploadHandler<
     const shared = {
       bucket,
       route: name,
-      // The name is the token's route id, so two routes with identical limits no longer collide.
+      // The name is the token's route id, so two routes with identical constraints no longer collide.
       // An endpoint separates two handlers sharing one bucket.
-      id: deriveRouteId(resolveLimits(limits), input !== undefined, options.endpoint ? `${options.endpoint}?route=${name}` : name),
-      limits,
+      id: deriveRouteId(resolveConstraints(constraints), input !== undefined, options.endpoint ? `${options.endpoint}?route=${name}` : name),
+      constraints,
       input,
       onBeforeUpload: (args: any) => onBeforeUpload({ ...args, ctx: ctxOf(args.request as Request) }),
       onUploadComplete: onUploadComplete ? (args: any) => onUploadComplete({ ...args, ctx: ctxOf(args.request as Request) }) : undefined,
@@ -447,11 +447,11 @@ function specOf(route: unknown): AnyRouteSpec {
   return (built ?? route) as AnyRouteSpec;
 }
 
-/** The route's own limits, key by key, over the handler's. `null` clears one the handler set. */
-function mergeLimits(base: RouteLimits | undefined, own: RouteLimits | undefined): UploadLimits {
+/** The route's own constraints, key by key, over the handler's. `null` clears one the handler set. */
+function mergeConstraints(base: RouteConstraints | undefined, own: RouteConstraints | undefined): UploadConstraints {
   const pick = <T>(fallback: T | null | undefined, value: T | null | undefined): T | undefined => (value === undefined ? (fallback ?? undefined) : (value ?? undefined));
   return {
-    allowedContentTypes: pick(base?.allowedContentTypes, own?.allowedContentTypes),
+    contentTypes: pick(base?.contentTypes, own?.contentTypes),
     maxBytes: pick(base?.maxBytes, own?.maxBytes),
   };
 }

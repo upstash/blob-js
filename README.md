@@ -45,26 +45,28 @@ const { url, expiresAt } = await bucket.signedRead('private/report.pdf');
 await bucket.signedReadUrl('private/report.pdf'); // the url alone
 
 // saves as report.pdf instead of opening in the tab
-await bucket.signedReadUrl('u/7/9f3c2a', { download: 'report.pdf' });
-await bucket.signedReadUrl('private/report.pdf', { download: true }); // the last path segment
+await bucket.signedReadUrl('u/7/9f3c2a', { downloadAs: 'report.pdf' });
 ```
 
 The link is signed with the bucket's temporary credential and cannot outlive it. That cap moves:
 the credential service serves one credential until it is nearly out, so `signedReadCap()` is
 anywhere from ~30 s to ~10 min (measured 2026-08-25: a fresh mint came back with 199 s on it).
 
-- No `expiresIn` asks for the shorter of 5 minutes and the cap, and never throws.
-- An `expiresIn` over the cap throws `invalid_input` naming the cap. Pass `{ clamp: true }` to take
-  the cap instead. Either way `expiresAt` is when the link really dies, so cache it until then.
+- No `expiresIn` asks for the shorter of 5 minutes and the cap.
+- If `expiresIn` is longer than the credential can currently sign, the SDK transparently uses the
+  available duration. `expiresAt` is when the link really dies, so cache it until then.
 - If the backend later ships a long-lived signing credential, it is used for reads automatically and
   the cap goes up.
-- `download` puts the file name on the link as `response-content-disposition`, signed with the rest
-  of it: send the browser straight to storage and the file saves under that name, with no route of
-  your own to stream the bytes through. `true` uses the last segment of the path, a string is the
-  name to use. It is written the RFC 6266 way -- an ASCII `filename` and an RFC 8187 `filename*` --
+- `downloadAs` puts the file name on the link as `response-content-disposition`, signed with the
+  rest of it: send the browser straight to storage and the file saves under that name, with no route
+  of your own to stream the bytes through. It is written the RFC 6266 way -- an ASCII `filename` and
+  an RFC 8187 `filename*` --
   so a name with a space, a quote, an emoji or a newline in it arrives whole and cannot add a header.
 - `contentType` overrides what the object answers with as `Content-Type`, for a blob stored as
   `application/octet-stream` that you want a browser to render.
+
+A public URL needs no request: `bucket.publicUrl(path)` computes it from the bucket token and returns
+`undefined` for a bucket declared private.
 
 ### Private buckets
 
@@ -95,13 +97,13 @@ drives; the React hooks read what it accepts, what it answers with and which tra
 straight off `typeof uploads`, so a page never spells out a url and a typo does not compile.
 
 ```ts
-// lib/uploads.ts
+// lib/upload-routes.ts
 import 'server-only';
 import { Bucket, uniquePath, uploadHandler } from '@upstash/blob';
 
 export const uploads = uploadHandler({
   bucket: Bucket.fromEnv(),
-  limits: { maxBytes: '20mb', allowedContentTypes: ['image/*', 'application/pdf'] },
+  constraints: { maxBytes: '20mb', contentTypes: ['image/*', 'application/pdf'] },
 
   // runs once per request, before any body is read. What it returns is `ctx` in every callback,
   // typed. Throw to refuse: a BlobError('unauthorized') is the 401.
@@ -156,13 +158,13 @@ export default function Page() {
 ### More than one route
 
 Add `routes` and the same handler mounts several at the same endpoint, the name in the query. What
-is written at the top -- `bucket`, `limits`, `input`, `proxy`, `field`, `onBeforeUpload`,
+is written at the top -- `bucket`, `constraints`, `input`, `proxy`, `field`, `onBeforeUpload`,
 `onUploadComplete`, `onError` -- is the DEFAULT: a route replaces a key and inherits the rest.
 
 ```ts
 export const uploads = uploadHandler({
   bucket: pub,
-  limits: { maxBytes: '20mb', allowedContentTypes: ['image/*', 'application/pdf'] },
+  constraints: { maxBytes: '20mb', contentTypes: ['image/*', 'application/pdf'] },
   context: (request) => requireUser(request),
 
   // inherited by every route below, and `route` is the name the browser asked for
@@ -174,13 +176,13 @@ export const uploads = uploadHandler({
     // writes nothing: the defaults are the whole route
     attachment: {},
 
-    // its own bucket and its own limits; `null` clears a key the handler set
-    large: { bucket: priv, limits: { maxBytes: '2gb', allowedContentTypes: null } },
+    // its own bucket and its own constraints; `null` clears a key the handler set
+    large: { bucket: priv, constraints: { maxBytes: '2gb', contentTypes: null } },
 
     // the bytes go through your function instead of straight to storage
     avatar: {
       proxy: true,
-      limits: { maxBytes: '2mb' },
+      constraints: { maxBytes: '2mb' },
       onBeforeUpload: ({ ctx }) => ({ path: `avatar/${ctx.id}`, cache: '1m' }),
       onUploadComplete: ({ ctx, versionedUrl }) => db.users.update(ctx.id, { avatar: versionedUrl }),
     },
@@ -199,19 +201,20 @@ const { start, upload, accept } = useUpload('avatar');
   no query at all and the client calls `useUpload()` with no name; a `?route=` that reaches such a
   handler anyway is a client bound to some other handler, and is a `not_found` too.
 - **Route names** must match `/^[A-Za-z_][\w-]*$/`; `uploadHandler()` throws otherwise. The name is
-  also the completion token's route id, so two routes with identical limits do not collide. Set
+  also the completion token's route id, so two routes with identical constraints do not collide. Set
   `endpoint` when two handlers share one bucket.
-- **`limits`** replace the handler's per key, and `null` clears one: `{ maxBytes: '2gb',
-  allowedContentTypes: null }` raises the cap and drops the type list the handler set.
-- **`GET`** serves the route's limits and its transport, with `max-age=60` and an ETag, so a file
-  picker is filled from the same list that does the refusing and a deploy that widens the limits
+- **`constraints`** replace the handler's per key, and `null` clears one: `{ maxBytes: '2gb',
+  contentTypes: null }` raises the cap and drops the type list the handler set.
+- **`GET`** serves the route's constraints and its transport, with `max-age=60` and an ETag, so a file
+  picker is filled from the same list that does the refusing and a deploy that widens the constraints
   reaches it.
 - **`proxy: true`** is the only difference between the two transports on the client: the browser
   learns which one to run from the route's own GET, so a page names a route and never a strategy. A
   file picked before that GET has answered waits for it as `queued`; if the GET cannot be reached or
   refuses, the upload fails with that error rather than guessing a transport.
-- **`context`** runs once per request, before the route. It does not run for GET, which serves a
-  public, cacheable document and reads nothing. **Write it above the callbacks that read `ctx`.**
+- **`context`** may be synchronous or async and runs once per request, before the route. It does not
+  run for GET, which serves a public, cacheable document and reads nothing. **Write it above the
+  callbacks that read `ctx`.**
   TypeScript types an object literal top to bottom, and a `context` written below `routes` reaches
   it after the routes were typed with `ctx: undefined`; the error then lands on `context` itself
   ("Promise<Session> is not assignable to undefined"), never as a silent `unknown`. Annotating the
@@ -220,25 +223,26 @@ const { start, upload, accept } = useUpload('avatar');
   a route to replace one. All of them get `ctx`, `route`, `request` and `file`. What
   `onUploadComplete` returns is `upload.blob.data` in the browser, typed per route: a route with its
   own gets its own, a route without gets the handler's. `onBeforeUpload` returns `{ path, metadata?,
-  limits?, cache?, state?, overwrite? }`: `metadata` is the way to carry an id, `state` is anything
-  else the completion needs, and per-request `limits` may only narrow.
+  constraints?, cache?, state?, overwrite? }`: `metadata` is the way to carry an id, `state` is anything
+  else the completion needs, and per-request `constraints` may only narrow.
 - **`onError`** sees every refusal, the SDK's own included, with as much as the request had reached:
   `{ ctx, route, request, error, file?, path?, metadata?, state? }`. Return a `BlobError` or a
   `Response` to answer with it, return nothing to leave the answer alone. It is the one place to log,
   and the `path` is how the row a failed `onBeforeUpload` reserved is released.
-- **`uploadId`** on a direct route's `onUploadComplete` is stable across a retried completion, which
-  is the key to dedupe on; `multipartUploadId` is R2's own, for a `bucket.abortMultipart()`. Neither
-  is on a handler-level default, which is shared by both transports, and neither is on a proxy route.
+- **Direct `onUploadComplete` delivery is at-least-once.** A successful `phase: 'end'` response can
+  be lost and retried. Its `uploadId` stays stable, so enforce it as a unique key and atomically
+  insert-or-return the ready row. A proxy upload is one POST; sending another POST is another upload.
+  Both transports receive an `uploadId`; `multipartUploadId` is direct-only and belongs to R2.
 
 ### Every upload is multipart
 
 There is no size threshold and no single-PUT path. A file that fits one part is a multipart of one.
 
-- **The object does not exist until the upload completes.** Nothing is served, listed or fetched
-  before `onUploadComplete` has returned, so there is no window in which a half-written or unchecked
-  object is live.
-- **If `onUploadComplete` throws, the object is deleted** and the error is answered. The invariant is
-  worth stating plainly: the object exists if and only if `onUploadComplete` returned.
+- **The object does not exist until all parts complete.** A half-written object is never served or
+  listed. The callback then records the finished object directly as ready, with no pending row.
+- **If `onUploadComplete` throws, the object is deleted** and the error is answered. As with every
+  cross-service write, an abrupt process death between object storage and the app database cannot be
+  transactional; a retried completion recovers it.
 - **Pause, resume and retry work at every size**, because there is always a part boundary to stop on.
   `task.retry()` runs a failed upload again from the parts that landed, and so does picking the same
   file again after a reload.
@@ -271,22 +275,21 @@ export const uploads = uploadHandler({ bucket, context: (request) => getSession(
 ```
 
 A handler-level `onBeforeUpload` and `onUploadComplete` are shared by both transports, so they carry
-neither a typed `state` nor the direct-only `uploadId`. A route that needs either -- to dedupe a
-retried completion, or to carry the picked name to the row it writes -- names itself and uses the
-builder, even when it is the only one.
+no route-specific typed `state`; they do carry the common `uploadId`. A route that needs typed state
+names itself and uses the builder, even when it is the only one.
 
 The browser sends `input` with the file and `start({ file, input })` is typed to the schema; it is
 validated before `onBeforeUpload` runs and a route with no schema refuses input rather than dropping
 it. A callback written outside any handler is annotated with `BeforeUploadArgs` and
 `UploadCompleteArgs`, keyed on the handler or on the ctx type: `UploadContext<typeof uploads>` is
 what `context` returned, and `UploadFile` is the file as the browser described it.
-`UploadCompleteArgs` defaults to the fields both transports carry, which is what lets one annotation
-serve both; pass `false` as its third argument for the direct-only ids.
+`UploadCompleteArgs<Context, Route>` lets an extracted shared callback retain its route union while
+still serving either transport.
 
 ### Proxied routes
 
 `proxy: true` sends the bytes through your function, and `put()` checks them before anything reaches
-the bucket: the leading bytes against `allowedContentTypes`, the stream against `maxBytes`. That is
+the bucket: the leading bytes against `contentTypes`, the stream against `maxBytes`. That is
 what a stable path needs -- an avatar overwritten in place -- because a direct upload is checked once
 it is already stored, by which time a refused file has replaced the one it was refused in favour of.
 
@@ -301,8 +304,8 @@ AWS Lambda 6MB, Cloudflare 100MB): keep `maxBytes` well inside it, and leave any
   `useUpload(route, { field })`, or a request that is not multipart is taken as the body itself.
 - `input` crosses as a JSON form field beside the file. `overwrite: false` from `onBeforeUpload` sets
   `If-None-Match: *` server-side, so a second upload to the same path is a real 412.
-- `onBeforeUpload` may return `limits` to narrow the route's per user. They are merged, so narrowing
-  `maxBytes` alone keeps the route's `allowedContentTypes` and the byte sniff that goes with it.
+- `onBeforeUpload` may return `constraints` to narrow the route's per user. They are merged, so narrowing
+  `maxBytes` alone keeps the route's `contentTypes` and the byte sniff that goes with it.
 
 ### Without React
 
@@ -351,11 +354,11 @@ function Uploader() {
   say, so a client and a server cannot disagree about whether there is a name.
 - **`upload`** is the newest record, **`uploads`** is all of them, and **`clear(id?)`** drops one or
   all.
-- **`accept`** is the route's own `allowedContentTypes`, for the file input, so there is no second
+- **`accept`** is the route's own `contentTypes`, for the file input, so there is no second
   list to fall out of step with the one that does the refusing.
-- **`limits`** is the same document unjoined -- `limits.maxBytes` in bytes, `limits.allowedContentTypes`
+- **`constraints`** is the same document unjoined -- `constraints.maxBytes` in bytes, `constraints.contentTypes`
   as the list -- for a page that states the cap it is about to enforce. Undefined until the route's
-  GET answers, and when the route serves no limits, so nothing renders a number the route did not
+  GET answers, and when the route serves no constraints, so nothing renders a number the route did not
   give.
 - **`status`** is `'queued' | 'uploading' | 'finishing' | 'paused' | 'done' | 'canceled' | 'error'`
   (a proxy record has no `'paused'`). `'finishing'` is the stretch after the last byte is sent while

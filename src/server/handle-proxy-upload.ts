@@ -1,8 +1,8 @@
 import { BlobError } from '../shared/errors.ts';
-import type { ProxyUploadResponse, UploadFile, WireLimits } from '../shared/types.ts';
+import type { ProxyUploadResponse, UploadFile, WireConstraints } from '../shared/types.ts';
 import { formatBytes, type CacheOption, type Size } from '../shared/units.ts';
 import { type Bucket } from './bucket.ts';
-import { answerError, enforce, limitsEndpoint, resolveLimits, validateInput, type ErrorDetails, type ErrorMapper, type StandardSchema, type UploadLimits } from './handle-upload.ts';
+import { answerError, enforce, constraintsEndpoint, resolveConstraints, validateInput, type ErrorDetails, type ErrorMapper, type StandardSchema, type UploadConstraints } from './handle-upload.ts';
 
 /**
  * The other half of handleUpload, internal to `uploadHandler`: the upload that goes through your
@@ -12,13 +12,13 @@ import { answerError, enforce, limitsEndpoint, resolveLimits, validateInput, typ
  * The direct transport cannot do that. It presigns, the browser PUTs, and phase 'end' reads the
  * object back to sniff it -- so at a path that is overwritten in place (an avatar), a refused file
  * has already replaced the one it was refused in favour of. put() checks first: the leading bytes
- * against allowedContentTypes and the stream against maxBytes, before anything reaches the bucket.
+ * against contentTypes and the stream against maxBytes, before anything reaches the bucket.
  *
  * The cost is that every byte crosses your function, so it is bounded by the platform's request body
  * cap (Vercel 4.5MB, AWS Lambda 6MB, Cloudflare 100MB): keep maxBytes well inside it and leave
  * anything larger on the direct transport.
  *
- * GET answers the same limits document the direct transport's does, so the hook fills a file picker
+ * GET answers the same constraints document the direct transport's does, so the hook fills a file picker
  * from the route's own list and refuses an oversize file before it is sent.
  */
 
@@ -27,7 +27,7 @@ interface ProxyDecided {
   path: string;
   cache?: CacheOption;
   metadata?: Record<string, string>;
-  limits?: UploadLimits;
+  constraints?: UploadConstraints;
   overwrite?: boolean;
   state?: unknown;
 }
@@ -37,7 +37,7 @@ export interface InternalProxyUploadOptions {
   /** The route's name, handed to every callback. '' for a handler that mounts no named routes. */
   route: string;
   /** Refused before the body is read when content-length says so, and again from the stream. */
-  limits?: UploadLimits;
+  constraints?: UploadConstraints;
   /** The form field the file arrives in. Default 'file'; a request that is not multipart is the body itself. */
   field?: string;
   /**
@@ -56,9 +56,9 @@ export interface InternalProxyUploadHandlers {
 }
 
 export function handleProxyUpload(options: InternalProxyUploadOptions): InternalProxyUploadHandlers {
-  const routeLimits = resolveLimits(options.limits);
+  const routeConstraints = resolveConstraints(options.constraints);
   const field = options.field ?? 'file';
-  const GET = limitsEndpoint(routeLimits, 'proxy');
+  const GET = constraintsEndpoint(routeConstraints, 'proxy');
 
   const POST = async (request: Request): Promise<Response> => {
     const details: ErrorDetails = {};
@@ -68,15 +68,15 @@ export function handleProxyUpload(options: InternalProxyUploadOptions): Internal
       // that total would refuse a file exactly at the limit: the envelope is allowed for, and the
       // exact check is enforce() below, against the file's own size.
       const declared = Number(request.headers.get('content-length'));
-      const ceiling = routeLimits.maxBytes === undefined ? undefined : routeLimits.maxBytes + (isMultipart(request) ? ENVELOPE_SLACK : 0);
+      const ceiling = routeConstraints.maxBytes === undefined ? undefined : routeConstraints.maxBytes + (isMultipart(request) ? ENVELOPE_SLACK : 0);
       if (ceiling !== undefined && Number.isFinite(declared) && declared > ceiling) {
-        throw new BlobError('too_large', { message: `the request body is ${formatBytes(declared)}, over the ${formatBytes(routeLimits.maxBytes!)} limit` });
+        throw new BlobError('too_large', { message: `the request body is ${formatBytes(declared)}, over the ${formatBytes(routeConstraints.maxBytes!)} limit` });
       }
 
-      const body = await readBody(request, field, routeLimits.maxBytes);
+      const body = await readBody(request, field, routeConstraints.maxBytes);
       const file: UploadFile = { name: body.name, type: normalizeType(body.type), size: body.size };
       details.file = file;
-      enforce(routeLimits, file);
+      enforce(routeConstraints, file);
 
       const input = await validateInput(options.input, body.input);
       const decided = await options.onBeforeUpload({ request, route: options.route, file, input });
@@ -84,35 +84,35 @@ export function handleProxyUpload(options: InternalProxyUploadOptions): Internal
       details.path = decided.path;
       details.state = decided.state;
 
-      let limits = routeLimits;
-      if (decided.limits) {
-        const narrowed = resolveLimits(decided.limits);
-        if (narrowed.maxBytes !== undefined && routeLimits.maxBytes !== undefined && narrowed.maxBytes > routeLimits.maxBytes) {
-          throw new TypeError(`onBeforeUpload widened maxBytes (${narrowed.maxBytes} > ${routeLimits.maxBytes})`);
+      let constraints = routeConstraints;
+      if (decided.constraints) {
+        const narrowed = resolveConstraints(decided.constraints);
+        if (narrowed.maxBytes !== undefined && routeConstraints.maxBytes !== undefined && narrowed.maxBytes > routeConstraints.maxBytes) {
+          throw new TypeError(`onBeforeUpload widened maxBytes (${narrowed.maxBytes} > ${routeConstraints.maxBytes})`);
         }
-        if (narrowed.allowedContentTypes && routeLimits.allowedContentTypes) {
-          const wider = narrowed.allowedContentTypes.filter((t) => !routeLimits.allowedContentTypes!.includes(t));
-          if (wider.length) throw new TypeError(`onBeforeUpload widened allowedContentTypes (${wider.join(', ')})`);
+        if (narrowed.contentTypes && routeConstraints.contentTypes) {
+          const wider = narrowed.contentTypes.filter((t) => !routeConstraints.contentTypes!.includes(t));
+          if (wider.length) throw new TypeError(`onBeforeUpload widened contentTypes (${wider.join(', ')})`);
         }
         // Merged, never replaced. Narrowing only maxBytes would otherwise drop the route's type list
         // and with it the byte sniff, which is the reason to send the upload through here at all.
-        limits = {
-          maxBytes: narrowed.maxBytes ?? routeLimits.maxBytes,
-          allowedContentTypes: narrowed.allowedContentTypes ?? routeLimits.allowedContentTypes,
+        constraints = {
+          maxBytes: narrowed.maxBytes ?? routeConstraints.maxBytes,
+          contentTypes: narrowed.contentTypes ?? routeConstraints.contentTypes,
         };
-        enforce(limits, file);
+        enforce(constraints, file);
       }
 
       const metadata = decided.metadata ?? {};
       details.metadata = metadata;
-      // put() sniffs the leading bytes against allowedContentTypes and caps the stream at maxBytes,
+      // put() sniffs the leading bytes against contentTypes and caps the stream at maxBytes,
       // both before the first byte reaches the bucket. A refusal here stored nothing.
       let blob;
       try {
         blob = await options.bucket.put(decided.path, body.blob, {
           contentType: file.type,
-          ...(limits.allowedContentTypes ? { allowedContentTypes: limits.allowedContentTypes } : {}),
-          ...(limits.maxBytes === undefined ? {} : { maxBytes: limits.maxBytes as Size }),
+          ...(constraints.contentTypes ? { contentTypes: constraints.contentTypes } : {}),
+          ...(constraints.maxBytes === undefined ? {} : { maxBytes: constraints.maxBytes as Size }),
           ...(decided.cache === undefined ? {} : { cache: decided.cache }),
           ...(decided.overwrite === undefined ? {} : { overwrite: decided.overwrite }),
           metadata,
@@ -126,7 +126,7 @@ export function handleProxyUpload(options: InternalProxyUploadOptions): Internal
       let data: unknown;
       if (options.onUploadComplete) {
         try {
-          data = await options.onUploadComplete({ request, route: options.route, file, ...blob, contentType: blob.contentType, metadata, state: decided.state });
+          data = await options.onUploadComplete({ request, route: options.route, file, uploadId: crypto.randomUUID(), ...blob, metadata, state: decided.state });
         } catch (e) {
           // The invariant: the object exists only if onUploadComplete returned. A delete that fails
           // must not replace the callback's error with its own, but it is not swallowed either.
@@ -237,4 +237,4 @@ function normalizeType(type: string): string {
   return type ? type.toLowerCase().split(';')[0]!.trim() : 'application/octet-stream';
 }
 
-export type { WireLimits };
+export type { WireConstraints };

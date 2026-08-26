@@ -28,7 +28,7 @@ const guard = (fn: (req: Request) => Promise<Response>) => async (req: Request) 
     return Response.json({ error: e.message }, { status: e.status });
   }
 };
-const opts = { allowedContentTypes: ['image/png', 'image/jpeg', 'image/webp'] as string[], maxBytes: '2mb' };
+const opts = { contentTypes: ['image/png', 'image/jpeg', 'image/webp'] as string[], maxBytes: '2mb' };
 
 // The same upload written as an uploadHandler instead: `proxy: true` with no `routes` makes the one
 // route this handler is take its bytes through the function, and `field` names the form field.
@@ -36,7 +36,7 @@ const avatars = uploadHandler({
   bucket: pub,
   proxy: true,
   field: 'avatar',
-  limits: { allowedContentTypes: ['image/png', 'image/jpeg', 'image/webp'], maxBytes: '2mb' },
+  constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp'], maxBytes: '2mb' },
   context: (request) => {
     const id = request.headers.get('authorization')?.slice(7);
     if (!id) throw new BlobError('unauthorized');
@@ -50,7 +50,7 @@ const avatars = uploadHandler({
 const refuses = uploadHandler({
   bucket: pub,
   proxy: true,
-  limits: { allowedContentTypes: ['image/png'], maxBytes: '2mb' },
+  constraints: { contentTypes: ['image/png'], maxBytes: '2mb' },
   onBeforeUpload: () => ({ path: p('proxied/rollback.png') }),
   onUploadComplete: () => {
     throw new BlobError('forbidden', { message: 'the row this file belongs to is gone' });
@@ -145,7 +145,7 @@ describe('a proxy: true uploadHandler', () => {
 
   test('GET says which transport it speaks, so one hook serves both', async () => {
     const res = await avatars.GET(new Request('https://app.test/api/proxied'));
-    expect(await res.json()).toEqual({ limits: { allowedContentTypes: ['image/png', 'image/jpeg', 'image/webp'], maxBytes: 2_000_000 }, transport: 'proxy' });
+    expect(await res.json()).toEqual({ constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp'], maxBytes: 2_000_000 }, transport: 'proxy' });
   });
 
   test('the bytes go through the function and come back in the same envelope as phase end', async () => {

@@ -17,7 +17,7 @@ export type {
   UpdateOptions,
 } from './server/bucket.ts';
 export type { PutBody } from './server/body.ts';
-export type { StandardSchema, UploadLimits } from './server/handle-upload.ts';
+export type { StandardSchema, UploadConstraints } from './server/handle-upload.ts';
 export { upload, uploadHandler } from './server/handler.ts';
 export type {
   AnyUploadRouteConfig,
@@ -26,7 +26,7 @@ export type {
   DirectUploadRoute,
   HandlerRoutes,
   ProxyUploadRoute,
-  RouteLimits,
+  RouteConstraints,
   UploadBuilder,
   UploadCompleteArgs,
   UploadContext,
@@ -41,6 +41,6 @@ export type {
 export { uniquePath } from './server/unique-path.ts';
 export { BlobError } from './shared/errors.ts';
 export type { BlobErrorCode, BlobErrorOptions } from './shared/errors.ts';
-export type { BlobObject, UploadFile, UploadRoute, WireLimits } from './shared/types.ts';
+export type { BlobObject, CompletedBlob, UploadFile, UploadRoute, WireConstraints } from './shared/types.ts';
 export type { CacheOption, Size, Duration } from './shared/units.ts';
 export { formatBytes } from './shared/units.ts';

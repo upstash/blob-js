@@ -164,14 +164,10 @@ export class R2 {
   }
 
   /**
-   * A read link that lives as long as it says it does. The cap is what the signing credential has
-   * left, which moves: the agent serves one credential until it is nearly out, so a fresh mint can
-   * come back with anything from a minute to ten. Omitting `expiresIn` asks for the shorter of five
-   * minutes and the cap and therefore never throws; naming one that is over the cap does, unless
-   * `clamp`. `signing` in the credentials response, when the backend ships one, raises the cap and
-   * removes the re-mint entirely.
+   * A read link that lives no longer than requested. The signing credential can expire sooner, so
+   * the SDK transparently uses the available duration and `expiresAt` reports the exact result.
    */
-  async presignRead(init: { path: string; query?: Record<string, string>; expiresIn?: number; clamp?: boolean }): Promise<PresignedRead> {
+  async presignRead(init: { path: string; query?: Record<string, string>; expiresIn?: number }): Promise<PresignedRead> {
     let c = await this.creds.get();
     let cap = capOf(c);
     let seconds = init.expiresIn === undefined ? Math.min(cap, DEFAULT_READ_SECONDS) : Math.max(1, Math.floor(init.expiresIn));
@@ -179,15 +175,7 @@ export class R2 {
       c = await this.creds.get(seconds);
       cap = capOf(c);
     }
-    if (seconds > cap) {
-      if (!init.clamp) {
-        throw new BlobError('invalid_input', {
-          message: `expiresIn: ${seconds}s is over the ${cap}s this credential can sign for`,
-          hint: 'pass { clamp: true } to take the cap instead, and read expiresAt for what you got',
-        });
-      }
-      seconds = cap;
-    }
+    seconds = Math.min(seconds, cap);
     const signer = c.signing ?? c;
     const url = await this.objectUrl(init.path, init.query);
     const signed = await presign(

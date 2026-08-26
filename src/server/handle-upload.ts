@@ -1,5 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
-import type { UploadFile, WireBeginResponse, WireEndResponse, WireLanded, WireLimits, WireLimitsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
+import type { UploadFile, WireBeginResponse, WireEndResponse, WireLanded, WireConstraints, WireConstraintsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
 import { cacheControl, formatBytes, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
 import { signToken, verifyToken, type TokenPayload } from './completion-token.ts';
@@ -25,8 +25,8 @@ export interface StandardSchema<TInput = unknown, TOutput = TInput> {
 
 export type StandardResult<T> = { readonly value: T; readonly issues?: undefined } | { readonly issues: ReadonlyArray<{ readonly message: string; readonly path?: ReadonlyArray<PropertyKey | { key: PropertyKey }> | undefined }> };
 
-export interface UploadLimits {
-  allowedContentTypes?: readonly string[];
+export interface UploadConstraints {
+  contentTypes?: readonly string[];
   maxBytes?: Size;
 }
 
@@ -45,7 +45,7 @@ interface Decided {
   path: string;
   cache?: CacheOption;
   metadata?: Record<string, string>;
-  limits?: UploadLimits;
+  constraints?: UploadConstraints;
   state?: unknown;
 }
 
@@ -55,7 +55,7 @@ export interface InternalUploadOptions {
   route: string;
   /** Which route a completion token belongs to: a token minted by one is not spendable at another. */
   id: string;
-  limits?: UploadLimits;
+  constraints?: UploadConstraints;
   input?: StandardSchema<any, any> | undefined;
   onBeforeUpload: (args: { request: Request; route: string; file: UploadFile; input: unknown }) => Decided | Promise<Decided>;
   onUploadComplete?: (args: Record<string, unknown>) => unknown;
@@ -78,9 +78,9 @@ const LIMITS_MAX_AGE = 60;
 
 export function handleUpload(options: InternalUploadOptions): InternalUploadHandlers {
   const r2 = r2Of(options.bucket);
-  const routeLimits = resolveLimits(options.limits);
+  const routeConstraints = resolveConstraints(options.constraints);
   const routeId = options.id;
-  const GET = limitsEndpoint(routeLimits);
+  const GET = constraintsEndpoint(routeConstraints);
 
   const POST = async (request: Request): Promise<Response> => {
     const details: ErrorDetails = {};
@@ -108,7 +108,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     const file = readFile(body.file);
     details.file = file;
     if (file.size === 0) throw new BlobError('empty_body');
-    enforce(routeLimits, file);
+    enforce(routeConstraints, file);
 
     const input = await validateInput(options.input, body.input);
 
@@ -118,18 +118,18 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     details.path = decided.path;
     details.state = decided.state;
 
-    let allowed = routeLimits.allowedContentTypes;
-    if (decided.limits) {
-      const narrowed = resolveLimits(decided.limits);
-      if (narrowed.maxBytes !== undefined && routeLimits.maxBytes !== undefined && narrowed.maxBytes > routeLimits.maxBytes) {
-        throw new TypeError(`onBeforeUpload widened maxBytes (${narrowed.maxBytes} > ${routeLimits.maxBytes})`);
+    let allowed = routeConstraints.contentTypes;
+    if (decided.constraints) {
+      const narrowed = resolveConstraints(decided.constraints);
+      if (narrowed.maxBytes !== undefined && routeConstraints.maxBytes !== undefined && narrowed.maxBytes > routeConstraints.maxBytes) {
+        throw new TypeError(`onBeforeUpload widened maxBytes (${narrowed.maxBytes} > ${routeConstraints.maxBytes})`);
       }
-      if (narrowed.allowedContentTypes && routeLimits.allowedContentTypes) {
-        const wider = narrowed.allowedContentTypes.filter((t) => !routeLimits.allowedContentTypes!.includes(t));
-        if (wider.length) throw new TypeError(`onBeforeUpload widened allowedContentTypes (${wider.join(', ')})`);
+      if (narrowed.contentTypes && routeConstraints.contentTypes) {
+        const wider = narrowed.contentTypes.filter((t) => !routeConstraints.contentTypes!.includes(t));
+        if (wider.length) throw new TypeError(`onBeforeUpload widened contentTypes (${wider.join(', ')})`);
       }
       enforce(narrowed, file);
-      allowed = narrowed.allowedContentTypes ?? allowed;
+      allowed = narrowed.contentTypes ?? allowed;
     }
 
     const cache = cacheControl(decided.cache ?? r2.defaultCache);
@@ -213,7 +213,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       }
     }
 
-    const blob = r2.blobObject(t.path, head.size, head.etag, head.uploadedAt);
+    const blob = { ...r2.blobObject(t.path, head.size, head.etag, head.uploadedAt), contentType: head.contentType };
     details.metadata = head.metadata;
     let data: unknown;
     if (options.onUploadComplete) {
@@ -225,7 +225,6 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
           uploadId: t.id,
           multipartUploadId: t.uploadId,
           ...blob,
-          contentType: head.contentType,
           metadata: head.metadata,
           state: t.ctx,
         });
@@ -319,16 +318,16 @@ export async function answerError(e: unknown, request: Request, onError: ErrorMa
 
 /**
  * GET on an upload route: what it accepts, so a file picker is filled from the same list that does
- * the refusing. Short and revalidated, not immutable -- the limits are the route's own code and
+ * the refusing. Short and revalidated, not immutable -- the constraints are the route's own code and
  * change with a deploy, and a client that cached them forever refuses files the route now accepts.
  */
-export function limitsEndpoint(routeLimits: ResolvedLimits, transport: 'direct' | 'proxy' = 'direct'): (request: Request) => Promise<Response> {
-  const wireLimits: WireLimits = {};
-  if (routeLimits.allowedContentTypes) wireLimits.allowedContentTypes = routeLimits.allowedContentTypes;
-  if (routeLimits.maxBytes !== undefined) wireLimits.maxBytes = routeLimits.maxBytes;
+export function constraintsEndpoint(routeConstraints: ResolvedConstraints, transport: 'direct' | 'proxy' = 'direct'): (request: Request) => Promise<Response> {
+  const wireConstraints: WireConstraints = {};
+  if (routeConstraints.contentTypes) wireConstraints.contentTypes = routeConstraints.contentTypes;
+  if (routeConstraints.maxBytes !== undefined) wireConstraints.maxBytes = routeConstraints.maxBytes;
   // transport is what lets one hook serve both kinds: the browser learns from the route itself
   // whether to presign or to POST the bytes, instead of the page having to say which it is.
-  const body = JSON.stringify({ limits: wireLimits, transport } satisfies WireLimitsResponse);
+  const body = JSON.stringify({ constraints: wireConstraints, transport } satisfies WireConstraintsResponse);
   const etag = `"${hash(body)}"`;
   return async (request: Request): Promise<Response> => {
     const headers = { 'content-type': 'application/json', 'cache-control': `public, max-age=${LIMITS_MAX_AGE}`, etag };
@@ -353,23 +352,23 @@ export async function validateInput(schema: StandardSchema<any, any> | undefined
   return result.value;
 }
 
-export interface ResolvedLimits {
-  allowedContentTypes: string[] | undefined;
+export interface ResolvedConstraints {
+  contentTypes: string[] | undefined;
   maxBytes: number | undefined;
 }
 
-export function resolveLimits(limits: UploadLimits | undefined): ResolvedLimits {
+export function resolveConstraints(constraints: UploadConstraints | undefined): ResolvedConstraints {
   return {
-    allowedContentTypes: limits?.allowedContentTypes === undefined ? undefined : expandContentTypes(limits.allowedContentTypes),
-    maxBytes: limits?.maxBytes === undefined ? undefined : parseSize(limits.maxBytes, 'maxBytes'),
+    contentTypes: constraints?.contentTypes === undefined ? undefined : expandContentTypes(constraints.contentTypes),
+    maxBytes: constraints?.maxBytes === undefined ? undefined : parseSize(constraints.maxBytes, 'maxBytes'),
   };
 }
 
-export function enforce(limits: ResolvedLimits, file: UploadFile): void {
-  if (limits.maxBytes !== undefined && file.size > limits.maxBytes) {
-    throw new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(limits.maxBytes)} limit` });
+export function enforce(constraints: ResolvedConstraints, file: UploadFile): void {
+  if (constraints.maxBytes !== undefined && file.size > constraints.maxBytes) {
+    throw new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(constraints.maxBytes)} limit` });
   }
-  if (limits.allowedContentTypes) checkContentType(file.type, undefined, limits.allowedContentTypes);
+  if (constraints.contentTypes) checkContentType(file.type, undefined, constraints.contentTypes);
 }
 
 function readFile(raw: unknown): UploadFile {
@@ -392,8 +391,8 @@ function messageOf(e: unknown): string {
   return typeof m === 'string' && m ? m : 'request failed';
 }
 
-export function deriveRouteId(limits: { allowedContentTypes: string[] | undefined; maxBytes: number | undefined }, hasInput: boolean, route?: string): string {
-  return hash(JSON.stringify([route ?? null, limits.allowedContentTypes ?? null, limits.maxBytes ?? null, hasInput]));
+export function deriveRouteId(constraints: { contentTypes: string[] | undefined; maxBytes: number | undefined }, hasInput: boolean, route?: string): string {
+  return hash(JSON.stringify([route ?? null, constraints.contentTypes ?? null, constraints.maxBytes ?? null, hasInput]));
 }
 
 /** FNV-1a. Not a security boundary: the token's MAC is. This only separates routes and versions a body. */

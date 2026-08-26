@@ -154,7 +154,7 @@ function canonical(type: string): string {
 const TYPE_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
 
 function bad(pattern: string, why: string): never {
-  throw new BlobError('invalid_content_type_pattern', { message: `allowedContentTypes: ${why} "${pattern}"` });
+  throw new BlobError('invalid_content_type_pattern', { message: `contentTypes: ${why} "${pattern}"` });
 }
 
 function subtypesOf(prefix: string): string[] {
@@ -171,7 +171,7 @@ function subtypesOf(prefix: string): string[] {
 export function expandContentTypes(allowed: readonly string[]): string[] {
   if (allowed.length === 0) {
     throw new BlobError('invalid_content_type_pattern', {
-      message: 'allowedContentTypes: empty list; omit the option to accept anything',
+      message: 'contentTypes: empty list; omit the option to accept anything',
     });
   }
   const out: string[] = [];

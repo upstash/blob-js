@@ -31,7 +31,7 @@ afterAll(async () => {
 // `context` sits above the callbacks: the ordering rule in handler.ts.
 const chat = uploadHandler({
   bucket: pub,
-  limits: { allowedContentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: '20mb' },
+  constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: '20mb' },
   context: (request) => {
     const id = request.headers.get('authorization')?.slice(7);
     if (!id) throw new BlobError('unauthorized');
@@ -52,7 +52,7 @@ const chat = uploadHandler({
 let begins = 0;
 const large = uploadHandler({
   bucket: priv,
-  limits: { maxBytes: '5gb' },
+  constraints: { maxBytes: '5gb' },
   onBeforeUpload: ({ file }) => {
     begins++;
     return { path: p(`large/${crypto.randomUUID()}-${file.name}`) };
@@ -71,7 +71,7 @@ const avatarRoute = uploadRoute()({
 const uploads = uploadHandler({
   bucket: pub,
   endpoint: '/api/uploads',
-  limits: { allowedContentTypes: ['image/png'], maxBytes: '5mb' },
+  constraints: { contentTypes: ['image/png'], maxBytes: '5mb' },
   routes: { avatar: avatarRoute },
 });
 

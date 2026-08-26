@@ -45,17 +45,17 @@ interface RouteCall {
 let calls: RouteCall[] = [];
 let restore: (() => void)[] = [];
 let routeId = 0;
-// The limits GET is cached per route for a minute, so every test gets its own route.
+// The constraints GET is cached per route for a minute, so every test gets its own route.
 let route = '';
 
 function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
 }
 
-const LIMITS = { allowedContentTypes: ['image/png'], maxBytes: 1000 };
+const CONSTRAINTS = { contentTypes: ['image/png'], maxBytes: 1000 };
 
 const END_BODY = {
-  blob: { path: 'p', url: 'https://h/p', versionedUrl: 'https://h/p?v=x', size: 3, etag: '"x"', uploadedAt: new Date().toISOString() },
+  blob: { path: 'p', url: 'https://h/p', versionedUrl: 'https://h/p?v=x', size: 3, contentType: 'image/png', etag: '"x"', uploadedAt: new Date().toISOString() },
   data: { rowId: '1' },
 };
 
@@ -70,13 +70,13 @@ function handlers() {
   return {
     GET: async (request: Request) => {
       calls.push({ url: route, method: 'GET', body: undefined, auth: request.headers.get('authorization') });
-      return jsonResponse({ limits: LIMITS });
+      return jsonResponse({ constraints: CONSTRAINTS });
     },
     POST: async (request: Request) => {
       const body = (await request.json()) as any;
       calls.push({ url: route, method: 'POST', body, auth: request.headers.get('authorization') });
       if (body?.phase === 'begin') {
-        if (!LIMITS.allowedContentTypes.includes(body.file.type)) {
+        if (!CONSTRAINTS.contentTypes.includes(body.file.type)) {
           return jsonResponse({ code: 'content_type_not_allowed', message: `${body.file.type} is not allowed`, status: 400 }, 400);
         }
         size = body.file.size;
@@ -166,22 +166,22 @@ test('accept lands from the route GET', async () => {
   expect(calls[0]).toMatchObject({ url: route, method: 'GET' });
 });
 
-test('limits land from the route GET, so a page can state the cap it enforces', async () => {
+test('constraints land from the route GET, so a page can state the cap it enforces', async () => {
   const seen: (number | undefined)[] = [];
   const hook = await render(() => {
     const result = useUpload(route);
-    seen.push(result.limits?.maxBytes);
+    seen.push(result.constraints?.maxBytes);
     return result;
   });
   // Undefined until the GET answers: nothing is guessed, so a page renders no number rather than a
   // wrong one.
   expect(seen[0]).toBeUndefined();
   await flush();
-  expect(hook.current.limits).toEqual(LIMITS);
-  expect(hook.current.limits?.maxBytes).toBe(1000);
+  expect(hook.current.constraints).toEqual(CONSTRAINTS);
+  expect(hook.current.constraints?.maxBytes).toBe(1000);
 });
 
-test('the cached limits expire, so a deploy that widens them reaches the picker', async () => {
+test('the cached constraints expire, so a deploy that widens them reaches the picker', async () => {
   const realNow = clock.now;
   let t = 1_000_000;
   clock.now = () => t;
@@ -338,7 +338,7 @@ test('clear(id) removes one record and clear() removes all', async () => {
   expect(hook.current.upload).toBeNull();
 });
 
-test('StrictMode fetches the limits once and starts one upload per file', async () => {
+test('StrictMode fetches the constraints once and starts one upload per file', async () => {
   const hook = await render(() => useUpload(route), true);
   await flush(2);
   expect(calls.filter((c) => c.method === 'GET')).toHaveLength(1);
@@ -635,7 +635,7 @@ test('proxy headers are re-read per request', async () => {
     hook.current.start({ file: png('b.png') });
   });
   const second = await nextXhr(1);
-  // Not absolute numbers: the hook also fetches the route's limits, which reads the headers too.
+  // Not absolute numbers: the hook also fetches the route's constraints, which reads the headers too.
   // What matters is that the second request did not reuse the first one's token.
   expect(first.headers['authorization']).toMatch(/^Bearer \d+$/);
   expect(second.headers['authorization']).not.toBe(first.headers['authorization']);
@@ -890,7 +890,7 @@ function mountHandler(transport: 'direct' | 'proxy', name: string, gate?: Promis
           calls.push({ url, method: 'GET', body: undefined, auth: request.headers.get('authorization') });
           // A route that has not answered yet is the whole point of the deferred tests below.
           if (gate) await gate;
-          return jsonResponse({ limits: LIMITS, transport });
+          return jsonResponse({ constraints: CONSTRAINTS, transport });
         },
         POST: async (request: Request) => {
           const body = (await request.json()) as any;
@@ -905,7 +905,7 @@ function mountHandler(transport: 'direct' | 'proxy', name: string, gate?: Promis
   return { endpoint, url };
 }
 
-test('a route name resolves against the endpoint, for the limits and for the upload', async () => {
+test('a route name resolves against the endpoint, for the constraints and for the upload', async () => {
   const { endpoint, url } = mountHandler('direct', 'doc');
   const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint });
   const hook = await render(() => bound('doc'));
@@ -990,7 +990,7 @@ test('a file picked before the route has answered waits for it, then goes the ri
   expect(hook.current.upload!.status).toBe('done');
 });
 
-test('a file the limits refuse is refused even when it was picked before they landed', async () => {
+test('a file the constraints refuse is refused even when it was picked before they landed', async () => {
   let answer!: () => void;
   const gate = new Promise<void>((resolve) => (answer = resolve));
   const { endpoint } = mountHandler('proxy', 'avatar', gate);
@@ -1053,7 +1053,7 @@ test('a route that cannot be reached fails the upload with why, and is asked aga
       [url]: {
         GET: async () => {
           if (!reachable) throw new TypeError('fetch failed');
-          return jsonResponse({ limits: LIMITS, transport: 'proxy' });
+          return jsonResponse({ constraints: CONSTRAINTS, transport: 'proxy' });
         },
         POST: async () => jsonResponse(END_BODY),
       },

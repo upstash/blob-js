@@ -1,5 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
-import type { BlobObject, UploadSnapshot, UploadTask, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
+import type { CompletedBlob, UploadSnapshot, UploadTask, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
 import { abortError, clock } from './clock.ts';
 import { acquire } from './pool.ts';
 import { backoffMs, classify, MAX_ATTEMPTS, MAX_NETWORK_ATTEMPTS, NO_BYTES_NETWORK_ATTEMPTS, STALL_TIMEOUT_MS } from './retry.ts';
@@ -58,7 +58,7 @@ class Task implements InternalTask {
 
   private status: Status = 'queued';
   private error: BlobError | undefined;
-  private blob: (BlobObject & { data: unknown }) | undefined;
+  private blob: (CompletedBlob & { data: unknown }) | undefined;
   private token: string | undefined;
   private storeKey: string;
   private partSize = 0;
@@ -75,9 +75,9 @@ class Task implements InternalTask {
   private listeners = new Set<() => void>();
   private cached: UploadSnapshot | undefined;
   private frameQueued = false;
-  private resolveDone!: (b: BlobObject & { data: unknown }) => void;
+  private resolveDone!: (b: CompletedBlob & { data: unknown }) => void;
   private rejectDone!: (e: unknown) => void;
-  private donePromise!: Promise<BlobObject & { data: unknown }>;
+  private donePromise!: Promise<CompletedBlob & { data: unknown }>;
 
   constructor(
     readonly file: File,
@@ -88,7 +88,7 @@ class Task implements InternalTask {
   }
 
   /** A getter, so retry() can hand out a promise the failed attempt has not already rejected. */
-  get done(): Promise<BlobObject & { data: unknown }> {
+  get done(): Promise<CompletedBlob & { data: unknown }> {
     return this.donePromise;
   }
 
@@ -244,7 +244,7 @@ class Task implements InternalTask {
     );
   }
 
-  private async run(): Promise<BlobObject & { data: unknown }> {
+  private async run(): Promise<CompletedBlob & { data: unknown }> {
     const signal = this.cancelController.signal;
     if (this.token) {
       // A retry of an upload that already began: its presigns are stale and its parts are the

@@ -2,8 +2,8 @@ import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
 import type { HeadersProvider } from '../browser/task.ts';
 import type { BlobError } from '../shared/errors.ts';
-import type { ProxyUploadResponse, UploadRouteTypes, WireLimits } from '../shared/types.ts';
-import { deny, useLimits } from './limits.ts';
+import type { ProxyUploadResponse, UploadRouteTypes, WireConstraints } from '../shared/types.ts';
+import { deny, useConstraints } from './constraints.ts';
 import { ProxyTask } from './proxy-task.ts';
 import { resolveRouteUrl } from './routes.ts';
 import { useTaskList, type ListEntry } from './task-list.ts';
@@ -64,13 +64,13 @@ export interface UseUploadProxyResult<R> {
   /** @deprecated renamed to `upload`; the same record for one minor. */
   task: ProxyRecord<ProxyResponse<R>> | null;
   clear(id?: string): void;
-  /** The route's allowedContentTypes, joined. Empty until GET lands, or when it serves none. */
+  /** The route's contentTypes, joined. Empty until GET lands, or when it serves none. */
   accept: string;
   /**
    * What the route says it accepts, its own numbers. Undefined until its GET answers, and for a
-   * route this SDK did not write, which serves no limits document at all.
+   * route this SDK did not write, which serves no constraints document at all.
    */
-  limits: WireLimits | undefined;
+  constraints: WireConstraints | undefined;
 }
 
 interface Payload {
@@ -107,7 +107,7 @@ function proxyEntry<TResponse>(task: ProxyTask<TResponse>): ListEntry<ProxyRecor
   };
 }
 
-// A file the route's own limits already refuse is never sent, so the bytes never leave the browser.
+// A file the route's own constraints already refuse is never sent, so the bytes never leave the browser.
 function refusedEntry<TResponse>(file: File, error: BlobError): ListEntry<ProxyRecord<TResponse>> {
   const id = `q${++staticCounter}-${clock.now().toString(36)}`;
   const record: ProxyRecord<TResponse> = {
@@ -144,9 +144,9 @@ export function useUploadProxy(routeOrOptions: any, maybeOptions?: any): any {
   const handlers = useRef(options);
   handlers.current = options;
 
-  // Empty unless the route is a handleProxyUpload one, which serves its limits from GET like every
+  // Empty unless the route is a handleProxyUpload one, which serves its constraints from GET like every
   // other upload route: the picker is filled from the same list that does the refusing.
-  const { limitsRef, limits, accept } = useLimits(route, options.headers);
+  const { constraintsRef, constraints, accept } = useConstraints(route, options.headers);
 
   const { uploads, task, add, clear } = useTaskList<ProxyRecord<TResponse>>({
     concurrency: options.concurrency,
@@ -162,12 +162,12 @@ export function useUploadProxy(routeOrOptions: any, maybeOptions?: any): any {
     (args: ProxyStartArgs) => {
       const payload = payloadOf(args, fieldRef.current);
       if (!payload) return null;
-      const refusal = payload.file ? deny(payload.file, limitsRef.current) : undefined;
+      const refusal = payload.file ? deny(payload.file, constraintsRef.current) : undefined;
       const entry = refusal ? refusedEntry<TResponse>(payload.file!, refusal) : proxyEntry(new ProxyTask<TResponse>({ route, headers: headersRef.current, ...payload }));
       return add([entry])[0] ?? null;
     },
-    [add, route, limitsRef],
+    [add, route, constraintsRef],
   );
 
-  return { start, uploads, upload: task, task, clear, accept, limits };
+  return { start, uploads, upload: task, task, clear, accept, constraints };
 }

@@ -2,8 +2,8 @@ import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
 import { createTask, type HeadersProvider, type InternalTask } from '../browser/task.ts';
 import { BlobError } from '../shared/errors.ts';
-import type { BlobObject, ProxyUploadResponse, UploadRoute, UploadRouteTypes, WireLimits } from '../shared/types.ts';
-import { deny, useLimits } from './limits.ts';
+import type { CompletedBlob, ProxyUploadResponse, UploadRoute, UploadRouteTypes, WireConstraints } from '../shared/types.ts';
+import { deny, useConstraints } from './constraints.ts';
 import { ProxyTask } from './proxy-task.ts';
 import { resolveRouteUrl, type AnyUploadRoute, type IsProxyRoute } from './routes.ts';
 import { useTaskList, type ListEntry } from './task-list.ts';
@@ -34,14 +34,14 @@ export interface UploadRecordBase {
   stalled: boolean;
 }
 
-export type DoneUpload<TData> = UploadRecordBase & { status: 'done'; blob: BlobObject & { data: TData } };
-export type FailedUpload = UploadRecordBase & { status: 'error'; error: BlobError };
+export type DoneUpload<TData> = UploadRecordBase & { status: 'done'; blob: CompletedBlob & { data: TData } };
+export type FailedUpload = UploadRecordBase & { status: 'error'; error: BlobError; blob?: undefined };
 
 export type UploadRecord<TData = unknown> =
   /** 'finishing': every byte is sent and the route is completing the upload. percent sits at 99. */
-  | (UploadRecordBase & { status: 'queued' | 'uploading' | 'finishing' | 'paused' })
+  | (UploadRecordBase & { status: 'queued' | 'uploading' | 'finishing' | 'paused'; blob?: undefined })
   | DoneUpload<TData>
-  | (UploadRecordBase & { status: 'canceled' })
+  | (UploadRecordBase & { status: 'canceled'; blob?: undefined })
   | FailedUpload;
 
 /**
@@ -58,14 +58,14 @@ export interface ProxyUploadRecordBase {
   percent: number;
 }
 
-export type DoneProxyRecord<TData> = ProxyUploadRecordBase & { status: 'done'; blob: BlobObject & { data: TData } };
+export type DoneProxyRecord<TData> = ProxyUploadRecordBase & { status: 'done'; blob: CompletedBlob & { data: TData } };
 
 export type ProxyUploadRecord<TData = unknown> =
   /** 'finishing': the bytes are sent and the route has not answered. */
-  | (ProxyUploadRecordBase & { status: 'queued' | 'uploading' | 'finishing' })
+  | (ProxyUploadRecordBase & { status: 'queued' | 'uploading' | 'finishing'; blob?: undefined })
   | DoneProxyRecord<TData>
-  | (ProxyUploadRecordBase & { status: 'canceled' })
-  | (ProxyUploadRecordBase & { status: 'error'; error: BlobError });
+  | (ProxyUploadRecordBase & { status: 'canceled'; blob?: undefined })
+  | (ProxyUploadRecordBase & { status: 'error'; error: BlobError; blob?: undefined });
 
 /** The record for a route, chosen by the route's transport. One conditional, never a union. */
 export type RecordOf<R> = IsProxyRoute<R> extends true ? ProxyUploadRecord<RouteData<R>> : UploadRecord<RouteData<R>>;
@@ -110,14 +110,14 @@ export interface UseUploadResult<R> {
   /** The newest record. */
   upload: RecordOf<R> | null;
   clear(id?: string): void;
-  /** The route's allowedContentTypes, joined. Empty until GET lands, or when it serves none. */
+  /** The route's contentTypes, joined. Empty until GET lands, or when it serves none. */
   accept: string;
   /**
    * What the route says it accepts, its own numbers: `maxBytes` in bytes and the exact content type
    * list, so a page states the cap instead of repeating a constant that can drift from it. Undefined
-   * until the route's GET answers, and when it serves no limits at all.
+   * until the route's GET answers, and when it serves no constraints at all.
    */
-  limits: WireLimits | undefined;
+  constraints: WireConstraints | undefined;
 }
 
 interface AnyStartArgs {
@@ -150,10 +150,10 @@ function taskEntry(task: InternalTask): ListEntry<AnyRecord> {
  * it. uploadedAt crossed as JSON and is parsed back here, which is only safe because this runs for
  * SDK routes alone: an app's own response shape reaches useUploadProxy untouched, as it always did.
  */
-function envelopeBlob(response: unknown): BlobObject & { data: unknown } {
+function envelopeBlob(response: unknown): CompletedBlob & { data: unknown } {
   const envelope = response as ProxyUploadResponse<unknown> | undefined;
-  const blob = envelope?.blob as (Omit<BlobObject, 'uploadedAt'> & { uploadedAt: string }) | undefined;
-  if (!blob || typeof blob !== 'object') return { ...(response as object) } as BlobObject & { data: unknown };
+  const blob = envelope?.blob as (Omit<CompletedBlob, 'uploadedAt'> & { uploadedAt: string }) | undefined;
+  if (!blob || typeof blob !== 'object') return { ...(response as object) } as CompletedBlob & { data: unknown };
   return { ...blob, uploadedAt: new Date(blob.uploadedAt), data: envelope!.data };
 }
 
@@ -174,7 +174,7 @@ function proxyEntry(task: ProxyTask<unknown>): ListEntry<AnyRecord> {
   };
 }
 
-// A file the route's own limits already refuse never becomes a Task, so it never calls begin.
+// A file the route's own constraints already refuse never becomes a Task, so it never calls begin.
 function refusedEntry(file: File | null, error: BlobError): ListEntry<AnyRecord> {
   const id = `r${++staticCounter}-${clock.now().toString(36)}`;
   const no = () => false;
@@ -203,7 +203,7 @@ function refusedEntry(file: File | null, error: BlobError): ListEntry<AnyRecord>
 }
 
 /**
- * The transport is the route's to declare and it arrives with the limits, so a file picked before
+ * The transport is the route's to declare and it arrives with the constraints, so a file picked before
  * that GET lands waits here instead of being sent with the wrong one. Warm -- which is every upload
  * after the first render -- nothing is deferred and this is never built.
  */
@@ -293,7 +293,7 @@ function proxyPayload(file: File | null, body: File | Blob | FormData | null | u
 /**
  * One hook for both transports. A direct route presigns and the bytes go straight to storage; a
  * proxy route takes one POST through your own function. The route says which it is -- the same GET
- * that serves its limits -- so a page names a route and never an upload strategy.
+ * that serves its constraints -- so a page names a route and never an upload strategy.
  */
 export function useUpload<R extends AnyUploadRoute = UploadRoute<undefined, unknown>>(route: RoutePath<R>, options?: UseUploadOptions<R>): UseUploadResult<R>;
 export function useUpload(route: string, maybeOptions?: any): any {
@@ -307,7 +307,7 @@ export function useUpload(route: string, maybeOptions?: any): any {
   const handlers = useRef(options);
   handlers.current = options;
 
-  const { limitsRef, transportRef, limits, accept, load } = useLimits(url, options.headers);
+  const { constraintsRef, transportRef, constraints, accept, load } = useConstraints(url, options.headers);
 
   const { uploads, task: newest, add, clear } = useTaskList<AnyRecord>({
     concurrency: options.concurrency,
@@ -324,7 +324,7 @@ export function useUpload(route: string, maybeOptions?: any): any {
       const input = args.input;
 
       const build = (transport: 'direct' | 'proxy', file: File | null, body: File | Blob | FormData | null | undefined): ListEntry<AnyRecord> => {
-        const refusal = file ? deny(file, limitsRef.current) : undefined;
+        const refusal = file ? deny(file, constraintsRef.current) : undefined;
         if (refusal) return refusedEntry(file, refusal);
         if (transport === 'proxy') {
           const payload = proxyPayload(file, body, input, fieldRef.current);
@@ -357,8 +357,8 @@ export function useUpload(route: string, maybeOptions?: any): any {
       if (!file) return null;
       return add([make(file)])[0] ?? null;
     },
-    [add, url, limitsRef, transportRef, load],
+    [add, url, constraintsRef, transportRef, load],
   );
 
-  return { start, uploads, upload: newest, clear, accept, limits };
+  return { start, uploads, upload: newest, clear, accept, constraints };
 }

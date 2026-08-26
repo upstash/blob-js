@@ -1,6 +1,6 @@
 import type { BlobError } from './errors.ts';
 
-/** What every write verb returns, what list() pages carry, and blob in a snapshot's 'done' member. */
+/** The object fields available from a bucket listing and shared by every completed write. */
 export interface BlobObject {
   path: string;
   /** Undefined on a private bucket: no public host serves it, so use signedRead(). */
@@ -10,6 +10,11 @@ export interface BlobObject {
   size: number;
   etag: string;
   uploadedAt: Date;
+}
+
+/** A completed write, whose stored content type is known even though a bucket listing omits it. */
+export interface CompletedBlob extends BlobObject {
+  contentType: string;
 }
 
 /* ----------------------------------------------------------- upload wire -- */
@@ -28,8 +33,8 @@ export interface UploadFile {
 /** The name this crosses the wire under, kept for the wire types below. */
 export type WireFile = UploadFile;
 
-export interface WireLimits {
-  allowedContentTypes?: readonly string[];
+export interface WireConstraints {
+  contentTypes?: readonly string[];
   maxBytes?: number;
 }
 
@@ -67,7 +72,7 @@ export interface WirePartsResponse {
 }
 
 export interface WireEndResponse<TData = unknown> {
-  blob: Omit<BlobObject, 'uploadedAt'> & { uploadedAt: string };
+  blob: Omit<CompletedBlob, 'uploadedAt'> & { uploadedAt: string };
   data: TData;
 }
 
@@ -93,7 +98,7 @@ export type UploadSnapshot = {
    * naming it is the difference between a bar that is working and one that looks stuck.
    */
   | { status: 'queued' | 'uploading' | 'finishing' | 'paused' }
-  | { status: 'done'; blob: BlobObject & { data: unknown } }
+  | { status: 'done'; blob: CompletedBlob & { data: unknown } }
   | { status: 'canceled' }
   | { status: 'error'; error: BlobError }
 );
@@ -103,7 +108,7 @@ export interface UploadTask {
   readonly file: File;
   snapshot(): UploadSnapshot;
   subscribe(onChange: () => void): () => void;
-  readonly done: Promise<BlobObject & { data: unknown }>;
+  readonly done: Promise<CompletedBlob & { data: unknown }>;
   pause(): boolean;
   resume(): boolean;
   cancel(): boolean;
@@ -134,14 +139,14 @@ export type UploadRoute<TInput = unknown, TData = unknown, TRoute extends string
 };
 
 /** What GET on an upload route answers: what it accepts, and which transport it speaks. */
-export interface WireLimitsResponse {
-  limits: WireLimits;
+export interface WireConstraintsResponse {
+  constraints: WireConstraints;
   /** 'proxy': the bytes go through the route as one POST. 'direct': presigned, straight to storage. */
   transport?: 'direct' | 'proxy';
 }
 
 /** What a handleProxyUpload route answers with. JSON, so uploadedAt is the string it crossed as. */
 export interface ProxyUploadResponse<TData = unknown> {
-  blob: Omit<BlobObject, 'uploadedAt'> & { uploadedAt: string };
+  blob: Omit<CompletedBlob, 'uploadedAt'> & { uploadedAt: string };
   data: TData;
 }

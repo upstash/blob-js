@@ -94,11 +94,11 @@ const began = async (handler: { POST: (r: Request) => Promise<Response> }, route
 function handler(extra: Record<string, unknown> = {}) {
   return uploadHandler({
     bucket: bucket(),
-    limits: { maxBytes: '20mb', allowedContentTypes: ['image/png'] },
+    constraints: { maxBytes: '20mb', contentTypes: ['image/png'] },
     routes: {
       attachment: { onBeforeUpload: () => ({ path: 'attachment/1.png' }) },
-      large: { limits: { maxBytes: '2gb', allowedContentTypes: null }, onBeforeUpload: () => ({ path: 'large/1.bin' }) },
-      avatar: { proxy: true, limits: { maxBytes: '2mb' }, onBeforeUpload: () => ({ path: 'avatar/demo' }) },
+      large: { constraints: { maxBytes: '2gb', contentTypes: null }, onBeforeUpload: () => ({ path: 'large/1.bin' }) },
+      avatar: { proxy: true, constraints: { maxBytes: '2mb' }, onBeforeUpload: () => ({ path: 'avatar/demo' }) },
     },
     ...extra,
   });
@@ -109,7 +109,7 @@ describe('dispatch', () => {
     const uploads = handler();
     const res = await uploads.GET(new Request(url('large')));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ limits: { maxBytes: 2_000_000_000 }, transport: 'direct' });
+    expect(await res.json()).toEqual({ constraints: { maxBytes: 2_000_000_000 }, transport: 'direct' });
 
     const begin = await post(uploads, 'attachment', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } });
     expect(begin.status).toBe(200);
@@ -144,10 +144,10 @@ describe('dispatch', () => {
   });
 
   test('with no routes the handler is the route, and no query names it', async () => {
-    const uploads = uploadHandler({ bucket: bucket(), limits: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'only/1.png' }) });
+    const uploads = uploadHandler({ bucket: bucket(), constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'only/1.png' }) });
     const begin = await began(uploads, undefined, { name: 'a.png', type: 'image/png', size: 10 });
     expect(begin.path).toBe('only/1.png');
-    expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ limits: { maxBytes: 1_000_000 }, transport: 'direct' });
+    expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ constraints: { maxBytes: 1_000_000 }, transport: 'direct' });
     // A name on the query is a client bound to some other handler: it does not silently get this
     // route, for GET or for POST.
     for (const name of ['anything', '__proto__', 'toString']) {
@@ -200,16 +200,16 @@ describe('dispatch', () => {
 });
 
 describe('defaults', () => {
-  test('a route replaces limits per key, and null clears one', async () => {
+  test('a route replaces constraints per key, and null clears one', async () => {
     const uploads = handler();
-    expect(await (await uploads.GET(new Request(url('attachment')))).json()).toEqual({ limits: { allowedContentTypes: ['image/png'], maxBytes: 20_000_000 }, transport: 'direct' });
-    // maxBytes replaced, allowedContentTypes cleared by null.
-    expect(await (await uploads.GET(new Request(url('large')))).json()).toEqual({ limits: { maxBytes: 2_000_000_000 }, transport: 'direct' });
+    expect(await (await uploads.GET(new Request(url('attachment')))).json()).toEqual({ constraints: { contentTypes: ['image/png'], maxBytes: 20_000_000 }, transport: 'direct' });
+    // maxBytes replaced, contentTypes cleared by null.
+    expect(await (await uploads.GET(new Request(url('large')))).json()).toEqual({ constraints: { maxBytes: 2_000_000_000 }, transport: 'direct' });
     // maxBytes replaced, the handler's type list inherited.
-    expect(await (await uploads.GET(new Request(url('avatar')))).json()).toEqual({ limits: { allowedContentTypes: ['image/png'], maxBytes: 2_000_000 }, transport: 'proxy' });
+    expect(await (await uploads.GET(new Request(url('avatar')))).json()).toEqual({ constraints: { contentTypes: ['image/png'], maxBytes: 2_000_000 }, transport: 'proxy' });
   });
 
-  test('the inherited limits still refuse', async () => {
+  test('the inherited constraints still refuse', async () => {
     const uploads = handler();
     const tooBig = await post(uploads, 'attachment', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 30_000_000 } });
     expect(tooBig.status).toBe(413);
@@ -299,19 +299,19 @@ describe('defaults', () => {
   test('the key order of routes changes nothing', async () => {
     const first = uploadHandler({
       bucket: bucket(),
-      limits: { maxBytes: '20mb' },
+      constraints: { maxBytes: '20mb' },
       onBeforeUpload: ({ route }) => ({ path: `${route}/1` }),
-      routes: { alpha: {}, omega: { limits: { maxBytes: '1kb' } } },
+      routes: { alpha: {}, omega: { constraints: { maxBytes: '1kb' } } },
     });
     const second = uploadHandler({
       bucket: bucket(),
-      limits: { maxBytes: '20mb' },
+      constraints: { maxBytes: '20mb' },
       onBeforeUpload: ({ route }) => ({ path: `${route}/1` }),
-      routes: { omega: { limits: { maxBytes: '1kb' } }, alpha: {} },
+      routes: { omega: { constraints: { maxBytes: '1kb' } }, alpha: {} },
     });
     for (const uploads of [first, second]) {
-      expect(await (await uploads.GET(new Request(url('alpha')))).json()).toEqual({ limits: { maxBytes: 20_000_000 }, transport: 'direct' });
-      expect(await (await uploads.GET(new Request(url('omega')))).json()).toEqual({ limits: { maxBytes: 1_000 }, transport: 'direct' });
+      expect(await (await uploads.GET(new Request(url('alpha')))).json()).toEqual({ constraints: { maxBytes: 20_000_000 }, transport: 'direct' });
+      expect(await (await uploads.GET(new Request(url('omega')))).json()).toEqual({ constraints: { maxBytes: 1_000 }, transport: 'direct' });
     }
   });
 });
@@ -357,7 +357,7 @@ describe('context', () => {
     expect(end.status).toBe(200);
     expect((await end.json()).data).toEqual({ user: 'ada' });
     expect(seen).toEqual(['before:ada', 'complete:ada:u/ada.png']);
-    // Once per request, and never for the limits GET.
+    // Once per request, and never for the constraints GET.
     expect(ran).toBe(2);
     await uploads.GET(new Request(url('attachment')));
     expect(ran).toBe(2);
@@ -395,7 +395,7 @@ describe('proxy routes', () => {
       routes: {
         avatar: {
           proxy: true,
-          limits: { maxBytes: '2mb', allowedContentTypes: ['image/png'] },
+          constraints: { maxBytes: '2mb', contentTypes: ['image/png'] },
           onBeforeUpload: ({ ctx, file }) => ({ path: `avatar/${ctx.user}/${file.name}`, overwrite: true }),
           onUploadComplete: ({ ctx, file, path, contentType }) => {
             completed.push({ user: ctx.user, name: file.name, path, contentType });
@@ -483,7 +483,7 @@ describe('proxy routes', () => {
     const uploads = uploadHandler({
       bucket: bucket(),
       proxy: true,
-      limits: { allowedContentTypes: ['image/png'] },
+      constraints: { contentTypes: ['image/png'] },
       onBeforeUpload: () => ({ path: 'avatar/demo' }),
     });
     expect(await (await uploads.GET(new Request(url()))).json()).toMatchObject({ transport: 'proxy' });

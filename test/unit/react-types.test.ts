@@ -53,9 +53,9 @@ function _withoutInput(file: File) {
     const url: string | undefined = upload.blob.url;
     void url;
   }
-  // @ts-expect-error blob exists only on the done member
-  const blob: unknown = upload?.blob;
-  void blob;
+  // Optional chaining can read a completion without first spelling the status guard.
+  const currentUrl: string | undefined = upload?.blob?.url;
+  void currentUrl;
 }
 
 function _proxy(file: File) {
