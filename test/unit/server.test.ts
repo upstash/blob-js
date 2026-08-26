@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { Bucket, BlobError, uploadHandler } from '../../src/index.ts';
+import { Bucket, BlobError, upload, uploadHandler } from '../../src/index.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { deriveRouteId } from '../../src/server/handle-upload.ts';
 import { encodeToken } from '../../src/server/token.ts';
@@ -524,22 +524,28 @@ describe('uploadHandler: the direct transport', () => {
     resetCredentialCaches();
     r2Handler = fullR2();
     let seen: unknown;
+    // The builder, because `state` and `uploadId` are a route's, not a shared default's.
     const route = uploadHandler({
       bucket: bucket(),
-      onBeforeUpload: () => ({ path: 'a.png', state: { rowId: 7 } }),
-      onUploadComplete: ({ file, route: name, state, uploadId, multipartUploadId }) => {
-        seen = { file, name, state, hasUploadId: typeof uploadId === 'string', multipartUploadId };
-        return { ok: true };
+      routes: {
+        doc: upload()({
+          onBeforeUpload: () => ({ path: 'a.png', state: { rowId: 7 } }),
+          onUploadComplete: ({ file, route: name, state, uploadId, multipartUploadId }) => {
+            seen = { file, name, state, hasUploadId: typeof uploadId === 'string', multipartUploadId };
+            return { ok: true };
+          },
+        }),
       },
     });
-    const started = await begin(route, { name: 'Holiday Pic.PNG', type: 'image/png', size: 10 });
-    const res = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
+    const named = { POST: (r: Request) => route.POST(new Request('https://app.test/api/upload?route=doc', r)) };
+    const started = await begin(named, { name: 'Holiday Pic.PNG', type: 'image/png', size: 10 });
+    const res = await post(named, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
     expect(res.status).toBe(200);
     expect((await res.json()).data).toEqual({ ok: true });
     expect(seen).toEqual({
       // The name is the one thing the stored object does not carry: it rides the completion token.
       file: { name: 'Holiday Pic.PNG', type: 'image/png', size: 10 },
-      name: '',
+      name: 'doc',
       state: { rowId: 7 },
       hasUploadId: true,
       multipartUploadId: 'mp-1',
@@ -602,16 +608,16 @@ describe('uploadHandler: the direct transport', () => {
     const route = uploadHandler({
       bucket: bucket(),
       limits: { maxBytes: '5gb' },
-      onBeforeUpload: () => ({ path: 'big.bin', state: { rowId: 7 } }),
-      onError: ({ error, path, state }) => {
-        seen.push({ code: (error as BlobError).code, path, state });
+      onBeforeUpload: () => ({ path: 'big.bin', metadata: { rowId: '7' } }),
+      onError: ({ error, path, metadata }) => {
+        seen.push({ code: (error as BlobError).code, path, metadata });
       },
     });
     r2Handler = () => new Response('<Error><Code>InternalError</Code></Error>', { status: 500 });
     const res = await post(route, { phase: 'begin', file: { name: 'big.bin', type: '', size: 20_000_000 } });
     expect(res.status).toBe(502);
     // The create failed after onBeforeUpload ran, so whatever it reserved is reachable here.
-    expect(seen).toEqual([{ code: 'request_failed', path: 'big.bin', state: { rowId: 7 } }]);
+    expect(seen).toEqual([{ code: 'request_failed', path: 'big.bin', metadata: { rowId: '7' } }]);
   });
 
   test('bytes refused at the end are deleted, not left served', async () => {
