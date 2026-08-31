@@ -49,8 +49,9 @@ await bucket.signedReadUrl('u/7/9f3c2a', { downloadAs: 'report.pdf' });
 ```
 
 The link is signed with the bucket's temporary credential and cannot outlive it. That cap moves:
-the credential service serves one credential until it is nearly out, so `signedReadCap()` is
+the credential service serves one credential until it is nearly out, so the longest signable link is
 anywhere from ~30 s to ~10 min (measured 2026-08-25: a fresh mint came back with 199 s on it).
+Nothing has to be asked in advance -- `expiresAt` is the answer, per link.
 
 - No `expiresIn` asks for the shorter of 5 minutes and the cap.
 - If `expiresIn` is longer than the credential can currently sign, the SDK transparently uses the

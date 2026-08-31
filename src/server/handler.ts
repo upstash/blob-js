@@ -51,6 +51,7 @@ interface BeforeArgs<TCtx, TInput> {
 
 interface BeforeResult<TState> {
   path: string;
+  /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
   metadata?: Record<string, string>;
   /** May narrow the route's constraints per user, never widen them. */

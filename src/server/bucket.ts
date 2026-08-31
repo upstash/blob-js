@@ -18,7 +18,10 @@ export interface BucketOptions {
    * wins over this.
    */
   private?: boolean;
-  /** Default cache policy for every write; per-call `cache` overrides it. */
+  /**
+   * The `Cache-Control` written on every object this bucket stores. A per-call `cache` overrides it.
+   * @see CacheOption
+   */
   cache?: CacheOption;
   /**
    * Send the SDK version, runtime and platform as headers on credential requests to Upstash.
@@ -32,6 +35,7 @@ export interface PutOptions {
   contentType?: string;
   contentTypes?: readonly string[];
   maxBytes?: Size;
+  /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
   metadata?: Record<string, string>;
   /**
@@ -111,6 +115,7 @@ export interface S3Config {
 export type DeleteTarget = string | string[] | { prefix: string; all?: boolean };
 
 export interface UpdateOptions {
+  /** The `Cache-Control` the rewritten object is stored with. @see CacheOption */
   cache?: CacheOption;
   metadata?: Record<string, string>;
 }
@@ -368,11 +373,6 @@ export class Bucket {
   /** signedRead(), url only. */
   async signedReadUrl(path: string, options: SignedReadUrlOptions = {}): Promise<string> {
     return (await this.signedRead(path, options)).url;
-  }
-
-  /** The longest `expiresIn` signedRead() will sign right now, in seconds. */
-  signedReadCap(): Promise<number> {
-    return this.r2.readCap();
   }
 
   /* ---------------------------------------------------------------- write */

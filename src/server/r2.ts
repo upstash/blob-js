@@ -193,7 +193,8 @@ export class R2 {
     return { url: signed, expiresAt: new Date(Math.min(Date.now() + seconds * 1000, signer.expiresAt * 1000)) };
   }
 
-  /** The cap a presigned read can ask for right now, in seconds. */
+  /** The cap a presigned read can ask for right now, in seconds. Not public API: `expiresAt` on
+   * a signed read is the answer callers need, after the fact. Kept for the tests that assert the cap. */
   async readCap(): Promise<number> {
     return capOf(await this.creds.get());
   }

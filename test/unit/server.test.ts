@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { Bucket, BlobError, upload, uploadHandler } from '../../src/index.ts';
+import { r2Of } from '../../src/server/bucket.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { deriveRouteId } from '../../src/server/handle-upload.ts';
 import { encodeToken } from '../../src/server/token.ts';
@@ -166,7 +167,7 @@ describe('signedRead', () => {
     expect(read.url).toContain('X-Amz-Expires=120');
     expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + 110_000);
     expect(read.expiresAt.getTime()).toBeLessThan(Date.now() + 130_000);
-    const cap = await b.signedReadCap();
+    const cap = await r2Of(b).readCap();
     expect(cap).toBeGreaterThanOrEqual(595);
     expect(cap).toBeLessThanOrEqual(600);
     expect(mints).toBe(1);

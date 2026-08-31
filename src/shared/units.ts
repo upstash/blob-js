@@ -81,6 +81,20 @@ export function parseDuration(input: Duration, what = 'duration'): number {
  * header, written out: `s-maxage`, `stale-while-revalidate`, `no-transform` and whatever the spec
  * adds next are all sayable without this type growing a camelCase word for each of them.
  */
+/**
+ * The `Cache-Control` an object is stored with. It is written once, at upload, and served on every
+ * read by the CDN and the browser: changing it later means writing the object again.
+ *
+ * - `'immutable'` -- `public, max-age=31536000, immutable`, for a versioned path that never changes
+ * - `'revalidate'` -- `public, max-age=0, must-revalidate`, for a stable path that gets overwritten
+ * - `'no-store'` -- `no-store`
+ * - a duration (`'15m'`, `3600`) -- `public, max-age=<seconds>`
+ * - unset -- `public, max-age=3600`
+ * - anything containing `=` or `,` is a header, stored exactly as written
+ *
+ * `private` replaces `public` on a private bucket, since a shared cache must not keep a copy of an
+ * object only a signed request may read.
+ */
 export type CacheOption = Duration | 'immutable' | 'revalidate' | 'no-store';
 
 // A directive separator is what tells the two apart: a header always has one, a duration never does.

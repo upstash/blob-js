@@ -43,6 +43,7 @@ export type ErrorMapper = (error: unknown, request: Request, details: ErrorDetai
 /** What the route decided about one file. `ctx` is added by the handler, not by this module. */
 interface Decided {
   path: string;
+  /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
   metadata?: Record<string, string>;
   constraints?: UploadConstraints;

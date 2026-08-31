@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { BlobError } from '../../src/index.ts';
+import { r2Of } from '../../src/server/bucket.ts';
 import { bytes, cleanup, p, PNG, priv, pub, root, sweep } from './setup.ts';
 
 beforeAll(async () => {
@@ -124,7 +125,7 @@ describe('read', () => {
     await priv.put(p('secret.txt'), 'shh', { contentType: 'text/plain' });
     // Measured 2026-08-25: the agent serves one credential until it is nearly out, so the cap is
     // anywhere from ~30 s to ~10 min. Ask for something it can cover.
-    const cap = await priv.signedReadCap();
+    const cap = await r2Of(priv).readCap();
     expect(cap).toBeGreaterThanOrEqual(30);
     const asked = Math.min(120, cap);
     const read = await priv.signedRead(p('secret.txt'), { expiresIn: asked, downloadAs: 'Report Q3.txt' });
@@ -144,7 +145,7 @@ describe('read', () => {
 
   test('an expiresIn over the credential cap is shortened transparently', async () => {
     await priv.put(p('capped.txt'), 'shh', { contentType: 'text/plain' });
-    const cap = await priv.signedReadCap();
+    const cap = await r2Of(priv).readCap();
     const capped = await priv.signedRead(p('capped.txt'), { expiresIn: '1h' });
     expect(Number(new URL(capped.url).searchParams.get('X-Amz-Expires'))).toBeLessThanOrEqual(cap + 2);
     expect((await fetch(capped.url)).status).toBe(200);
