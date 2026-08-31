@@ -50,8 +50,8 @@ afterAll(() => {
 });
 
 /**
- * Every direct upload is multipart now, so the default script answers a CreateMultipartUpload, a
- * CompleteMultipartUpload and the HEAD phase 'end' reads the object back with.
+ * The default script answers a CreateMultipartUpload and a CompleteMultipartUpload for the routes
+ * that are over the threshold or pin multipart, and the HEAD phase 'end' reads the object back with.
  */
 // A single PUT writes a marker the SDK signed into the url, and phase 'end' reads it back to know
 // the object is this upload's. The fake storage has not seen the PUT, so began() remembers what the

@@ -59,10 +59,16 @@ const END_BODY = {
   data: { rowId: '1' },
 };
 
-// Every direct upload is multipart, one part when the file fits one: begin hands back a part list
-// and phase 'end' completes it with the etags the PUTs answered. There is no single-PUT path left.
+// A route answers with the plan it chose for this file: under its multipart threshold that is one
+// presigned object PUT carrying the headers its signature pins, over it a list of real parts. Both
+// are one part here -- a 3-byte png -- so the two shapes differ only in `multipart`, which is what
+// decides whether the upload can be paused. Default to the plan a real route picks for a png this
+// size; `partedPlan` is the test that wants the other one.
 const PART_SIZE = 5 * 1024 * 1024;
 const ONE_PART = [{ n: 1, url: 'https://r2.test/put' }];
+const ONE_PUT = [{ n: 1, url: 'https://r2.test/put', headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=3600' } }];
+let partedPlan = false;
+const plan = (size: number) => (partedPlan ? { partSize: PART_SIZE, multipart: true, parts: ONE_PART } : { partSize: size, multipart: false, parts: ONE_PUT });
 
 function handlers() {
   // What begin was told, so the parts phase reports the size the resume check compares against.
@@ -80,9 +86,9 @@ function handlers() {
           return jsonResponse({ code: 'content_type_not_allowed', message: `${body.file.type} is not allowed`, status: 400 }, 400);
         }
         size = body.file.size;
-        return jsonResponse({ completionToken: 't', path: 'p', upload: { partSize: PART_SIZE, parts: ONE_PART } });
+        return jsonResponse({ completionToken: 't', path: 'p', upload: plan(size) });
       }
-      if (body?.phase === 'parts') return jsonResponse({ partSize: PART_SIZE, size, parts: ONE_PART, landed: [] });
+      if (body?.phase === 'parts') return jsonResponse({ size, ...plan(size), landed: [] });
       if (body?.phase === 'end') return jsonResponse(END_BODY);
       return jsonResponse({ ok: true });
     },
@@ -130,6 +136,7 @@ const png = (name = 'a.png', bytes = 10): File => new File(['x'.repeat(bytes)], 
 beforeEach(() => {
   xhrs.length = 0;
   calls = [];
+  partedPlan = false;
   ManualXhr.reset();
   route = `/api/upload/${++routeId}`;
   restore = [installXhr(TestXhr), installRouter({ [route]: handlers() })];
@@ -375,7 +382,7 @@ test('headers is a function re-read per route call', async () => {
   expect(calls.map((c) => c.body?.phase)).toEqual([undefined, 'begin', 'end']);
 });
 
-test('a small file is a one-part multipart, so it pauses like any other, and the controls answer', async () => {
+test('a small file is a single PUT, so it is not offered as pausable', async () => {
   const hook = await render(() => useUpload(route));
   await flush();
   await act(async () => {
@@ -383,8 +390,27 @@ test('a small file is a one-part multipart, so it pauses like any other, and the
   });
   await nextXhr();
   await flush();
-  // canPause used to be false under the multipart threshold, because a single PUT had no parts to
-  // hold back. There is no threshold and no single PUT: pause, resume and retry work at every size.
+  // One request that is either on the wire or not: stopping it throws its bytes away rather than
+  // parking them, so the hook says so instead of labelling an upload that then finishes anyway.
+  expect(hook.current.upload!.canPause).toBe(false);
+  expect(hook.current.upload!.pause()).toBe(false);
+  expect(hook.current.upload!.status).toBe('uploading');
+  await act(async () => {
+    expect(hook.current.upload!.cancel()).toBe(true);
+  });
+  await flush(2);
+  expect(hook.current.upload!.status).toBe('canceled');
+});
+
+test('a file the route parts pauses, resumes and cancels, and the controls answer', async () => {
+  partedPlan = true;
+  const hook = await render(() => useUpload(route));
+  await flush();
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  await nextXhr();
+  await flush();
   expect(hook.current.upload!.canPause).toBe(true);
   expect(hook.current.upload!.stalled).toBe(false);
   await act(async () => {
