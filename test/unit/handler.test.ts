@@ -71,22 +71,10 @@ beforeEach(() => {
 const bucket = () => new Bucket({ token: TOKEN });
 const r2Calls = () => calls.filter((c) => c.url.startsWith(ENDPOINT));
 
-// A real png header: put() sniffs, so 'looks like a png' is not enough.
-const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
-
 const url = (route?: string) => `https://app.test/api/upload${route === undefined ? '' : `?route=${route}`}`;
 
 const post = (handler: { POST: (r: Request) => Promise<Response> }, route: string | undefined, body: unknown) =>
   handler.POST(new Request(url(route), { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }));
-
-const form = (file: File, route: string | undefined, field = 'file', input?: unknown): Request => {
-  const body = new FormData();
-  body.append(field, file);
-  if (input !== undefined) body.append('input', JSON.stringify(input));
-  return new Request(url(route), { method: 'POST', body });
-};
-
-const png = (name = 'a.png') => new File([PNG as BlobPart], name, { type: 'image/png' });
 
 const began = async (handler: { POST: (r: Request) => Promise<Response> }, route: string | undefined, file: { name: string; type: string; size: number }, input?: unknown) =>
   (await (await post(handler, route, { phase: 'begin', file, ...(input === undefined ? {} : { input }) })).json()) as WireBeginResponse;
@@ -98,7 +86,7 @@ function handler(extra: Record<string, unknown> = {}) {
     routes: {
       attachment: { onBeforeUpload: () => ({ path: 'attachment/1.png' }) },
       large: { constraints: { maxBytes: '2gb', contentTypes: null }, onBeforeUpload: () => ({ path: 'large/1.bin' }) },
-      avatar: { proxy: true, constraints: { maxBytes: '2mb' }, onBeforeUpload: () => ({ path: 'avatar/demo' }) },
+      avatar: { constraints: { maxBytes: '2mb' }, onBeforeUpload: () => ({ path: 'avatar/demo' }) },
     },
     ...extra,
   });
@@ -109,7 +97,7 @@ describe('dispatch', () => {
     const uploads = handler();
     const res = await uploads.GET(new Request(url('large')));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ constraints: { maxBytes: 2_000_000_000 }, transport: 'direct' });
+    expect(await res.json()).toEqual({ constraints: { maxBytes: 2_000_000_000 } });
 
     const begin = await post(uploads, 'attachment', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } });
     expect(begin.status).toBe(200);
@@ -147,7 +135,7 @@ describe('dispatch', () => {
     const uploads = uploadHandler({ bucket: bucket(), constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'only/1.png' }) });
     const begin = await began(uploads, undefined, { name: 'a.png', type: 'image/png', size: 10 });
     expect(begin.path).toBe('only/1.png');
-    expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ constraints: { maxBytes: 1_000_000 }, transport: 'direct' });
+    expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ constraints: { maxBytes: 1_000_000 } });
     // A name on the query is a client bound to some other handler: it does not silently get this
     // route, for GET or for POST.
     for (const name of ['anything', '__proto__', 'toString']) {
@@ -183,6 +171,15 @@ describe('dispatch', () => {
     expect(uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'x' }), routes: { avatar: {} } })).toBeDefined();
   });
 
+  test('removed server-transport options fail instead of silently becoming direct uploads', () => {
+    expect(() => uploadHandler({ bucket: bucket(), routes: { avatar: { proxy: true, onBeforeUpload: () => ({ path: 'avatar/demo' }) } } } as any)).toThrow(
+      'upload routes no longer take proxy',
+    );
+    expect(() => uploadHandler({ bucket: bucket(), routes: { avatar: upload()({ field: 'avatar', onBeforeUpload: () => ({ path: 'avatar/demo' }) } as any) } })).toThrow(
+      'upload routes no longer take field',
+    );
+  });
+
   test('two routes do not share a completion token', async () => {
     const uploads = handler();
     const begin = await began(uploads, 'attachment', { name: 'a.png', type: 'image/png', size: 10 });
@@ -202,11 +199,11 @@ describe('dispatch', () => {
 describe('defaults', () => {
   test('a route replaces constraints per key, and null clears one', async () => {
     const uploads = handler();
-    expect(await (await uploads.GET(new Request(url('attachment')))).json()).toEqual({ constraints: { contentTypes: ['image/png'], maxBytes: 20_000_000 }, transport: 'direct' });
+    expect(await (await uploads.GET(new Request(url('attachment')))).json()).toEqual({ constraints: { contentTypes: ['image/png'], maxBytes: 20_000_000 } });
     // maxBytes replaced, contentTypes cleared by null.
-    expect(await (await uploads.GET(new Request(url('large')))).json()).toEqual({ constraints: { maxBytes: 2_000_000_000 }, transport: 'direct' });
+    expect(await (await uploads.GET(new Request(url('large')))).json()).toEqual({ constraints: { maxBytes: 2_000_000_000 } });
     // maxBytes replaced, the handler's type list inherited.
-    expect(await (await uploads.GET(new Request(url('avatar')))).json()).toEqual({ constraints: { contentTypes: ['image/png'], maxBytes: 2_000_000 }, transport: 'proxy' });
+    expect(await (await uploads.GET(new Request(url('avatar')))).json()).toEqual({ constraints: { contentTypes: ['image/png'], maxBytes: 2_000_000 } });
   });
 
   test('the inherited constraints still refuse', async () => {
@@ -310,8 +307,8 @@ describe('defaults', () => {
       routes: { omega: { constraints: { maxBytes: '1kb' } }, alpha: {} },
     });
     for (const uploads of [first, second]) {
-      expect(await (await uploads.GET(new Request(url('alpha')))).json()).toEqual({ constraints: { maxBytes: 20_000_000 }, transport: 'direct' });
-      expect(await (await uploads.GET(new Request(url('omega')))).json()).toEqual({ constraints: { maxBytes: 1_000 }, transport: 'direct' });
+      expect(await (await uploads.GET(new Request(url('alpha')))).json()).toEqual({ constraints: { maxBytes: 20_000_000 } });
+      expect(await (await uploads.GET(new Request(url('omega')))).json()).toEqual({ constraints: { maxBytes: 1_000 } });
     }
   });
 });
@@ -383,112 +380,6 @@ describe('context', () => {
     expect(res.status).toBe(401);
     expect((await res.json()).code).toBe('unauthorized');
     expect(reached).toBe(false);
-  });
-});
-
-describe('proxy routes', () => {
-  test('the same handler serves a proxied upload, and the bytes go through it', async () => {
-    const completed: unknown[] = [];
-    const uploads = uploadHandler({
-      bucket: bucket(),
-      context: () => ({ user: 'ada' }),
-      routes: {
-        avatar: {
-          proxy: true,
-          constraints: { maxBytes: '2mb', contentTypes: ['image/png'] },
-          onBeforeUpload: ({ ctx, file }) => ({ path: `avatar/${ctx.user}/${file.name}`, overwrite: true }),
-          onUploadComplete: ({ ctx, file, path, contentType }) => {
-            completed.push({ user: ctx.user, name: file.name, path, contentType });
-            return { ok: true };
-          },
-        },
-      },
-    });
-    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
-    const res = await uploads.POST(form(png(), 'avatar'));
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as any;
-    expect(body.blob.path).toBe('avatar/ada/a.png');
-    expect(body.data).toEqual({ ok: true });
-    expect(completed).toEqual([{ user: 'ada', name: 'a.png', path: 'avatar/ada/a.png', contentType: 'image/png' }]);
-    expect(r2Calls().some((c) => c.method === 'PUT')).toBe(true);
-  });
-
-  test('bytes that do not prove their type are refused before anything is stored', async () => {
-    const uploads = handler();
-    const html = new File([new TextEncoder().encode('<html><script>x</script>') as BlobPart], 'a.png', { type: 'image/png' });
-    const res = await uploads.POST(form(html, 'avatar'));
-    expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe('content_type_not_allowed');
-    expect(r2Calls().some((c) => c.method === 'PUT')).toBe(false);
-  });
-
-  test('a proxy route takes input through the builder, as a JSON form field beside the file', async () => {
-    let seen: unknown;
-    const uploads = uploadHandler({
-      bucket: bucket(),
-      routes: {
-        avatar: upload()({
-          proxy: true,
-          input: z.object({ albumId: z.string() }),
-          onBeforeUpload: ({ input }) => {
-            seen = input;
-            return { path: `album/${input.albumId}` };
-          },
-        }),
-      },
-    });
-    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
-    expect((await uploads.POST(form(png(), 'avatar', 'file', { albumId: 'a1' }))).status).toBe(200);
-    expect(seen).toEqual({ albumId: 'a1' });
-
-    const bad = await uploads.POST(form(png(), 'avatar', 'file', { albumId: 7 }));
-    expect(bad.status).toBe(400);
-    expect((await bad.json()).code).toBe('invalid_input');
-  });
-
-  test('a put that fails after onBeforeUpload reaches onError with what it reserved', async () => {
-    const released: unknown[] = [];
-    const uploads = uploadHandler({
-      bucket: bucket(),
-      routes: {
-        avatar: {
-          proxy: true,
-          onBeforeUpload: () => ({ path: 'avatar/demo', metadata: { row: '9' } }),
-          onError: ({ error, path, metadata }) => {
-            released.push({ path, metadata, code: (error as BlobError).code });
-          },
-        },
-      },
-    });
-    r2Handler = () => new Response('<Error><Code>InternalError</Code></Error>', { status: 500 });
-    const res = await uploads.POST(form(png(), 'avatar'));
-    expect(res.status).toBeGreaterThanOrEqual(500);
-    expect(released).toEqual([{ path: 'avatar/demo', metadata: { row: '9' }, code: 'request_failed' }]);
-  });
-
-  test('the field option names the form field on a proxy route', async () => {
-    const uploads = uploadHandler({
-      bucket: bucket(),
-      routes: { avatar: { proxy: true, field: 'avatar', onBeforeUpload: () => ({ path: 'avatar/demo' }) } },
-    });
-    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
-    expect((await uploads.POST(form(png(), 'avatar', 'avatar'))).status).toBe(200);
-    const wrong = await uploads.POST(form(png(), 'avatar', 'file'));
-    expect(wrong.status).toBe(400);
-    expect((await wrong.json()).message).toBe('The request needs a avatar field holding the file');
-  });
-
-  test('a handler with no routes can be the proxy route itself', async () => {
-    const uploads = uploadHandler({
-      bucket: bucket(),
-      proxy: true,
-      constraints: { contentTypes: ['image/png'] },
-      onBeforeUpload: () => ({ path: 'avatar/demo' }),
-    });
-    expect(await (await uploads.GET(new Request(url()))).json()).toMatchObject({ transport: 'proxy' });
-    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e1"' } });
-    expect((await uploads.POST(form(png(), undefined))).status).toBe(200);
   });
 });
 

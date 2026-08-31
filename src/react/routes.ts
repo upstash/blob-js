@@ -6,7 +6,7 @@ import type { UploadRouteTypes } from '../shared/types.ts';
  */
 
 /** Anything carrying the SDK's brand: a handler's route, or a branded POST. */
-export type AnyUploadRoute = { readonly __upstashUploadRoute: UploadRouteTypes<any, any, any, any> };
+export type AnyUploadRoute = { readonly __upstashUploadRoute: UploadRouteTypes<any, any, any> };
 
 /** What uploadHandler() returns. The map is a phantom on the object, so `typeof uploads` carries it. */
 export type AnyUploadHandler = { readonly __upstashUploadHandler: Record<string, AnyUploadRoute> };
@@ -22,7 +22,7 @@ type UnionToIntersection<U> = (U extends unknown ? (k: U) => void : never) exten
 export type RoutesOf<T> = UnionToIntersection<
   T extends AnyUploadHandler
     ? T['__upstashUploadHandler']
-    : T extends { readonly __upstashUploadRoute: UploadRouteTypes<any, any, infer TRoute, any> }
+    : T extends { readonly __upstashUploadRoute: UploadRouteTypes<any, any, infer TRoute> }
       ? string extends TRoute
         ? never
         : { [K in TRoute]: T }
@@ -40,9 +40,6 @@ export type RouteAt<T, K> = K extends keyof RoutesOf<T> ? RoutesOf<T>[K] : never
  * bound `useUpload()` takes no argument at all. `never` for anything that names its routes.
  */
 export type SoleRoute<T> = RoutesOf<T> extends { readonly '': infer R } ? R : never;
-
-/** True for a route declared with `proxy: true`, or a branded route whose brand says so. */
-export type IsProxyRoute<R> = [R] extends [{ readonly __upstashUploadRoute: UploadRouteTypes<any, any, any, infer TProxy> }] ? ([TProxy] extends [true] ? true : false) : false;
 
 /** Where a handler is mounted when nothing says otherwise. One flat endpoint, names in the query. */
 export const DEFAULT_ENDPOINT = '/api/upload';

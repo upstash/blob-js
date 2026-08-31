@@ -115,6 +115,7 @@ class Task implements InternalTask {
       total,
       percent: this.status === 'done' ? 100 : total > 0 ? Math.min(99, Math.floor((loaded / total) * 100)) : 0,
       canPause: this.status === 'queued' || this.status === 'uploading' || this.status === 'paused',
+      pending: this.status !== 'done' && this.status !== 'error' && this.status !== 'canceled',
       stalled: this.inflight.size > 0 && [...this.inflight.values()].every((f) => f.backingOff),
     };
     switch (this.status) {

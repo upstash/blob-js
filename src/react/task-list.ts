@@ -138,7 +138,7 @@ class ListStore<R extends ListRecord> {
   }
 }
 
-/** The list, the queue and the render records, shared by useUpload and useUploadProxy. */
+/** The list, queue and render records shared by the upload hooks. */
 export function useTaskList<R extends ListRecord>(options: ListOptions<R>): TaskList<R> {
   const ref = useRef<ListStore<R> | undefined>(undefined);
   const store = (ref.current ??= new ListStore<R>());

@@ -41,7 +41,7 @@ const chat = uploadHandler({
 });
 
 // An `upload()` route is written on its own, not inline in `routes`: inline, TypeScript settles the
-// route's transport before it types the callback and `uploadId` stops resolving.
+// route's state before it types the completion callback.
 const fileRoute = upload()({
   onBeforeUpload: ({ file }) => ({
     path: p(`large/${crypto.randomUUID()}-${file.name}`),
@@ -92,7 +92,6 @@ describe('GET', () => {
     expect((await chat.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }))).status).toBe(304);
     expect(await res.json()).toEqual({
       constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: 20_000_000 },
-      transport: 'direct',
     });
     const img = uploadHandler({ bucket: pub, constraints: { contentTypes: ['image/*'] }, onBeforeUpload: () => ({ path: 'x' }) });
     const constraints = (await (await img.GET(new Request('https://x'))).json()).constraints;

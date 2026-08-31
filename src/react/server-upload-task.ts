@@ -3,19 +3,23 @@ import { resolveHeaders, routeMessage, type HeadersProvider } from '../browser/t
 import { NetworkError, sendXhr, type XhrResponse } from '../browser/xhr.ts';
 import { BlobError, PLATFORM_BODY_CAP_HINT } from '../shared/errors.ts';
 
-export type ProxySnapshot<TResponse> = {
+export type ServerUploadSnapshot<TResponse> = {
   loaded: number;
   total: number;
   percent: number;
+  /** Not settled: queued, uploading or finishing. */
+  pending: boolean;
 } & (
+  // The payload a state does not carry is `?: undefined` rather than absent, so `upload.response`
+  // and `upload.error` read straight off the union without narrowing on `status` first.
   /** 'finishing': every byte is sent and the route has not answered yet. */
-  | { status: 'queued' | 'uploading' | 'finishing' }
-  | { status: 'done'; response: TResponse }
-  | { status: 'canceled' }
-  | { status: 'error'; error: BlobError }
+  | { status: 'queued' | 'uploading' | 'finishing'; response?: undefined; error?: undefined }
+  | { status: 'done'; response: TResponse; error?: undefined }
+  | { status: 'canceled'; response?: undefined; error?: undefined }
+  | { status: 'error'; error: BlobError; response?: undefined }
 );
 
-export interface ProxyTaskOptions {
+export interface ServerUploadTaskOptions {
   route: string;
   headers?: HeadersProvider;
   body: XMLHttpRequestBodyInit;
@@ -30,7 +34,7 @@ type Status = 'queued' | 'uploading' | 'finishing' | 'done' | 'canceled' | 'erro
 let counter = 0;
 
 /** One POST to a route you wrote: no begin, no end, no pause. Observable, and free of React. */
-export class ProxyTask<TResponse = unknown> {
+export class ServerUploadTask<TResponse = unknown> {
   readonly id = `p${++counter}-${clock.now().toString(36)}`;
   readonly file: File | null;
 
@@ -42,23 +46,24 @@ export class ProxyTask<TResponse = unknown> {
   private started = false;
   private readonly controller = new AbortController();
   private readonly listeners = new Set<() => void>();
-  private cached: ProxySnapshot<TResponse> | undefined;
+  private cached: ServerUploadSnapshot<TResponse> | undefined;
   private frameQueued = false;
 
-  constructor(private readonly options: ProxyTaskOptions) {
+  constructor(private readonly options: ServerUploadTaskOptions) {
     this.file = options.file;
     this.total = options.total;
   }
 
-  snapshot(): ProxySnapshot<TResponse> {
+  snapshot(): ServerUploadSnapshot<TResponse> {
     if (this.cached) return this.cached;
     const done = this.status === 'done';
     const base = {
       loaded: done ? this.total : this.loaded,
       total: this.total,
       // 100% means sent, not stored: the bar sits there in status 'finishing' while the route
-      // streams the body onward. That is the whole difference from useUpload's percent.
+      // streams the body onward. That is the whole difference from a direct upload's percent.
       percent: done ? 100 : this.total > 0 ? Math.min(100, Math.floor((this.loaded / this.total) * 100)) : 0,
+      pending: this.status === 'queued' || this.status === 'uploading' || this.status === 'finishing',
     };
     switch (this.status) {
       case 'done':
@@ -106,9 +111,13 @@ export class ProxyTask<TResponse = unknown> {
       // reworded below as a route that could not be reached.
       authored = await resolveHeaders(this.options.headers);
     } catch (e) {
+      if (this.isCanceled()) return;
       this.fail(BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), status: 400, cause: e }));
       return;
     }
+    // A queued request can be canceled while an asynchronous headers provider is still resolving.
+    // Never send bytes after cancel() has reported success.
+    if (this.isCanceled()) return;
     let res: XhrResponse;
     try {
       res = await sendXhr({

@@ -89,6 +89,12 @@ export type UploadSnapshot = {
   total: number;
   percent: number;
   canPause: boolean;
+  /**
+   * Not settled: queued, uploading, finishing or paused. Every caller wants this and hand-rolling
+   * it from `status` is where the off-by-one-state bugs live -- an input re-enabled during
+   * 'finishing', a progress bar still drawn under an error line.
+   */
+  pending: boolean;
   /** Every in-flight part is waiting on a backoff. */
   stalled: boolean;
 } & (
@@ -97,10 +103,12 @@ export type UploadSnapshot = {
    * recording it, running onUploadComplete. percent sits at 99 for exactly that stretch, and
    * naming it is the difference between a bar that is working and one that looks stuck.
    */
-  | { status: 'queued' | 'uploading' | 'finishing' | 'paused' }
-  | { status: 'done'; blob: CompletedBlob & { data: unknown } }
-  | { status: 'canceled' }
-  | { status: 'error'; error: BlobError }
+  // The payload a state does not carry is declared `?: undefined` rather than left out, so
+  // `upload.blob?.path` and `upload.error?.message` read straight off the union with no narrowing.
+  | { status: 'queued' | 'uploading' | 'finishing' | 'paused'; blob?: undefined; error?: undefined }
+  | { status: 'done'; blob: CompletedBlob & { data: unknown }; error?: undefined }
+  | { status: 'canceled'; blob?: undefined; error?: undefined }
+  | { status: 'error'; error: BlobError; blob?: undefined }
 );
 
 export interface UploadTask {
@@ -116,37 +124,20 @@ export interface UploadTask {
   retry(): boolean;
 }
 
-/** Phantom types carried by an upload route so the hooks can infer its input, its data and its transport. */
-export interface UploadRouteTypes<TInput, TData, TRoute extends string = string, TProxy extends boolean = false> {
+/** Phantom types carried by an upload route so the hooks can infer its input and completion data. */
+export interface UploadRouteTypes<TInput, TData, TRoute extends string = string> {
   input: TInput;
   data: TData;
   /** The url the route declared, when it declared one. `route` on the hooks is typed to it. */
   route: TRoute;
-  /**
-   * True for a `proxy: true` route. One hook serves both transports, so the record it hands back
-   * -- pause and resume on a direct upload, `start({ body })` on a proxied one -- is chosen by this.
-   */
-  proxy: TProxy;
 }
 
-/**
- * A POST handler this SDK built. The brand is required and never exists at runtime: an ordinary
- * `(request: Request) => Promise<Response>` must NOT satisfy it, because the hooks decide from this
- * whether the route answers the SDK's envelope or whatever the app wrote itself.
- */
-export type UploadRoute<TInput = unknown, TData = unknown, TRoute extends string = string, TProxy extends boolean = false> = ((request: Request) => Promise<Response>) & {
-  readonly __upstashUploadRoute: UploadRouteTypes<TInput, TData, TRoute, TProxy>;
+/** A direct-browser-upload route built by this SDK. The brand exists only in its type. */
+export type UploadRoute<TInput = unknown, TData = unknown, TRoute extends string = string> = ((request: Request) => Promise<Response>) & {
+  readonly __upstashUploadRoute: UploadRouteTypes<TInput, TData, TRoute>;
 };
 
-/** What GET on an upload route answers: what it accepts, and which transport it speaks. */
+/** What GET on an upload route answers: the constraints the route enforces. */
 export interface WireConstraintsResponse {
   constraints: WireConstraints;
-  /** 'proxy': the bytes go through the route as one POST. 'direct': presigned, straight to storage. */
-  transport?: 'direct' | 'proxy';
-}
-
-/** What a handleProxyUpload route answers with. JSON, so uploadedAt is the string it crossed as. */
-export interface ProxyUploadResponse<TData = unknown> {
-  blob: Omit<CompletedBlob, 'uploadedAt'> & { uploadedAt: string };
-  data: TData;
 }

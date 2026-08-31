@@ -321,13 +321,11 @@ export async function answerError(e: unknown, request: Request, onError: ErrorMa
  * the refusing. Short and revalidated, not immutable -- the constraints are the route's own code and
  * change with a deploy, and a client that cached them forever refuses files the route now accepts.
  */
-export function constraintsEndpoint(routeConstraints: ResolvedConstraints, transport: 'direct' | 'proxy' = 'direct'): (request: Request) => Promise<Response> {
+export function constraintsEndpoint(routeConstraints: ResolvedConstraints): (request: Request) => Promise<Response> {
   const wireConstraints: WireConstraints = {};
   if (routeConstraints.contentTypes) wireConstraints.contentTypes = routeConstraints.contentTypes;
   if (routeConstraints.maxBytes !== undefined) wireConstraints.maxBytes = routeConstraints.maxBytes;
-  // transport is what lets one hook serve both kinds: the browser learns from the route itself
-  // whether to presign or to POST the bytes, instead of the page having to say which it is.
-  const body = JSON.stringify({ constraints: wireConstraints, transport } satisfies WireConstraintsResponse);
+  const body = JSON.stringify({ constraints: wireConstraints } satisfies WireConstraintsResponse);
   const etag = `"${hash(body)}"`;
   return async (request: Request): Promise<Response> => {
     const headers = { 'content-type': 'application/json', 'cache-control': `public, max-age=${LIMITS_MAX_AGE}`, etag };

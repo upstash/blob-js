@@ -1,13 +1,11 @@
 import type { HeadersProvider } from '../browser/task.ts';
 import type { BlobError } from '../shared/errors.ts';
 import type { AnyUploadRoute, RouteAt, RouteKey, SoleRoute } from './routes.ts';
-import { useUploadProxy, type UseUploadProxyOptions, type UseUploadProxyResult } from './use-upload-proxy.ts';
 import { useUpload, type UseUploadOptions, type UseUploadResult } from './use-upload.ts';
 
-/** The part of a failed upload both hooks agree on. */
 export interface FailedAnyUpload {
   readonly id: string;
-  readonly file: File | null;
+  readonly file: File;
   readonly error: BlobError;
 }
 
@@ -16,69 +14,28 @@ export interface UploadDefaults {
   headers?: HeadersProvider;
   /** Files in flight. The rest queue. */
   concurrency?: number;
-  /** Where the handler is mounted; a route *name* resolves against it. Default '/api/upload'. */
+  /** Where the handler is mounted; a route name resolves against it. Default '/api/upload'. */
   endpoint?: string;
-  /**
-   * Runs for every failed upload from either hook, before the call's own onError rather than instead
-   * of it: a session that expired is the app's business wherever it happens, and a page still gets
-   * to say what to show. Set it here once instead of on every hook.
-   */
+  /** Runs before a hook call's own handler. */
   onError?: (upload: FailedAnyUpload) => void;
 }
 
-/**
- * `useUpload` bound to a route map: the name is checked against it, and the record, the data and the
- * input come from the route that name belongs to. A handler written with no `routes` mounts one
- * route and this takes no name at all.
- */
+/** `useUpload` bound to the route names and data carried by an upload handler type. */
 export interface BoundUseUpload<T> {
-  /** The handler is the route: no name to pass, and nothing to keep in step with the server. */
   (...args: [SoleRoute<T>] extends [never] ? [route: never] : [options?: UseUploadOptions<SoleRoute<T>>]): UseUploadResult<SoleRoute<T>>;
   <K extends RouteKey<T>>(route: K, options?: UseUploadOptions<RouteAt<T, K>>): UseUploadResult<RouteAt<T, K>>;
-  /**
-   * The escape hatch for a url the map does not name -- a dynamic route, or one from another app.
-   * The type argument is required: without it there is nothing to check the url against, and an
-   * overload that inferred it would take any string and turn the typo check off for everyone.
-   */
   <R extends AnyUploadRoute = never>(route: [R] extends [never] ? never : string, options?: UseUploadOptions<NoInfer<R>>): UseUploadResult<R>;
-}
-
-/**
- * `useUploadProxy` bound to the same map. It stays loose on purpose: its reason to exist is a target
- * this SDK did not write, and those have no entry in any map.
- */
-export interface BoundUseUploadProxy<T> {
-  <K extends RouteKey<T>>(route: K, options?: UseUploadProxyOptions<RouteAt<T, K>>): UseUploadProxyResult<RouteAt<T, K>>;
-  <R = unknown>(route: string, options?: UseUploadProxyOptions<R>): UseUploadProxyResult<R>;
 }
 
 export interface UploadHooks<T> {
   useUpload: BoundUseUpload<T>;
-  useUploadProxy: BoundUseUploadProxy<T>;
 }
 
 export interface UnboundUploadHooks {
   useUpload: typeof useUpload;
-  useUploadProxy: typeof useUploadProxy;
 }
 
-/**
- * The hooks with your app's defaults already applied, and -- given the handler's type -- its route
- * names too. No context and no provider, so there is no client boundary to add at the root of the
- * tree and nothing to render before an upload can start; call-site options still win.
- *
- * ```ts
- * export const { useUpload } = createUploadHooks<typeof uploads>({
- *   headers: () => ({ authorization: `Bearer ${getToken()}` }),
- *   onError: ({ error }) => { if (error.code === 'unauthorized') signOut(); },
- * });
- *
- * const { start, upload } = useUpload('avatar');
- * ```
- *
- * `T` is an upload handler (`typeof uploads`), a branded route, or a union of those. With no type
- * argument the hooks keep their unbound signatures exactly.
- */
+/** Configure defaults and, optionally, bind `useUpload` to an upload handler's route map. */
 export function createUploadHooks<T = never>(defaults?: UploadDefaults): [T] extends [never] ? UnboundUploadHooks : UploadHooks<T>;
 export function createUploadHooks(defaults: UploadDefaults = {}): any {
   const merge = (options: any) => ({
@@ -88,8 +45,6 @@ export function createUploadHooks(defaults: UploadDefaults = {}): any {
     concurrency: options?.concurrency ?? defaults.concurrency,
     onError: defaults.onError
       ? (upload: FailedAnyUpload) => {
-          // Isolated: this runs inside the queue's settle loop, so a throw here would skip the
-          // call site's handler and stop the tasks still waiting to start.
           try {
             defaults.onError!(upload);
           } catch (e) {
@@ -100,11 +55,8 @@ export function createUploadHooks(defaults: UploadDefaults = {}): any {
       : options?.onError,
   });
 
-  // A name (or url) first, or nothing at all: a handler with no `routes` is reached with neither.
-  const bind =
-    (hook: any) =>
-    (routeOrOptions?: any, maybeOptions?: any): any =>
-      typeof routeOrOptions === 'string' ? hook(routeOrOptions, merge(maybeOptions ?? {})) : hook('', merge(routeOrOptions ?? {}));
+  const boundUseUpload = (routeOrOptions?: any, maybeOptions?: any): any =>
+    typeof routeOrOptions === 'string' ? useUpload(routeOrOptions, merge(maybeOptions ?? {})) : useUpload('', merge(routeOrOptions ?? {}));
 
-  return { useUpload: bind(useUpload), useUploadProxy: bind(useUploadProxy) };
+  return { useUpload: boundUseUpload };
 }

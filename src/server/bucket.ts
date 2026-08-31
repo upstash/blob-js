@@ -34,7 +34,10 @@ export interface PutOptions {
   maxBytes?: Size;
   cache?: CacheOption;
   metadata?: Record<string, string>;
-  /** For a bare stream whose length the SDK cannot see. */
+  /**
+   * Declared length for a stream whose size is not otherwise known. Without it, `put()` buffers the
+   * stream (up to `maxBytes`) before uploading so it can determine the required content length.
+   */
   size?: number;
   /** false: If-None-Match: * server-side, so a real 412 rather than a client-side race. */
   overwrite?: boolean;
