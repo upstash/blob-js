@@ -372,13 +372,16 @@ describe('begin', () => {
     expect(mine!.uploadId.length).toBeGreaterThan(8);
     expect(mine!.initiatedAt.getTime()).toBeGreaterThan(Date.now() - 3_600_000);
 
-    await priv.abortMultipart(mine!.uploadId, mine!.path);
+    await priv.abortMultipart(mine!);
     expect((await priv.listMultipartUploads({ prefix: root })).some((u) => u.path === begin.path)).toBe(false);
     // Aborting twice is not an error: a sweep has to be safe to run again.
-    await priv.abortMultipart(mine!.uploadId, mine!.path);
+    await priv.abortMultipart(mine!);
+    // The id an app kept for itself works as well as the listed record.
+    await priv.abortMultipart({ path: mine!.path, uploadId: mine!.uploadId });
 
     const second = (await (await toFile(large, { phase: 'begin', file: { name: 'abandoned.bin', type: '', size } })).json()) as WireBeginResponse;
-    expect(await priv.sweepMultipart({ olderThan: '1d', prefix: root })).toEqual([]);
+    // Younger than the cutoff, so the sweep leaves it alone.
+    expect(await priv.abortStaleUploads({ olderThan: '1d', prefix: root })).toEqual([]);
     const reaped = await priv.abortStaleUploads({ olderThan: 0, prefix: root });
     expect(reaped.map((u) => u.path)).toContain(second.path);
     expect(await priv.listMultipartUploads({ prefix: root })).toEqual([]);

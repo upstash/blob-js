@@ -434,28 +434,27 @@ export class Bucket {
     return this.r2.listMultipartUploads(options.prefix);
   }
 
-  /** Throws away an incomplete upload and every part that landed for it. Missing is success. */
-  async abortMultipart(uploadId: string, path: string): Promise<void> {
-    if (typeof uploadId !== 'string' || !uploadId) throw new BlobError('invalid_input', { message: 'abortMultipart(uploadId, path): uploadId is required' });
-    encodeKey(path);
-    await this.r2.abortMultipart(path, uploadId);
+  /**
+   * Throws away an incomplete upload and every part that landed for it. Missing is success, which is
+   * why it takes the record listMultipartUploads() returned rather than two strings: a swapped pair
+   * would abort nothing and report that it worked.
+   */
+  async abortMultipart(upload: Pick<MultipartUpload, 'path' | 'uploadId'>): Promise<void> {
+    if (!upload || typeof upload !== 'object') throw new BlobError('invalid_input', { message: 'abortMultipart({ path, uploadId }): an upload is required' });
+    if (typeof upload.uploadId !== 'string' || !upload.uploadId) throw new BlobError('invalid_input', { message: 'abortMultipart({ path, uploadId }): uploadId is required' });
+    encodeKey(upload.path);
+    await this.r2.abortMultipart(upload.path, upload.uploadId);
   }
 
   /**
-   * List plus abort, for an app cron: nothing in R2 expires an abandoned upload without a lifecycle
-   * rule, and an invisible one is what turns "delete the bucket" into a dead end. Returns what it
-   * aborted.
+   * List plus abort, for an app cron: an abandoned upload is not expired for you, and one that
+   * list() cannot see is what turns "delete the bucket" into a dead end. Returns what it aborted.
    */
   async abortStaleUploads(options: AbortStaleOptions): Promise<MultipartUpload[]> {
     const cutoff = Date.now() - parseDuration(options.olderThan, 'olderThan');
     const stale = (await this.listMultipartUploads(options)).filter((u) => u.initiatedAt.getTime() <= cutoff);
     for (const u of stale) await this.r2.abortMultipart(u.path, u.uploadId);
     return stale;
-  }
-
-  /** abortStaleUploads(), under the name the sweep is usually looked for. */
-  sweepMultipart(options: AbortStaleOptions): Promise<MultipartUpload[]> {
-    return this.abortStaleUploads(options);
   }
 
   /* ---------------------------------------------------------- copy/move */

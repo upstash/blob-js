@@ -79,14 +79,17 @@ wins over the option.
 ### Incomplete uploads
 
 A multipart upload that was started and never finished is billed storage that `list()` cannot see,
-and a bucket cannot be deleted while one exists. The bucket's lifecycle rule aborts them; these are
-here for a bucket without one, and for a cron that wants to be sure:
+and a bucket cannot be deleted while one exists. The SDK aborts the ones it knows about: a `put()`
+that throws mid-stream, an upload the browser cancels, an upload a callback refuses. The one that
+survives is the tab that closed, so a cron reaps it:
 
 ```ts
-await bucket.listMultipartUploads({ prefix: 'uploads/' });
-await bucket.abortMultipart(uploadId, path);
-// list + abort, for a cron: sweepMultipart() is the same call under the name people look for
-await bucket.abortStaleUploads({ olderThan: '1d' });
+// list + abort, in one call: returns the uploads it aborted
+await bucket.abortStaleUploads({ olderThan: '1d', prefix: 'uploads/' });
+
+// or look first, and abort a specific one
+const open = await bucket.listMultipartUploads({ prefix: 'uploads/' });
+await bucket.abortMultipart(open[0]);   // { path, uploadId }
 ```
 
 `del({ prefix })` refuses an empty prefix unless you say you mean it: `del({ prefix: '', all: true })`.

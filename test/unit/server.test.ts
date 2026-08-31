@@ -388,6 +388,27 @@ describe('listMultipartUploads', () => {
   });
 });
 
+describe('abortMultipart', () => {
+  test('sends the DELETE for the listed record', async () => {
+    resetCredentialCaches();
+    let seen: URL | undefined;
+    r2Handler = (call) => {
+      seen = new URL(call.url);
+      return new Response(null, { status: 204 });
+    };
+    await bucket().abortMultipart({ path: 'a&b.txt', uploadId: 'u1' });
+    expect(seen!.pathname.endsWith('a%26b.txt')).toBe(true);
+    expect(seen!.searchParams.get('uploadId')).toBe('u1');
+  });
+
+  test('an upload without an id is refused rather than answered as a no-op', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response(null, { status: 204 });
+    // A missing upload is success at the wire, so bad input has to be caught before it is sent.
+    await expect(bucket().abortMultipart({ path: 'a.txt', uploadId: '' })).rejects.toThrow('uploadId is required');
+  });
+});
+
 describe('multipart put', () => {
   const CREATED = '<InitiateMultipartUploadResult><UploadId>up-1</UploadId></InitiateMultipartUploadResult>';
   const COMPLETED = '<CompleteMultipartUploadResult><ETag>"done-4"</ETag></CompleteMultipartUploadResult>';
