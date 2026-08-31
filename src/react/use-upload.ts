@@ -27,8 +27,9 @@ export interface UploadRecordBase {
   percent: number;
   /**
    * Whether pause() would do anything. False for a single PUT -- every file under the route's
-   * multipart threshold -- because there is nothing to park its bytes in, and false once the upload
-   * has settled or reached 'finishing'.
+   * multipart threshold -- because there is nothing to park its bytes in; false while queued, since
+   * which of the two an upload is only becomes known when the route answers; and false once the
+   * upload has settled or reached 'finishing'.
    */
   canPause: boolean;
   /** Not settled: queued, uploading, finishing or paused. */

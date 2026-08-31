@@ -220,6 +220,38 @@ describe('a single PUT', () => {
     expect(task.snapshot()).toMatchObject({ status: 'done', percent: 100 });
   });
 
+  test('cancel while finishing never asks the route to delete an object end may have accepted', async () => {
+    let finish!: () => void;
+    onPhase = (body) => {
+      if (body.phase !== 'end') return defaultRoute(3)(body);
+      return new Response(
+        new ReadableStream({
+          start: (c) => {
+            finish = () => {
+              c.enqueue(new TextEncoder().encode(JSON.stringify({ blob: BLOB, data: null })));
+              c.close();
+            };
+          },
+        }),
+      );
+    };
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    ManualXhr.pending[0]!.progress(3);
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await tick();
+    expect(task.snapshot().status).toBe('finishing');
+    // The route has already been asked to record the object and onUploadComplete may have inserted
+    // the row. A cancel that raced it and won would delete the file that row points at.
+    expect(task.cancel()).toBe(true);
+    await settle();
+    expect(calls.map((c) => c.phase)).toEqual(['begin', 'end']);
+    expect(memory.size).toBe(0);
+    await expect(task.done).rejects.toMatchObject({ name: 'AbortError' });
+    finish();
+    await settle();
+  });
+
   test('401 and 403 re-presign once and retreat the bar before the fresh url arrives', async () => {
     for (const status of [401, 403]) {
       calls = [];
@@ -580,9 +612,7 @@ describe('multipart', () => {
     expect(task.cancel()).toBe(true);
     await expect(task.done).rejects.toMatchObject({ name: 'AbortError' });
     await settle();
-    // The cancel carries what landed: for a multipart it is only bookkeeping, but it is the same
-    // field that lets the route identify a single PUT it has to delete.
-    expect(calls.at(-1)!.body).toEqual({ phase: 'cancel', completionToken: 'tok', parts: [{ n: 1, etag: '"e1"' }, { n: 2, etag: '"e2"' }] });
+    expect(calls.at(-1)!.body).toEqual({ phase: 'cancel', completionToken: 'tok' });
     expect(memory.size).toBe(0);
     expect(task.resume()).toBe(false);
   });

@@ -79,9 +79,8 @@ wins over the option.
 ### Incomplete uploads
 
 A multipart upload that was started and never finished is storage that `list()` cannot see, and a
-bucket cannot be deleted while one exists. Only a file over the multipart threshold can leave one:
-under it there is nothing to leave half-created. The SDK aborts the ones it knows about -- a `put()`
-that throws mid-stream, an upload the browser cancels, an upload a callback refuses. The one that
+bucket cannot be deleted while one exists. The SDK aborts the ones it knows about -- a `put()` that
+throws mid-stream, an upload the browser cancels, an upload a callback refuses. The one that
 survives is the tab that closed, so a cron reaps it:
 
 ```ts
@@ -92,6 +91,14 @@ await bucket.abortStaleMultipartUploads({ olderThan: '1d', prefix: 'uploads/' })
 const open = await bucket.listMultipartUploads({ prefix: 'uploads/' });
 await bucket.abortMultipartUpload(open[0]);   // { path, uploadId }
 ```
+
+Only a file over the multipart threshold can leave one of those. A direct upload under the threshold
+leaves the other kind: the browser's PUT stores the object, so a tab that closes between the PUT and
+the completion call leaves a whole object your callback never accepted and your database has no row
+for. Those are ordinary objects, so `list()` sees them; each carries an `upstash-upload` metadata key
+holding the upload id, which is what tells one apart from a file you did accept. On a stable path
+(`avatars/${userId}.png`) the same abandoned upload has already replaced what was there, exactly as a
+presigned PUT anywhere else does -- a unique path per upload is the way to avoid that.
 
 `del({ prefix })` refuses an empty prefix unless you say you mean it: `del({ prefix: '', all: true })`.
 
@@ -168,8 +175,18 @@ The threshold also decides when the object exists. A file that went up in parts 
 handler at completion, so no callback is ever handed an object that was already readable. A file
 that went up as one PUT is stored the moment its last byte lands: `onUploadComplete` refusing it, or
 the browser cancelling after it landed, deletes it, which bounds the exposure on a public bucket
-without undoing it. The delete is guarded by the etag the browser read off its own PUT, so a later
-upload to the same path is never the one deleted.
+without undoing it.
+
+To tell its own object apart from anyone else's at that path, the SDK signs an `upstash-upload`
+metadata key holding the upload id into the presigned PUT and reads it back. That is what says the
+bytes at the path came from this upload, so completion cannot record an object it never received and
+a refusal cannot delete one a later upload has since written. It is stored on the object and stripped
+from the `metadata` your callbacks are handed; `upstash-upload` is a reserved metadata key.
+
+A single presigned PUT carries its signed headers -- `Content-Type`, `Cache-Control` and every
+`x-amz-meta-*` -- as real request headers, so the bucket's CORS policy has to allow them from your
+origin. A failure here is a browser-level refusal with no status, which the SDK reports with a CORS
+hint.
 
 Upload records support progress, cancel, retry, and a `finishing` state while the route records the
 object and runs `onUploadComplete`. `percent` remains at 99 during that state.

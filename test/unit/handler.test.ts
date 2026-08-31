@@ -53,11 +53,17 @@ afterAll(() => {
  * Every direct upload is multipart now, so the default script answers a CreateMultipartUpload, a
  * CompleteMultipartUpload and the HEAD phase 'end' reads the object back with.
  */
+// A single PUT writes a marker the SDK signed into the url, and phase 'end' reads it back to know
+// the object is this upload's. The fake storage has not seen the PUT, so began() remembers what the
+// last begin handed the browser and the fake HEAD answers with it.
+const MARKER = 'x-amz-meta-upstash-upload';
+let marker: string | undefined;
+
 function scriptedR2(head: Record<string, string> = { 'content-length': '4', etag: '"e"', 'content-type': 'image/png', 'last-modified': new Date().toUTCString() }) {
   return (call: Call): Response => {
     if (call.method === 'POST' && call.url.includes('uploads=')) return new Response('<InitiateMultipartUploadResult><UploadId>mp-1</UploadId></InitiateMultipartUploadResult>', { status: 200 });
     if (call.method === 'POST') return new Response('<CompleteMultipartUploadResult><ETag>"e"</ETag></CompleteMultipartUploadResult>', { status: 200 });
-    if (call.method === 'HEAD') return new Response('', { status: 200, headers: head });
+    if (call.method === 'HEAD') return new Response('', { status: 200, headers: { ...head, ...(marker === undefined ? {} : { [MARKER]: marker }) } });
     return new Response('', { status: 200 });
   };
 }
@@ -76,8 +82,11 @@ const url = (route?: string) => `https://app.test/api/upload${route === undefine
 const post = (handler: { POST: (r: Request) => Promise<Response> }, route: string | undefined, body: unknown) =>
   handler.POST(new Request(url(route), { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }));
 
-const began = async (handler: { POST: (r: Request) => Promise<Response> }, route: string | undefined, file: { name: string; type: string; size: number }, input?: unknown) =>
-  (await (await post(handler, route, { phase: 'begin', file, ...(input === undefined ? {} : { input }) })).json()) as WireBeginResponse;
+const began = async (handler: { POST: (r: Request) => Promise<Response> }, route: string | undefined, file: { name: string; type: string; size: number }, input?: unknown) => {
+  const begin = (await (await post(handler, route, { phase: 'begin', file, ...(input === undefined ? {} : { input }) })).json()) as WireBeginResponse;
+  marker = begin.upload?.parts?.[0]?.headers?.[MARKER];
+  return begin;
+};
 
 function handler(extra: Record<string, unknown> = {}) {
   return uploadHandler({
@@ -343,6 +352,7 @@ describe('context', () => {
         new Request(url('attachment'), { method: 'POST', body: JSON.stringify({ phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 4 } }), headers: { authorization: 'ada' } }),
       )
     ).json()) as WireBeginResponse;
+    marker = begin.upload.parts[0]!.headers![MARKER];
     expect(begin.path).toBe('u/ada.png');
 
     const end = await uploads.POST(

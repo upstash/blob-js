@@ -95,9 +95,7 @@ export type WireRequest =
   | { phase: 'begin'; file: WireFile; head?: string; input?: unknown }
   | { phase: 'parts'; completionToken: string; from: number }
   | { phase: 'end'; completionToken: string; parts?: WireLanded[] }
-  // `parts` on a cancel is what identifies a single PUT that already landed, so an object no
-  // callback accepted can be deleted instead of left stored.
-  | { phase: 'cancel'; completionToken: string; parts?: WireLanded[] };
+  | { phase: 'cancel'; completionToken: string };
 
 /* -------------------------------------------------------------- browser -- */
 
@@ -107,8 +105,9 @@ export type UploadSnapshot = {
   percent: number;
   /**
    * Whether pause() would do anything. False for a single PUT -- every file under the route's
-   * multipart threshold -- because there is nothing to park its bytes in, and false once the upload
-   * has settled or reached 'finishing'.
+   * multipart threshold -- because there is nothing to park its bytes in; false while queued, since
+   * which of the two an upload is only becomes known when the route answers; and false once the
+   * upload has settled or reached 'finishing'.
    */
   canPause: boolean;
   /**

@@ -14,6 +14,7 @@ afterAll(async () => {
 const rows: Record<string, { status: string; owner?: string; size?: number }> = {};
 const completed: string[] = [];
 let lastChatCompleted: { route: string; name: string; contentType: string } | undefined;
+let lastChatMetadata: Record<string, string> | undefined;
 let lastLargeCompleted: { multipartUploadId: string | undefined; name: string; declared: number } | undefined;
 
 // The handler with no `routes` IS the route: no ?route= in the url and no name on the client.
@@ -33,8 +34,9 @@ const chat = uploadHandler({
     rows[path] = { status: 'pending', owner: ctx.id };
     return { path, cache: 'immutable', metadata: { uploadedBy: ctx.id, originalName: file.name } };
   },
-  onUploadComplete: ({ ctx, route, file, path, size, contentType }) => {
+  onUploadComplete: ({ ctx, route, file, path, size, contentType, metadata }) => {
     lastChatCompleted = { route, name: file.name, contentType };
+    lastChatMetadata = metadata;
     rows[path] = { status: 'ready', owner: ctx.id, size };
     return { rowId: path };
   },
@@ -165,6 +167,8 @@ describe('begin', () => {
     expect(pinned['content-type']).toBe('image/png');
     expect(pinned['cache-control']).toContain('max-age=31536000');
     expect(pinned['x-amz-meta-uploadedby']).toBe('u1');
+    // The marker phase 'end' reads back to know the object at this path is this upload's.
+    expect(pinned['x-amz-meta-upstash-upload']).toMatch(/^[0-9a-f-]{36}$/);
     const signed = new URL(putUrl).searchParams.get('X-Amz-SignedHeaders')!;
     for (const name of ['content-length', ...Object.keys(pinned)]) expect(signed).toContain(name);
     const unpinned = await fetch(putUrl, { method: 'PUT', body });
@@ -207,6 +211,10 @@ describe('begin', () => {
     expect(info.contentType).toBe('image/png');
     expect(info.metadata.uploadedby).toBe('u1');
     expect(info.metadata.originalname).toBe('Holiday Pic.PNG');
+    // Stored on the object, and stripped from what the callbacks were handed.
+    expect(info.metadata['upstash-upload']).toBe(pinned['x-amz-meta-upstash-upload']);
+    expect(lastChatMetadata).not.toHaveProperty('upstash-upload');
+
   });
 
   test('end refuses bytes that lie about their type, a tampered token, and a missing upload', async () => {

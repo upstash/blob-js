@@ -21,6 +21,11 @@ export const SINGLE_PUT_MAX = 5 * 1024 * 1024 * 1024;
  */
 export type MultipartOption = boolean | Size;
 
+/** Parses the size form once, so a bad option fails where it was written rather than per request. */
+export function resolveMultipart(option: MultipartOption | undefined, what = 'multipart'): boolean | number | undefined {
+  return option === undefined || typeof option === 'boolean' ? option : parseSize(option, what);
+}
+
 /** Whether a body of this size goes up in parts. Throws only for a `false` R2 cannot honour. */
 export function wantsMultipart(option: MultipartOption | undefined, size: number, what = 'multipart'): boolean {
   if (size > SINGLE_PUT_MAX) {

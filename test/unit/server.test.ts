@@ -469,7 +469,7 @@ describe('uploadHandler: the direct transport', () => {
   const post = (route: { POST: (r: Request) => Promise<Response> }, body: unknown) =>
     route.POST(new Request('https://app.test/api/upload', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }));
 
-  // Every direct upload is multipart now, so begin always creates one.
+  // Answers CreateMultipartUpload, for the routes that are over the threshold or pin multipart.
   const initiated = (call: Call): Response | undefined =>
     call.method === 'POST' && call.url.includes('uploads=') ? new Response('<InitiateMultipartUploadResult><UploadId>mp-1</UploadId></InitiateMultipartUploadResult>', { status: 200 }) : undefined;
   const beginR2 = (call: Call): Response => initiated(call) ?? new Response('', { status: 200 });
@@ -480,12 +480,22 @@ describe('uploadHandler: the direct transport', () => {
       const created = initiated(call);
       if (created) return created;
       if (call.method === 'POST') return new Response('<CompleteMultipartUploadResult><ETag>"e"</ETag></CompleteMultipartUploadResult>', { status: 200 });
-      if (call.method === 'HEAD') return new Response('', { status: 200, headers: head });
+      if (call.method === 'HEAD') return new Response('', { status: 200, headers: withMarker(head) });
       return new Response('', { status: 204 });
     };
 
-  const begin = async (route: { POST: (r: Request) => Promise<Response> }, file: { name: string; type: string; size: number }) =>
-    (await (await post(route, { phase: 'begin', file })).json()) as WireBeginResponse;
+  // A single PUT writes a marker the SDK signed into the url, and phase 'end' reads it back to know
+  // the object is this upload's. The fake storage never sees the PUT, so begin() remembers what was
+  // handed to the browser and the heads below answer with it.
+  const MARKER = 'x-amz-meta-upstash-upload';
+  let marker: string | undefined;
+  const withMarker = (head: Record<string, string>) => ({ ...head, ...(marker === undefined ? {} : { [MARKER]: marker }) });
+
+  const begin = async (route: { POST: (r: Request) => Promise<Response> }, file: { name: string; type: string; size: number }) => {
+    const started = (await (await post(route, { phase: 'begin', file })).json()) as WireBeginResponse;
+    marker = started.upload?.parts?.[0]?.headers?.[MARKER];
+    return started;
+  };
 
   test('a completion token is bound to its route, not just to the bucket', async () => {
     resetCredentialCaches();
@@ -528,13 +538,15 @@ describe('uploadHandler: the direct transport', () => {
     expect(url.searchParams.get('partNumber')).toBe(null);
     expect(url.searchParams.get('uploadId')).toBe(null);
     // The headers a multipart pins at create are signed into the url instead, and handed back so the
-    // browser can send them verbatim. Signed, so metadata the app reads back is not the client's.
-    expect(started.upload.parts[0]!.headers).toEqual({ 'content-type': 'image/png', 'cache-control': 'public, max-age=3600', 'x-amz-meta-rowid': '7' });
+    // browser can send them verbatim. Signed, so metadata the app reads back is not the client's,
+    // and so is the marker that says which upload wrote the object.
+    const sent = started.upload.parts[0]!.headers!;
+    expect(sent['content-type']).toBe('image/png');
+    expect(sent['cache-control']).toBe('public, max-age=3600');
+    expect(sent['x-amz-meta-rowid']).toBe('7');
+    expect(sent['x-amz-meta-upstash-upload']).toMatch(/^[0-9a-f-]{36}$/);
     const signed = url.searchParams.get('X-Amz-SignedHeaders')!.split(';');
-    expect(signed).toContain('content-type');
-    expect(signed).toContain('cache-control');
-    expect(signed).toContain('x-amz-meta-rowid');
-    expect(signed).toContain('content-length');
+    for (const name of ['content-length', ...Object.keys(sent)]) expect(signed).toContain(name);
     // Nothing reached R2: no multipart to create, and none to sweep up if the tab closes.
     expect(r2Calls().filter((c) => c.method === 'POST')).toEqual([]);
   });
@@ -637,7 +649,7 @@ describe('uploadHandler: the direct transport', () => {
         if (completes > 1) return new Response('<Error><Code>NoSuchUpload</Code></Error>', { status: 404 });
         return new Response('<CompleteMultipartUploadResult><ETag>"e"</ETag></CompleteMultipartUploadResult>', { status: 200 });
       }
-      if (call.method === 'HEAD') return new Response('', { status: 200, headers: { 'content-length': '10', etag: '"e"', 'content-type': 'image/png' } });
+      if (call.method === 'HEAD') return new Response('', { status: 200, headers: withMarker({ 'content-length': '10', etag: '"e"', 'content-type': 'image/png' }) });
       return new Response('', { status: 204 });
     };
     const end = { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] };
@@ -889,17 +901,17 @@ describe('uploadHandler: the direct transport', () => {
   const storedR2 =
     (head: Record<string, string> = { 'content-length': '10', etag: '"stored"', 'content-type': 'image/png' }) =>
     (call: Call): Response =>
-      call.method === 'HEAD' ? new Response('', { status: 200, headers: head }) : new Response('', { status: 204 });
+      call.method === 'HEAD' ? new Response('', { status: 200, headers: withMarker(head) }) : new Response('', { status: 204 });
 
   test('a single PUT completes nothing: phase end reads the object back and records it', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
-    let seen: { multipartUploadId: string | undefined } | undefined;
+    let seen: { multipartUploadId: string | undefined; metadata: Record<string, string> } | undefined;
     const route = uploadHandler({
       bucket: bucket(),
       onBeforeUpload: () => ({ path: 'a.png' }),
-      onUploadComplete: ({ multipartUploadId }) => {
-        seen = { multipartUploadId };
+      onUploadComplete: ({ multipartUploadId, metadata }) => {
+        seen = { multipartUploadId, metadata };
         return { ok: true };
       },
     });
@@ -912,8 +924,10 @@ describe('uploadHandler: the direct transport', () => {
     // No complete to make, which is what makes a retried 'end' idempotent for free.
     expect(r2Calls().map((c) => c.method)).toEqual(['HEAD']);
     expect((await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"stored"' }] })).status).toBe(200);
-    // There is no R2 upload id to hand out: nothing was ever created.
-    expect(seen).toEqual({ multipartUploadId: undefined });
+    // There is no R2 upload id to hand out: nothing was ever created. And the object's only stored
+    // metadata is the marker, which is the SDK's bookkeeping rather than the app's: the callback is
+    // handed an empty set, not a key it never wrote.
+    expect(seen).toEqual({ multipartUploadId: undefined, metadata: {} });
   });
 
   test('a single PUT is stored before the callback runs, so a refusal deletes it', async () => {
@@ -935,59 +949,83 @@ describe('uploadHandler: the direct transport', () => {
     expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'HEAD', 'DELETE']);
   });
 
-  test('a single PUT whose object was replaced is left alone, and one with no etag is not deleted blind', async () => {
+  test('a single PUT that never happened is not recorded, and not deleted either', async () => {
     resetCredentialCaches();
-    const refuse = { bucket: bucket(), onUploadComplete: () => { throw new BlobError('conflict'); } };
-
+    const seen: string[] = [];
     r2Handler = beginR2;
-    const replaced = uploadHandler({ ...refuse, onBeforeUpload: () => ({ path: 'avatars/u1.png' }) });
-    const one = await begin(replaced, { name: 'a.png', type: 'image/png', size: 10 });
-    r2Handler = storedR2({ 'content-length': '10', etag: '"newer"', 'content-type': 'image/png' });
-    calls = [];
-    expect((await post(replaced, { phase: 'end', completionToken: one.completionToken, parts: [{ n: 1, etag: '"stored"' }] })).status).toBe(409);
-    expect(r2Calls().some((c) => c.method === 'DELETE')).toBe(false);
-
-    // A browser whose CORS setup hid the etag reports none, and no etag is no permission to delete.
-    r2Handler = beginR2;
-    const blind = uploadHandler({ ...refuse, onBeforeUpload: () => ({ path: 'avatars/u2.png' }) });
-    const two = await begin(blind, { name: 'a.png', type: 'image/png', size: 10 });
+    const route = uploadHandler({
+      bucket: bucket(),
+      onBeforeUpload: () => ({ path: 'avatars/u1.png' }),
+      onUploadComplete: ({ path }) => void seen.push(path),
+    });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    // Whatever is at the path was written by something else: another upload, an older token, or it
+    // was simply already there. Only the marker signed into this upload's url says otherwise, and
+    // 'end' does not get to claim an object on nothing but a size and an etag out of its own body.
+    marker = 'a-different-upload';
     r2Handler = storedR2();
     calls = [];
-    const logged = spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      expect((await post(blind, { phase: 'end', completionToken: two.completionToken, parts: [{ n: 1, etag: '' }] })).status).toBe(409);
-      expect(r2Calls().some((c) => c.method === 'DELETE')).toBe(false);
-      expect(String(logged.mock.calls[0]![0])).toContain('could not be identified');
-    } finally {
-      logged.mockRestore();
-    }
+    const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"stored"' }] });
+    expect(end.status).toBe(404);
+    expect((await end.json()).code).toBe('not_found');
+    expect(seen).toEqual([]);
+    // And nothing is deleted on the way out: that object is somebody else's.
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD']);
   });
 
-  test('cancel deletes what a single PUT already stored, and says nothing when nothing landed', async () => {
+  test('cancel deletes what a single PUT already stored, and only what it stored', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
     const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
 
-    // Canceled mid-flight: an aborted PUT stores nothing, so there is nothing to delete and no log.
+    // Canceled after the bytes landed: a whole object no callback ever accepted.
+    const late = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    r2Handler = storedR2();
+    calls = [];
+    expect((await post(route, { phase: 'cancel', completionToken: late.completionToken })).status).toBe(200);
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'HEAD', 'DELETE']);
+
+    // Canceled mid-flight: a PUT the browser aborted stores nothing, so the head finds an object
+    // from some other upload, or none, and either way there is nothing here to delete.
+    r2Handler = beginR2;
     const early = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    marker = 'a-different-upload';
     r2Handler = storedR2();
     calls = [];
     const logged = spyOn(console, 'error').mockImplementation(() => {});
     try {
       expect((await post(route, { phase: 'cancel', completionToken: early.completionToken })).status).toBe(200);
-      expect(r2Calls()).toEqual([]);
+      expect(r2Calls().map((c) => c.method)).toEqual(['HEAD']);
       expect(logged).toHaveBeenCalledTimes(0);
     } finally {
       logged.mockRestore();
     }
+  });
 
-    // Canceled after the bytes landed: a whole object no callback ever accepted.
+  test('the marker key is the SDK\'s, and an app that writes it is told so at begin', async () => {
+    resetCredentialCaches();
     r2Handler = beginR2;
-    const late = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
-    r2Handler = storedR2();
-    calls = [];
-    expect((await post(route, { phase: 'cancel', completionToken: late.completionToken, parts: [{ n: 1, etag: '"stored"' }] })).status).toBe(200);
-    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'DELETE']);
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png', metadata: { 'upstash-upload': 'mine' } }) });
+    const res = await post(route, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).message).toContain('reserved');
+  });
+
+  test('an unparseable multipart is a build error, not a 500 after onBeforeUpload has run', async () => {
+    resetCredentialCaches();
+    let ran = 0;
+    expect(() =>
+      uploadHandler({
+        bucket: bucket(),
+        multipart: 'banana',
+        onBeforeUpload: () => {
+          ran++;
+          return { path: 'a.png' };
+        },
+      }),
+    ).toThrow(/multipart/);
+    expect(ran).toBe(0);
+    expect(() => uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'x' }), routes: { a: { multipart: 'banana' } } })).toThrow(/upload route "a": multipart/);
   });
 
   test('phase parts re-presigns the one url and reports nothing landed', async () => {
@@ -1002,7 +1040,8 @@ describe('uploadHandler: the direct transport', () => {
     // Nothing lands early on one object write, so a resumed upload simply runs it again.
     expect(again.landed).toEqual([]);
     expect(again.parts.map((p) => p.n)).toEqual([1]);
-    expect(again.parts[0]!.headers).toEqual({ 'content-type': 'image/png', 'cache-control': 'public, max-age=3600' });
+    expect(again.parts[0]!.headers).toEqual(started.upload.parts[0]!.headers!);
+    expect(again.parts[0]!.headers!['x-amz-meta-upstash-upload']).toBe(marker);
     // ListParts has no upload to list.
     expect(r2Calls().filter((c) => c.method === 'GET')).toEqual([]);
     const past = (await (await post(route, { phase: 'parts', completionToken: started.completionToken, from: 2 })).json()) as WirePartsResponse;

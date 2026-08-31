@@ -74,6 +74,18 @@ export interface InternalUploadHandlers {
   POST: (request: Request) => Promise<Response>;
 }
 
+/**
+ * Written onto every single-PUT object, signed into the url so only this SDK can set it, and read
+ * back to answer the one question a multipart upload answered by construction: are the bytes at this
+ * path the ones THIS upload put there? Phase 'end' completes a multipart, so an object that exists
+ * is one this token created; a presigned PUT is written by the browser, so the object at the path
+ * may be anybody's -- a stale token's, a concurrent upload's, or one that was there all along.
+ * Without a marker, 'end' would record an object it never received and a refusal would delete one it
+ * cannot identify, both on nothing better than a value out of the request body.
+ */
+const UPLOAD_MARKER = 'upstash-upload';
+const UPLOAD_MARKER_HEADER = `x-amz-meta-${UPLOAD_MARKER}`;
+
 const PARTS_PER_BATCH = 16;
 // What the SDK asks for. R2 signs with a credential that lives at most ~600 s and the signature dies
 // with it, so this is an upper bound, never the real lifetime: the client re-presigns through phase
@@ -147,11 +159,15 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     const cache = cacheControl(decided.cache ?? r2.defaultCache, r2.visibility());
     const metadata = decided.metadata ?? {};
     details.metadata = metadata;
+    if (Object.hasOwn(metadata, UPLOAD_MARKER)) {
+      throw new BlobError('invalid_input', { message: `metadata.${UPLOAD_MARKER} is reserved by the SDK` });
+    }
     const headers: Record<string, string> = { 'content-type': file.type, 'cache-control': cache, ...metaHeaders(metadata) };
 
     // The path is onBeforeUpload's to decide, so the multipart cannot be created before it runs; a
     // create that fails afterwards is told back to the app, with the path it reserved, through onError.
     const multipart = wantsMultipart(options.multipart, file.size);
+    const id = crypto.randomUUID();
     let uploadId: string | undefined;
     if (multipart) {
       try {
@@ -159,6 +175,8 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       } catch (e) {
         throw BlobError.is(e) ? e : new BlobError('request_failed', { message: 'could not start the upload', status: 502, cause: e });
       }
+    } else {
+      headers[UPLOAD_MARKER_HEADER] = id;
     }
     // One part covering the whole file is how a single PUT is expressed: the browser runs the same
     // loop over one url, and only this side knows the url is an object PUT and not a part.
@@ -167,7 +185,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       v: 1,
       b: r2.bucketId,
       r: routeId,
-      id: crypto.randomUUID(),
+      id,
       path: decided.path,
       n: file.name,
       type: file.type,
@@ -203,11 +221,11 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       if (!Number.isInteger(p?.n) || typeof p.etag !== 'string') throw new BlobError('invalid_input', { message: 'parts must be [{ n, etag }]' });
     }
     // Kept for discard(): it is what says the object still holds this upload's bytes and not a later
-    // upload's, which matters whenever onBeforeUpload returns a stable path. It is the only thing
-    // that can say so: the head read afterwards is whatever is stored now, so guarding on that would
-    // compare the object to itself. On the retried-'end' path below there is no complete to take it
-    // from, and then a refusal deliberately leaves the object rather than delete one it cannot
-    // identify.
+    // upload's, which matters whenever onBeforeUpload returns a stable path. For a multipart that is
+    // the etag complete() answered with -- the head read afterwards is whatever is stored now, so
+    // guarding on that alone would compare the object to itself. On the retried-'end' path there is
+    // no complete to take it from, and then a refusal deliberately leaves the object rather than
+    // delete one it cannot identify. The single-PUT branch below has its own answer: the marker.
     let completedEtag: string | undefined;
     if (t.uploadId) {
       try {
@@ -216,15 +234,19 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
         // NoSuchUpload after the object landed is a retried 'end': the earlier call completed it.
         if (!BlobError.is(e) || e.code !== 'not_found' || !(await r2.head(t.path))) throw e;
       }
-    } else {
-      // A single PUT stored the object itself, so there is nothing to complete and a retried 'end'
-      // is idempotent for free. The etag the browser read off the PUT is the only thing that can say
-      // the object still holds this upload's bytes; without one, discard() refuses to delete.
-      completedEtag = landedEtag(list);
     }
 
     const head = await r2.head(t.path);
     if (!head) throw new BlobError('not_found', { message: 'the upload never landed' });
+    if (!t.uploadId) {
+      // A single PUT stored the object itself, so there is nothing to complete and a retried 'end'
+      // is idempotent for free -- but also nothing that says the object at this path came from this
+      // upload rather than from a stale token, a concurrent upload or whatever was there before.
+      // The marker signed into the PUT is that proof, and it is what a refusal below deletes on.
+      if (head.metadata[UPLOAD_MARKER] !== t.id) throw new BlobError('not_found', { message: 'the upload never landed' });
+      delete head.metadata[UPLOAD_MARKER];
+      completedEtag = head.etag;
+    }
     // A refusal here deletes an object that is already stored and, on a public bucket, already
     // served: R2 commits at completeMultipart and the public host has no per-object access control,
     // so everything below runs on an object the world can already read. Deleting bounds that
@@ -298,12 +320,12 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       await r2.abortMultipart(t.path, t.uploadId);
       return { ok: true };
     }
-    // A single PUT has nothing to abort: an aborted PUT stores nothing at all, and a cancel that
-    // arrives after the bytes landed is a whole object no callback ever accepted. Only the etag the
-    // browser read says the object is this upload's, and a cancel mid-flight carries none -- there
-    // is nothing there to delete then, so silence is the right answer rather than discard()'s log.
-    const etag = landedEtag(Array.isArray(body.parts) ? body.parts : []);
-    if (etag) await discard(t.path, etag);
+    // A single PUT has nothing to abort: a PUT the browser aborted stores nothing at all, and a
+    // cancel that arrives after the bytes landed is a whole object no callback ever accepted. The
+    // marker is what tells those apart, and it is the whole check -- the request body says nothing
+    // here, so a cancel cannot be aimed at an object this upload did not write.
+    const head = await r2.head(t.path);
+    if (head?.metadata[UPLOAD_MARKER] === t.id) await discard(t.path, head.etag);
     return { ok: true };
   }
 
@@ -357,12 +379,6 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
   }
 
   return { GET, POST };
-}
-
-/** The etag the browser read off a single PUT, when it read one: a CORS-hidden etag is no etag. */
-function landedEtag(list: WireLanded[]): string | undefined {
-  const etag = list.find((p) => p?.n === 1)?.etag;
-  return typeof etag === 'string' && etag ? etag : undefined;
 }
 
 /**

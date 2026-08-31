@@ -223,8 +223,10 @@ export class Bucket {
     if (options.multipart === true && conditional) {
       throw new BlobError('invalid_input', { message: 'multipart: overwrite:false and ifUnchanged are single-PUT only' });
     }
+    // Asked before the conditional check, not after: a body over the single-PUT cap is a refusal
+    // worth naming whatever else is set, and a conditional write cannot rescue it either.
     // A zero-byte multipart upload is not a thing, and its stream has already been released.
-    if (size > 0 && !conditional && wantsMultipart(options.multipart, size)) {
+    if (size > 0 && wantsMultipart(options.multipart, size) && !conditional) {
       return this.putMultipart(path, stream, size, objectHeaders, contentType);
     }
 

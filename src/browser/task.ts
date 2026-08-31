@@ -34,6 +34,8 @@ const ROUTE_ATTEMPTS = 3;
 // minutes out, which a 5 MiB part on a slow link outruns. A 403 on a url older than this is the
 // clock however often it happens; only a url minted moments ago and refused again is the body.
 const PRESIGN_STALE_MS = 60_000;
+// How many batches one part may wait through before the route is simply not signing it.
+const MAX_URL_BATCHES = 4;
 
 type Status = UploadSnapshot['status'];
 
@@ -218,6 +220,12 @@ class Task implements InternalTask {
 
   cancel(): boolean {
     if (this.status === 'done' || this.status === 'error' || this.status === 'canceled') return false;
+    // From 'finishing' the route has already been asked to record the object, and the answer is its
+    // to give: a cancel racing it would ask the route to delete an object onUploadComplete may have
+    // just accepted and written a row for. The local task is canceled either way; what is dropped is
+    // the server call, so the worst case is an object the app has no row for rather than a row the
+    // app has no object for.
+    const finishing = this.status === 'finishing';
     this.status = 'canceled';
     this.paused = false;
     this.cancelController.abort();
@@ -225,7 +233,8 @@ class Task implements InternalTask {
     const waiters = this.resumeWaiters;
     this.resumeWaiters = [];
     for (const w of waiters) w();
-    this.abortServerSide();
+    if (finishing) clearPending(this.storeKey);
+    else this.abortServerSide();
     this.inflight.clear();
     this.notify();
     this.rejectDone(abortError());
@@ -233,15 +242,13 @@ class Task implements InternalTask {
   }
 
   // A multipart upload the server already created is storage nothing else can see, and a single PUT
-  // that landed is an object no callback accepted, so the token is spent on a cancel either way --
-  // with whatever landed, which is what lets the route identify a single PUT it has to delete.
+  // that landed is an object no callback accepted, so the token is spent on a cancel either way.
   private abortServerSide(): void {
     clearPending(this.storeKey);
     const token = this.token;
     if (!token) return;
     this.token = undefined;
-    const landed = this.landed();
-    this.routeCall({ phase: 'cancel', completionToken: token, ...(landed.length ? { parts: landed } : {}) }, undefined, 1).catch(() => {});
+    this.routeCall({ phase: 'cancel', completionToken: token }, undefined, 1).catch(() => {});
   }
 
   private landed(): WireLanded[] {
@@ -404,7 +411,11 @@ class Task implements InternalTask {
     return new Promise((resolve) => this.resumeWaiters.push(resolve));
   }
 
-  private async urlFor(n: number): Promise<Signed> {
+  // Re-entrant on purpose: a batch already in flight was asked for some other part's `from` and
+  // carries at most 16 urls, so a worker further down the file waits for it and then asks for its
+  // own batch. Bounded, because that is one round trip per hop and a route that never signs this
+  // part would otherwise spin here with no backoff and no error.
+  private async urlFor(n: number, attempt = 0): Promise<Signed> {
     const cached = this.urls.get(n);
     if (cached) return cached;
     this.batch ??= this.fetchBatch(n).finally(() => {
@@ -412,8 +423,9 @@ class Task implements InternalTask {
     });
     await this.batch;
     const signed = this.urls.get(n);
-    if (!signed) return this.urlFor(n);
-    return signed;
+    if (signed) return signed;
+    if (attempt >= MAX_URL_BATCHES) throw new BlobError('request_failed', { message: `the route did not sign part ${n}`, status: 503 });
+    return this.urlFor(n, attempt + 1);
   }
 
   private async fetchBatch(from: number): Promise<void> {

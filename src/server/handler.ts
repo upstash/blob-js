@@ -3,7 +3,7 @@ import type { CompletedBlob, UploadFile, UploadRouteTypes } from '../shared/type
 import type { CacheOption, Size } from '../shared/units.ts';
 import type { Bucket } from './bucket.ts';
 import { answerError, deriveRouteId, handleUpload, resolveConstraints, type ErrorDetails, type StandardSchema, type UploadConstraints } from './handle-upload.ts';
-import type { MultipartOption } from './multipart.ts';
+import { resolveMultipart, type MultipartOption } from './multipart.ts';
 
 /**
  * One upload endpoint. With no `routes` it is the route: the client calls `useUpload()` and nothing
@@ -350,7 +350,9 @@ export function uploadHandler<
     const onRouteError = route.onError ?? (options.onError as ((args: any) => ErrorReturn) | undefined);
     const input = route.input ?? options.input;
     const constraints = mergeConstraints(options.constraints, route.constraints);
-    const multipart = route.multipart ?? options.multipart;
+    // Resolved here, not per request: an unparseable size has to be a build error like every other
+    // option, not a 500 raised after onBeforeUpload has already written the app's row.
+    const multipart = resolveMultipart(route.multipart ?? options.multipart, named ? `upload route ${JSON.stringify(name)}: multipart` : 'multipart');
 
     const ctxOf = (request: Request): unknown => slots.get(request)?.ctx;
     const onError = onRouteError

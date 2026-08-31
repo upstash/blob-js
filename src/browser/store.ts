@@ -1,5 +1,6 @@
-// Pending multipart records this client wrote at phase 'begin', keyed by fingerprint. Never trusted
-// for what landed: the server asks R2 for ListParts.
+// Pending upload records this client wrote at phase 'begin', keyed by fingerprint. Never trusted
+// for what landed: the server asks R2 for ListParts, and a single PUT has nothing to resume, so
+// picking the same file again re-sends it under the same token and the same path.
 const PREFIX = 'upstash-blob:v1:';
 
 // The token is a bearer capability for one upload and the only thing kept: nothing else here is

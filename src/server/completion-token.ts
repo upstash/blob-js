@@ -28,7 +28,7 @@ export interface TokenPayload extends TokenBase {
    * the file was small enough to go up as one PUT: then there is no upload to complete or abort.
    */
   uploadId?: string;
-  /** The whole size for a single PUT, so one part covers the file. */
+  /** The part size for a multipart, and the whole file for a single PUT, so one part covers it. */
   partSize: number;
 }
 
