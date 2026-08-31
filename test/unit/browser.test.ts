@@ -128,7 +128,7 @@ describe('one part', () => {
     const same = task.snapshot();
     expect(task.snapshot()).toBe(same);
     await settle();
-    expect(calls[0]!.body).toEqual({ phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 3 }, input: { threadId: 't' } });
+    expect(calls[0]!.body).toEqual({ phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 3 }, head: 'AAAA', input: { threadId: 't' } });
     expect(ManualXhr.pending.length).toBe(1);
     const xhr = ManualXhr.pending[0]!;
     expect(xhr.method).toBe('PUT');

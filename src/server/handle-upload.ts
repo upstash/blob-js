@@ -109,7 +109,13 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     const file = readFile(body.file);
     details.file = file;
     if (file.size === 0) throw new BlobError('empty_body');
-    enforce(routeConstraints, file);
+    // The browser sends the file's first bytes so a mislabelled file is refused here, before a
+    // multipart exists and before onBeforeUpload has written anything down, rather than after the
+    // whole upload. This is ergonomics and not a control: the part bodies never reach this server,
+    // so a client is free to send an honest head and then upload something else. Older clients send
+    // no head, and then the declared type is all there is to check.
+    const head = readHead(body.head);
+    enforce(routeConstraints, file, head);
 
     const input = await validateInput(options.input, body.input);
 
@@ -119,7 +125,6 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     details.path = decided.path;
     details.state = decided.state;
 
-    let allowed = routeConstraints.contentTypes;
     if (decided.constraints) {
       const narrowed = resolveConstraints(decided.constraints);
       if (narrowed.maxBytes !== undefined && routeConstraints.maxBytes !== undefined && narrowed.maxBytes > routeConstraints.maxBytes) {
@@ -129,8 +134,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
         const wider = narrowed.contentTypes.filter((t) => !routeConstraints.contentTypes!.includes(t));
         if (wider.length) throw new TypeError(`onBeforeUpload widened contentTypes (${wider.join(', ')})`);
       }
-      enforce(narrowed, file);
-      allowed = narrowed.contentTypes ?? allowed;
+      enforce(narrowed, file, head);
     }
 
     await r2.credentials();
@@ -158,7 +162,6 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       type: file.type,
       size: file.size,
       headers,
-      allowed,
       ctx: decided.state,
       exp: Date.now() + TOKEN_TTL_MS,
       uploadId,
@@ -187,8 +190,11 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     for (const p of list) {
       if (!Number.isInteger(p?.n) || typeof p.etag !== 'string') throw new BlobError('invalid_input', { message: 'parts must be [{ n, etag }]' });
     }
+    // Kept for discard(): it is what says the object still holds this upload's bytes and not a later
+    // upload's, which matters whenever onBeforeUpload returns a stable path.
+    let completedEtag: string | undefined;
     try {
-      await r2.completeMultipart(t.path, t.uploadId, list);
+      completedEtag = await r2.completeMultipart(t.path, t.uploadId, list);
     } catch (e) {
       // NoSuchUpload after the object landed is a retried 'end': the earlier call completed it.
       if (!BlobError.is(e) || e.code !== 'not_found' || !(await r2.head(t.path))) throw e;
@@ -196,23 +202,15 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
 
     const head = await r2.head(t.path);
     if (!head) throw new BlobError('not_found', { message: 'the upload never landed' });
-    // Refusing bytes that are already stored is only a refusal if they stop being stored: on a public
-    // bucket the url is live from the moment the parts are completed, so the object goes first.
+    // A refusal here deletes an object that is already stored and, on a public bucket, already
+    // served: R2 commits at completeMultipart and the public host has no per-object access control,
+    // so everything below runs on an object the world can already read. Deleting bounds that
+    // exposure to these few round trips; it does not undo it, and an edge that cached the object
+    // inside the window keeps serving it for its Cache-Control. Nothing the SDK can do closes that,
+    // which is why the byte check moved to phase 'begin', where refusing costs nothing.
     if (head.size !== t.size) {
-      await discard(t.path);
+      await discard(t.path, completedEtag);
       throw new BlobError('signature_mismatch', { message: `stored ${head.size} bytes, ${t.size} were declared` });
-    }
-
-    if (t.allowed) {
-      const res = await r2.fetch({ method: 'GET', path: t.path, headers: { range: `bytes=0-${SNIFF_BYTES - 1}` } });
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      if (!res.ok) throw new BlobError('request_failed', { message: `could not read back the upload (${res.status})`, status: 502 });
-      try {
-        checkContentType(head.contentType, bytes, t.allowed);
-      } catch (e) {
-        await discard(t.path);
-        throw e;
-      }
     }
 
     const blob = { ...r2.blobObject(t.path, head.size, head.etag, head.uploadedAt), contentType: head.contentType };
@@ -231,18 +229,32 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
           state: t.ctx,
         });
       } catch (e) {
-        // The invariant: the object exists only if onUploadComplete returned. It was completed a few
-        // lines ago and nothing else has seen it, so a callback that refuses it leaves nothing behind.
-        await discard(t.path);
+        // The intent: the object exists only if onUploadComplete returned. On a private bucket that
+        // holds. On a public bucket it does not -- the object has been readable since
+        // completeMultipart, through the head above and through the whole of this callback, which is
+        // app code and unbounded. The delete ends the storage, not the exposure.
+        await discard(t.path, completedEtag);
         throw e;
       }
     }
     return { blob: { ...blob, uploadedAt: blob.uploadedAt.toISOString() }, data };
   }
 
-  /** Deletes the object a rejected upload left behind. */
-  async function discard(path: string): Promise<void> {
+  /**
+   * Deletes the object a rejected upload left behind, unless it is no longer that object. R2 has no
+   * conditional delete, so this re-reads the etag first: on a stable path a later upload can already
+   * have replaced these bytes, and deleting then would destroy a file that was accepted.
+   */
+  async function discard(path: string, etag: string | undefined): Promise<void> {
     try {
+      if (etag) {
+        const current = await r2.head(path);
+        if (!current) return;
+        if (current.etag !== etag) {
+          console.warn(`[upstash-blob] refused upload ${JSON.stringify(path)} was replaced before it could be deleted; leaving the newer object alone`);
+          return;
+        }
+      }
       const res = await r2.fetch({ method: 'DELETE', path });
       await res.body?.cancel();
       if (!res.ok && res.status !== 404) throw new Error(`storage responded ${res.status}`);
@@ -364,11 +376,24 @@ export function resolveConstraints(constraints: UploadConstraints | undefined): 
   };
 }
 
-export function enforce(constraints: ResolvedConstraints, file: UploadFile): void {
+export function enforce(constraints: ResolvedConstraints, file: UploadFile, head?: Uint8Array): void {
   if (constraints.maxBytes !== undefined && file.size > constraints.maxBytes) {
     throw new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(constraints.maxBytes)} limit` });
   }
-  if (constraints.contentTypes) checkContentType(file.type, undefined, constraints.contentTypes);
+  if (constraints.contentTypes) checkContentType(file.type, head, constraints.contentTypes);
+}
+
+/** The leading bytes a browser may send at 'begin', base64. Anything unreadable is simply no head. */
+function readHead(raw: unknown): Uint8Array | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  try {
+    const bin = atob(raw);
+    const out = new Uint8Array(Math.min(bin.length, SNIFF_BYTES));
+    for (let i = 0; i < out.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return undefined;
+  }
 }
 
 function readFile(raw: unknown): UploadFile {

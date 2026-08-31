@@ -274,10 +274,12 @@ class Task implements InternalTask {
   }
 
   private async begin(): Promise<void> {
+    const head = await readHead(this.file);
     const res = (await this.routeCall(
       {
         phase: 'begin',
         file: { name: this.file.name, type: this.file.type, size: this.file.size },
+        ...(head === undefined ? {} : { head }),
         ...(this.options.input === undefined ? {} : { input: this.options.input }),
       },
       this.cancelController.signal,
@@ -573,4 +575,24 @@ export function routeMessage(json: unknown, res: { status: number; statusText: s
 export async function resolveHeaders(h: HeadersProvider | undefined): Promise<Record<string, string>> {
   if (!h) return {};
   return await h();
+}
+
+/** Matches SNIFF_BYTES on the server. Duplicated rather than imported: this file ships to browsers. */
+const HEAD_BYTES = 4100;
+
+/**
+ * The file's first bytes, base64, for the server's type check at 'begin'. Best effort: a file the
+ * browser will not read yet is not worth failing the upload over, so the head is simply omitted and
+ * the server falls back to the declared type.
+ */
+async function readHead(file: Blob): Promise<string | undefined> {
+  try {
+    const buf = await file.slice(0, HEAD_BYTES).arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] as number);
+    return btoa(bin);
+  } catch {
+    return undefined;
+  }
 }

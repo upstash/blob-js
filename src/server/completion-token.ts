@@ -16,8 +16,6 @@ interface TokenBase {
   size: number;
   /** Headers pinned into the signature: content-type, cache-control, x-amz-meta-*. */
   headers: Record<string, string>;
-  /** Expanded allowed types, sniffed at phase 'end'. */
-  allowed: string[] | undefined;
   /** What onBeforeUpload returned as `state`. */
   ctx: unknown;
   /** Unix ms. */

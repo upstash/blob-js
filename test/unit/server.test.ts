@@ -670,7 +670,7 @@ describe('uploadHandler: the direct transport', () => {
     expect(seen).toEqual([{ code: 'request_failed', path: 'big.bin', metadata: { rowId: '7' } }]);
   });
 
-  test('bytes refused at the end are deleted, not left served', async () => {
+  test('bytes refused at the end are deleted, which bounds the exposure without undoing it', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
     const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
@@ -680,7 +680,81 @@ describe('uploadHandler: the direct transport', () => {
     const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
     expect(end.status).toBe(403);
     expect((await end.json()).code).toBe('signature_mismatch');
-    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'DELETE']);
+    // The second HEAD is discard() checking the object is still the one this upload completed.
+    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'HEAD', 'DELETE']);
+  });
+
+  test('a refusal leaves a newer object alone: a stable path is not a licence to delete', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'avatars/u1.png' }) });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    // The size check refuses, but by then the HEAD reports an etag from a later upload to the same
+    // key. Deleting here would destroy a file that was accepted.
+    r2Handler = fullR2({ 'content-length': '99', etag: '"newer"', 'content-type': 'image/png' });
+    calls = [];
+    const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
+    expect(end.status).toBe(403);
+    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'HEAD']);
+    expect(r2Calls().some((c) => c.method === 'DELETE')).toBe(false);
+  });
+
+  test('phase end never reads the stored bytes back', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({
+      bucket: bucket(),
+      constraints: { contentTypes: ['image/png'] },
+      onBeforeUpload: () => ({ path: 'a.png' }),
+    });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    r2Handler = fullR2();
+    calls = [];
+    const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
+    expect(end.status).toBe(200);
+    // No ranged GET: the type was settled at 'begin', where refusing costs nothing.
+    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD']);
+    expect(r2Calls().some((c) => c.headers.get('range'))).toBe(false);
+  });
+
+  test('the head sent at begin refuses a mislabelled file before a multipart exists', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({
+      bucket: bucket(),
+      constraints: { contentTypes: ['image/png'] },
+      onBeforeUpload: () => ({ path: 'a.png' }),
+    });
+    calls = [];
+    // 'PK\x03\x04...': a zip, declared image/png.
+    const res = await post(route, {
+      phase: 'begin',
+      file: { name: 'a.png', type: 'image/png', size: 10 },
+      head: btoa('PK\u0003\u0004\u0014\u0000'),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).message).toContain('application/zip');
+    // Nothing was created: no CreateMultipartUpload reached R2.
+    expect(r2Calls().some((c) => c.method === 'POST')).toBe(false);
+  });
+
+  test('a head that agrees, and a client that sends none, both proceed', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({
+      bucket: bucket(),
+      constraints: { contentTypes: ['image/png'] },
+      onBeforeUpload: () => ({ path: 'a.png' }),
+    });
+    const png = btoa('\u0089PNG\r\n\u001a\n\u0000\u0000\u0000\rIHDR');
+    const withHead = await post(route, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 }, head: png });
+    expect(withHead.status).toBe(200);
+    // An older client sends no head at all, and the declared type is all there is to go on.
+    const noHead = await post(route, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } });
+    expect(noHead.status).toBe(200);
+    // So is a head that is not decodable.
+    const junk = await post(route, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 }, head: '!!!!not base64!!!!' });
+    expect(junk.status).toBe(200);
   });
 
   test('onUploadComplete throwing deletes the object: it exists only if the callback returned', async () => {
@@ -699,8 +773,8 @@ describe('uploadHandler: the direct transport', () => {
     const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
     expect(end.status).toBe(409);
     expect((await end.json()).message).toBe('That thread was deleted');
-    // complete, HEAD, and then the delete that keeps the invariant.
-    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'DELETE']);
+    // complete, HEAD, the re-read discard() guards on, and then the delete.
+    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'HEAD', 'DELETE']);
   });
 
   test('a delete that fails after onUploadComplete threw keeps the refusal and says what it left behind', async () => {
