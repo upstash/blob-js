@@ -132,7 +132,8 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       allowed = narrowed.contentTypes ?? allowed;
     }
 
-    const cache = cacheControl(decided.cache ?? r2.defaultCache);
+    await r2.credentials();
+    const cache = cacheControl(decided.cache ?? r2.defaultCache, r2.visibility());
     const metadata = decided.metadata ?? {};
     details.metadata = metadata;
     const headers: Record<string, string> = { 'content-type': file.type, 'cache-control': cache, ...metaHeaders(metadata) };

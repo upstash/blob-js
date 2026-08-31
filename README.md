@@ -269,6 +269,17 @@ export async function POST(request: Request) {
 }
 ```
 
+`cache` takes `'immutable'`, `'revalidate'`, `'no-store'` or a duration, and emits `private` instead
+of `public` when the bucket is private. Anything containing `=` or `,` is a cache-control header and
+is stored exactly as written, so `s-maxage`, `stale-while-revalidate` and `no-transform` need no
+option of their own:
+
+```ts
+cache: '1h'                                        // public, max-age=3600
+cache: 'revalidate'                                // public, max-age=0, must-revalidate
+cache: 'public, max-age=60, s-maxage=31536000'     // yours, verbatim
+```
+
 Keep the limit below the hosting platform's request-body cap. `request.formData()` buffers the
 multipart body. `Bucket.put` also buffers an unknown-length `Request` or `ReadableStream` up to
 `maxBytes` to determine the content length; pass `size` when it is known to avoid that buffering.

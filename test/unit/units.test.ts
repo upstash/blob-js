@@ -83,6 +83,21 @@ describe('cacheControl', () => {
     expect(cacheControl('revalidate')).toBe('public, max-age=0, must-revalidate');
     expect(cacheControl('no-store')).toBe('no-store');
   });
+
+  test('a private bucket never says public', () => {
+    expect(cacheControl(undefined, 'private')).toBe('private, max-age=3600');
+    expect(cacheControl('1m', 'private')).toBe('private, max-age=60');
+    expect(cacheControl('immutable', 'private')).toBe('private, max-age=31536000, immutable');
+    expect(cacheControl('revalidate', 'private')).toBe('private, max-age=0, must-revalidate');
+    expect(cacheControl('no-store', 'private')).toBe('no-store');
+  });
+
+  test('anything with a directive separator is a header, passed through as written', () => {
+    expect(cacheControl('public, max-age=60, s-maxage=31536000')).toBe('public, max-age=60, s-maxage=31536000');
+    expect(cacheControl('  max-age=0, stale-while-revalidate=86400  ')).toBe('max-age=0, stale-while-revalidate=86400');
+    // Written out, so the visibility is the caller's to state and is not second-guessed.
+    expect(cacheControl('public, max-age=60', 'private')).toBe('public, max-age=60');
+  });
 });
 
 test('sizes are formatted the decimal way they are parsed', () => {

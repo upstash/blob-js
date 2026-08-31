@@ -76,15 +76,28 @@ export function parseDuration(input: Duration, what = 'duration'): number {
   return Math.floor(Number(m[1]) * mult);
 }
 
+/**
+ * Three words and a duration for what almost every object wants. Anything else is a cache-control
+ * header, written out: `s-maxage`, `stale-while-revalidate`, `no-transform` and whatever the spec
+ * adds next are all sayable without this type growing a camelCase word for each of them.
+ */
 export type CacheOption = Duration | 'immutable' | 'revalidate' | 'no-store';
 
-export function cacheControl(cache: CacheOption | undefined): string {
-  if (cache === undefined) return 'public, max-age=3600';
-  if (cache === 'immutable') return 'public, max-age=31536000, immutable';
+// A directive separator is what tells the two apart: a header always has one, a duration never does.
+const RAW_HEADER = /[=,]/;
+
+export function cacheControl(cache: CacheOption | undefined, visibility: 'public' | 'private' = 'public'): string {
+  // `public` on an object only a signed request can read invites every shared cache between here
+  // and the reader to keep a copy and hand it to the next one.
+  const scope = visibility;
+  if (cache === undefined) return `${scope}, max-age=3600`;
+  if (cache === 'immutable') return `${scope}, max-age=31536000, immutable`;
   // For a stable path that is overwritten: the copy is kept and checked with If-None-Match, so an
   // unchanged object costs a 304 with no body instead of the whole object once every max-age.
   // A short max-age is the wrong tool there -- it is stale until it expires, then re-downloads.
-  if (cache === 'revalidate') return 'public, max-age=0, must-revalidate';
+  if (cache === 'revalidate') return `${scope}, max-age=0, must-revalidate`;
   if (cache === 'no-store') return 'no-store';
-  return `public, max-age=${Math.floor(parseDuration(cache, 'cache') / 1000)}`;
+  // Written out, and passed through as written: the visibility is yours to state too.
+  if (typeof cache === 'string' && RAW_HEADER.test(cache)) return cache.trim();
+  return `${scope}, max-age=${Math.floor(parseDuration(cache, 'cache') / 1000)}`;
 }

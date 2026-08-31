@@ -71,6 +71,14 @@ export class R2 {
     return this.creds.get();
   }
 
+  /**
+   * What the credentials say, else what the caller declared, else public. Read after `credentials()`
+   * has resolved, so a bucket that never declared it still stores the right cache-control.
+   */
+  visibility(): 'public' | 'private' {
+    return this.creds.peek()?.visibility ?? this.declaredVisibility ?? 'public';
+  }
+
   /** Undefined on a private bucket: nothing serves its objects over the public host. */
   publicUrl(path: string): string | undefined {
     if ((this.creds.peek()?.visibility ?? this.declaredVisibility) === 'private') return undefined;

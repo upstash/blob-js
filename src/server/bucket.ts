@@ -204,9 +204,12 @@ export class Bucket {
     // A zero-length body goes out as bytes, so the peeked stream has to be released rather than left open.
     if (size === 0) await stream.cancel();
 
+    // Resolved before the header is written: visibility decides public vs private on it, and the
+    // credentials that carry it are not peekable until they have been fetched once.
+    await this.r2.credentials();
     const objectHeaders: Record<string, string> = {
       'content-type': contentType,
-      'cache-control': cacheControl(options.cache ?? this.defaultCache),
+      'cache-control': cacheControl(options.cache ?? this.defaultCache, this.r2.visibility()),
       ...metaHeaders(options.metadata),
     };
 
