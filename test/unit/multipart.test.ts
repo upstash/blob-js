@@ -29,6 +29,13 @@ describe('wantsMultipart', () => {
     expect(wantsMultipart(false, 4_000_000_000)).toBe(false);
   });
 
+  test('a threshold of 0 is the old always-multipart behaviour, the long way round', () => {
+    for (const option of [0, '0b', true] as const) {
+      expect(wantsMultipart(option, 1)).toBe(true);
+      expect(wantsMultipart(option, MULTIPART_THRESHOLD)).toBe(true);
+    }
+  });
+
   test('past R2 single-PUT cap there is no choice, and a false that forbids it says so', () => {
     expect(wantsMultipart(undefined, SINGLE_PUT_MAX + 1)).toBe(true);
     expect(wantsMultipart('50gb', SINGLE_PUT_MAX + 1)).toBe(true);

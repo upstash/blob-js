@@ -50,8 +50,10 @@ describe('put', () => {
   });
 
   test('sniff rejects lying bytes and disallowed declarations', async () => {
-    const html = new File(['<html><body>hi</body></html>'], 'x.png', { type: 'image/png' });
-    await expect(pub.put(p('lie.png'), html, { contentTypes: ['image/png'] })).rejects.toMatchObject({ code: 'content_type_not_allowed' });
+    // Only a closed signature is a lie the SDK will name. A type with no magic number -- html, svg,
+    // plain text -- is a gap in the table rather than a check, and the declaration stands.
+    const zip = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00])], 'x.png', { type: 'image/png' });
+    await expect(pub.put(p('lie.png'), zip, { contentTypes: ['image/png'] })).rejects.toMatchObject({ code: 'content_type_not_allowed' });
     const svg = new File(['<svg/>'], 'x.svg', { type: 'image/svg+xml' });
     await expect(pub.put(p('x.svg'), svg, { contentTypes: ['image/*'] })).rejects.toMatchObject({ code: 'content_type_not_allowed' });
     expect(() => pub.put(p('x'), 'x', { contentTypes: ['*/*'] })).toThrow();

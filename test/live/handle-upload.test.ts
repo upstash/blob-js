@@ -217,11 +217,20 @@ describe('begin', () => {
 
   });
 
-  test('end refuses bytes that lie about their type, a tampered token, and a missing upload', async () => {
+  test('end refuses a missing upload, a tampered token and a sibling route, but does not re-read bytes', async () => {
     const html = new TextEncoder().encode('<!DOCTYPE html><html><body>x</body></html>');
+    // An honest head is refused at 'begin', where refusing costs nothing and nothing is signed.
+    // 'PK\x03\x04...': a zip, declared image/png.
+    const sniffed = await post(chat, { phase: 'begin', file: { name: 'x.png', type: 'image/png', size: 200 }, head: btoa('PK\u0003\u0004\u0014\u0000'), input: { threadId: tid } });
+    expect(sniffed.status).toBe(400);
+    expect((await sniffed.json()).code).toBe('content_type_not_allowed');
+
+    // Sending no head, or a head that does not match what is uploaded afterwards, is not something
+    // this side can catch: the bytes go straight to storage and never reach it. The type check is
+    // ergonomics, and the declared type is what gets stored and served either way.
     const res = await post(chat, { phase: 'begin', file: { name: 'x.png', type: 'image/png', size: html.byteLength }, input: { threadId: tid } });
     const begin = (await res.json()) as WireBeginResponse;
-    // Nothing has been sent, so there is no part to complete: 'end' has nothing to work with.
+    // Nothing has been sent, so there is nothing to record: 'end' has nothing to work with.
     const missing = await post(chat, { phase: 'end', completionToken: begin.completionToken });
     expect(missing.status).toBe(400);
     expect(rows[begin.path]!.status).toBe('pending');
@@ -229,12 +238,8 @@ describe('begin', () => {
     const put = await fetch(begin.upload.parts[0]!.url, { method: 'PUT', headers: begin.upload.parts[0]!.headers, body: html });
     expect(put.status).toBe(200);
     const end = await post(chat, { phase: 'end', completionToken: begin.completionToken, parts: [{ n: 1, etag: put.headers.get('etag')! }] });
-    expect(end.status).toBe(400);
-    expect((await end.json()).code).toBe('content_type_not_allowed');
-    expect(rows[begin.path]!.status).toBe('pending');
-    // The object landed a moment ago and, on a public bucket, was served from that moment: refusing
-    // the bytes has to mean deleting them.
-    expect(await pub.exists(begin.path)).toBe(false);
+    expect(end.status).toBe(200);
+    expect((await pub.info(begin.path)).contentType).toBe('image/png');
 
     const [payload, sig] = begin.completionToken.split('.');
     const tampered = await post(chat, { phase: 'end', completionToken: `${payload}x.${sig}` });

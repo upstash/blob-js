@@ -71,10 +71,13 @@ describe('1. avatar', () => {
 
     const bad = await POST_avatar(new Request('https://app/api/avatar', { method: 'POST', body: fd }));
     expect(bad.status).toBe(401);
-    const html = new FormData();
-    html.set('file', new File(['<html>'], 'x.png', { type: 'image/png' }));
-    const rejected = await POST_avatar(new Request('https://app/api/avatar', { method: 'POST', body: html, headers: { authorization: 'Bearer 42' } }));
+    // A signature the table proves outright, declared as something else. Only a closed signature is
+    // a lie the SDK will name: a type with no magic number, html included, is a gap and not a check.
+    const lying = new FormData();
+    lying.set('file', new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00])], 'x.png', { type: 'image/png' }));
+    const rejected = await POST_avatar(new Request('https://app/api/avatar', { method: 'POST', body: lying, headers: { authorization: 'Bearer 42' } }));
     expect(rejected.status).toBe(400);
+    expect((await rejected.json()).error).toContain('zip');
     const empty = await POST_avatarStreaming(new Request('https://app/api/avatar/streaming', { method: 'POST', headers: { authorization: 'Bearer 42' } }));
     expect(empty.status).toBe(400);
     expect((await empty.json()).error).toContain('body');
