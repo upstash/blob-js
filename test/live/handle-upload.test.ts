@@ -14,7 +14,7 @@ afterAll(async () => {
 const rows: Record<string, { status: string; owner?: string; size?: number }> = {};
 const completed: string[] = [];
 let lastChatCompleted: { route: string; name: string; contentType: string } | undefined;
-let lastLargeCompleted: { multipartUploadId: string; name: string; declared: number } | undefined;
+let lastLargeCompleted: { multipartUploadId: string | undefined; name: string; declared: number } | undefined;
 
 // The handler with no `routes` IS the route: no ?route= in the url and no name on the client.
 // `context` is written above the callbacks on purpose -- see the ordering rule in handler.ts.
@@ -117,7 +117,7 @@ describe('GET', () => {
 describe('begin', () => {
   const tid = '4d4a2a2c-5d6e-4f7a-8b9c-0d1e2f3a4b5c';
 
-  test('rejects before any multipart is created: constraints, input, auth, forbidden, empty', async () => {
+  test('rejects before anything is created: constraints, input, auth, forbidden, empty', async () => {
     const file = { name: 'a.png', type: 'image/png', size: 100 };
     let res = await post(chat, { phase: 'begin', file: { ...file, type: 'text/html' }, input: { threadId: tid } });
     expect(res.status).toBe(400);
@@ -132,7 +132,7 @@ describe('begin', () => {
     expect(res.status).toBe(401);
     res = await post(chat, { phase: 'begin', file, input: { threadId: '00000000-0000-4000-8000-000000000000' } });
     expect(res.status).toBe(403);
-    // There is no single-PUT path left, so a zero-byte file has no part to send: refused at begin.
+    // A zero-byte body is not something to sign a PUT for: refused at begin.
     res = await post(chat, { phase: 'begin', file: { ...file, size: 0 }, input: { threadId: tid } });
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('empty_body');
@@ -144,35 +144,47 @@ describe('begin', () => {
     expect(res.status).toBe(400);
   });
 
-  test('a small file is one part: the object appears at end, sniffed, with the pinned headers', async () => {
+  test('a small file is one PUT: the object lands with its pinned headers and end records it', async () => {
     const body = new Uint8Array(new ArrayBuffer(PNG.byteLength + 500));
     body.set(PNG);
     const res = await post(chat, { phase: 'begin', file: { name: 'Holiday Pic.PNG', type: 'image/png', size: body.byteLength }, input: { threadId: tid } });
     expect(res.status).toBe(200);
     const begin = (await res.json()) as WireBeginResponse;
     expect(begin.path).toMatch(new RegExp(`^${p('chat')}/u1/${tid}/holiday-pic-[1-9A-HJ-NP-Za-km-z]{8}\\.png$`));
-    // partSizeFor's floor is 5 MiB, so anything under it is exactly one part.
-    expect(begin.upload.partSize).toBe(5 * 1024 * 1024);
+    // Under the threshold: one part covering the whole file, and no multipart behind it.
+    expect(begin.upload.multipart).toBe(false);
+    expect(begin.upload.partSize).toBe(body.byteLength);
     expect(begin.upload.parts.map((x) => x.n)).toEqual([1]);
-    // Nothing exists until phase 'end' completes the multipart: that is what lets onUploadComplete
-    // refuse an object nobody has been able to see.
     expect(await pub.exists(begin.path)).toBe(false);
 
-    // A part url signs content-length and nothing else. Content type, cache-control and the
-    // x-amz-meta-* headers were pinned at CreateMultipartUpload, so there is nothing to send here.
-    const partUrl = begin.upload.parts[0]!.url;
-    expect(new URL(partUrl).searchParams.get('X-Amz-SignedHeaders')).toContain('content-length');
-    const wrongSize = await fetch(partUrl, { method: 'PUT', body: body.subarray(0, 100) });
+    // This url writes the object, so the content type, the cache-control and the x-amz-meta-*
+    // headers a multipart pins at create are signed into it and have to be sent verbatim. This is
+    // also the CORS contract: the bucket has to allow these request headers from the page's origin.
+    const putUrl = begin.upload.parts[0]!.url;
+    const pinned = begin.upload.parts[0]!.headers!;
+    expect(pinned['content-type']).toBe('image/png');
+    expect(pinned['cache-control']).toContain('max-age=31536000');
+    expect(pinned['x-amz-meta-uploadedby']).toBe('u1');
+    const signed = new URL(putUrl).searchParams.get('X-Amz-SignedHeaders')!;
+    for (const name of ['content-length', ...Object.keys(pinned)]) expect(signed).toContain(name);
+    const unpinned = await fetch(putUrl, { method: 'PUT', body });
+    expect(unpinned.status).toBe(403);
+    const wrongSize = await fetch(putUrl, { method: 'PUT', headers: pinned, body: body.subarray(0, 100) });
     expect(wrongSize.status).toBe(403);
-    const put = await fetch(partUrl, { method: 'PUT', body });
+    const put = await fetch(putUrl, { method: 'PUT', headers: pinned, body });
     expect(put.status).toBe(200);
     const etag = put.headers.get('etag')!;
+    // The object is stored from here, before any callback has seen it: what phase 'end' can still do
+    // is refuse it and delete it, which is what the next test measures.
+    expect(await pub.exists(begin.path)).toBe(true);
 
-    // Phase 'parts' re-presigns and reports what R2 says landed, at one part as at four.
+    // Phase 'parts' re-presigns the one url. Nothing lands early on a single PUT, so it reports
+    // nothing landed and a resumed upload simply runs the PUT again.
     const parts = (await (await post(chat, { phase: 'parts', completionToken: begin.completionToken, from: 1 })).json()) as WirePartsResponse;
     expect(parts.size).toBe(body.byteLength);
+    expect(parts.multipart).toBe(false);
     expect(parts.partSize).toBe(begin.upload.partSize);
-    expect(parts.landed.map((l) => l.n)).toEqual([1]);
+    expect(parts.landed).toEqual([]);
     expect(parts.parts.map((x) => x.n)).toEqual([1]);
 
     const endRes = await post(chat, { phase: 'end', completionToken: begin.completionToken, parts: [{ n: 1, etag }] });
@@ -206,14 +218,14 @@ describe('begin', () => {
     expect(missing.status).toBe(400);
     expect(rows[begin.path]!.status).toBe('pending');
 
-    const put = await fetch(begin.upload.parts[0]!.url, { method: 'PUT', body: html });
+    const put = await fetch(begin.upload.parts[0]!.url, { method: 'PUT', headers: begin.upload.parts[0]!.headers, body: html });
     expect(put.status).toBe(200);
     const end = await post(chat, { phase: 'end', completionToken: begin.completionToken, parts: [{ n: 1, etag: put.headers.get('etag')! }] });
     expect(end.status).toBe(400);
     expect((await end.json()).code).toBe('content_type_not_allowed');
     expect(rows[begin.path]!.status).toBe('pending');
-    // The parts were completed into an object a moment ago and, on a public bucket, it was served
-    // from that moment: refusing the bytes has to mean deleting them.
+    // The object landed a moment ago and, on a public bucket, was served from that moment: refusing
+    // the bytes has to mean deleting them.
     expect(await pub.exists(begin.path)).toBe(false);
 
     const [payload, sig] = begin.completionToken.split('.');
@@ -236,12 +248,12 @@ describe('begin', () => {
     const body = new Uint8Array(new ArrayBuffer(PNG.byteLength + 40));
     body.set(PNG);
     const begin = (await (await post(refuses, { phase: 'begin', file: { name: 'receipt.png', type: 'image/png', size: body.byteLength } })).json()) as WireBeginResponse;
-    const put = await fetch(begin.upload.parts[0]!.url, { method: 'PUT', body });
+    const put = await fetch(begin.upload.parts[0]!.url, { method: 'PUT', headers: begin.upload.parts[0]!.headers, body });
     expect(put.status).toBe(200);
     const end = await post(refuses, { phase: 'end', completionToken: begin.completionToken, parts: [{ n: 1, etag: put.headers.get('etag')! }] });
     expect(end.status).toBe(403);
-    // The invariant the app gets to rely on: the object exists if and only if onUploadComplete
-    // returned, so a failed insert never leaves a file nothing points at.
+    // What the app gets to rely on: a refused upload leaves no object, whether phase 'end' had to
+    // delete one a single PUT had already stored or simply never completed a multipart.
     expect(await pub.exists(path)).toBe(false);
   });
 
@@ -291,8 +303,9 @@ describe('begin', () => {
     expect(completed.length).toBe(2);
     expect(completed[0]).toBe(completed[1]!);
     expect(completed[0]).toMatch(/^[0-9a-f-]{36}$/);
-    // R2's own id, for a bucket.abortMultipartUpload(): not the same id the app dedupes on.
-    expect(lastLargeCompleted!.multipartUploadId.length).toBeGreaterThan(8);
+    // R2's own id, for a bucket.abortMultipartUpload(): not the same id the app dedupes on. Only a
+    // file over the route's threshold has one, and this one is four parts.
+    expect(lastLargeCompleted!.multipartUploadId!.length).toBeGreaterThan(8);
     expect(lastLargeCompleted!.multipartUploadId).not.toBe(completed[0]);
     // file and state both crossed in the completion token and came back untouched.
     expect(lastLargeCompleted!.name).toBe('big.bin');

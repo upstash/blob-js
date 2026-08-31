@@ -4,13 +4,17 @@ import { cacheControl, formatBytes, parseSize, type CacheOption, type Size } fro
 import { r2Of, type Bucket } from './bucket.ts';
 import { signToken, verifyToken, type TokenPayload } from './completion-token.ts';
 import { encodeKey, metaHeaders } from './keys.ts';
-import { partCount, partSizeFor } from './multipart.ts';
+import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
 import { checkContentType, expandContentTypes, SNIFF_BYTES } from './sniff.ts';
 
 /**
  * The direct transport, internal to `uploadHandler`. Presign, the browser PUTs straight to storage,
- * and phase 'end' completes the upload. Always multipart -- one part when the file fits one -- so
- * the object does not exist until 'end' runs the route's onUploadComplete.
+ * and phase 'end' records the object.
+ *
+ * Under the route's `multipart` threshold that is one presigned PUT: one round trip, nothing
+ * half-created to sweep up, and the object exists from the moment the last byte lands, so a refusal
+ * in onUploadComplete deletes it. Over the threshold the file goes up in parts and the object does
+ * not exist until 'end' completes it.
  */
 
 /** The subset of the Standard Schema spec the SDK reads: schema['~standard'].validate(). */
@@ -57,6 +61,8 @@ export interface InternalUploadOptions {
   /** Which route a completion token belongs to: a token minted by one is not spendable at another. */
   id: string;
   constraints?: UploadConstraints;
+  /** Where parts start. @see MULTIPART_THRESHOLD */
+  multipart?: MultipartOption;
   input?: StandardSchema<any, any> | undefined;
   onBeforeUpload: (args: { request: Request; route: string; file: UploadFile; input: unknown }) => Decided | Promise<Decided>;
   onUploadComplete?: (args: Record<string, unknown>) => unknown;
@@ -145,13 +151,18 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
 
     // The path is onBeforeUpload's to decide, so the multipart cannot be created before it runs; a
     // create that fails afterwards is told back to the app, with the path it reserved, through onError.
-    let uploadId: string;
-    try {
-      uploadId = await r2.createMultipart(decided.path, headers);
-    } catch (e) {
-      throw BlobError.is(e) ? e : new BlobError('request_failed', { message: 'could not start the upload', status: 502, cause: e });
+    const multipart = wantsMultipart(options.multipart, file.size);
+    let uploadId: string | undefined;
+    if (multipart) {
+      try {
+        uploadId = await r2.createMultipart(decided.path, headers);
+      } catch (e) {
+        throw BlobError.is(e) ? e : new BlobError('request_failed', { message: 'could not start the upload', status: 502, cause: e });
+      }
     }
-    const partSize = partSizeFor(file.size);
+    // One part covering the whole file is how a single PUT is expressed: the browser runs the same
+    // loop over one url, and only this side knows the url is an object PUT and not a part.
+    const partSize = multipart ? partSizeFor(file.size) : file.size;
     const payload: TokenPayload = {
       v: 1,
       b: r2.bucketId,
@@ -164,18 +175,19 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       headers,
       ctx: decided.state,
       exp: Date.now() + TOKEN_TTL_MS,
-      uploadId,
+      ...(uploadId === undefined ? {} : { uploadId }),
       partSize,
     };
     const completionToken = await signToken(payload, tokenKey());
-    return { completionToken, path: decided.path, upload: { partSize, parts: await presignParts(payload, 1) } };
+    return { completionToken, path: decided.path, upload: { partSize, multipart, parts: await presignParts(payload, 1) } };
   }
 
   async function parts(body: any, details: ErrorDetails): Promise<WirePartsResponse> {
     const t = await verify(body.completionToken, details);
     const from = Number.isInteger(body.from) && body.from >= 1 ? body.from : 1;
-    const landed = (await r2.listParts(t.path, t.uploadId)).map(({ n, etag }) => ({ n, etag }));
-    return { partSize: t.partSize, size: t.size, parts: await presignParts(t, from), landed };
+    // Nothing lands early on a single PUT: it is one object write, so a resumed upload runs it again.
+    const landed = t.uploadId ? (await r2.listParts(t.path, t.uploadId)).map(({ n, etag }) => ({ n, etag })) : [];
+    return { partSize: t.partSize, size: t.size, multipart: t.uploadId !== undefined, parts: await presignParts(t, from), landed };
   }
 
   async function end(request: Request, body: any, details: ErrorDetails): Promise<WireEndResponse<unknown>> {
@@ -185,7 +197,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
 
     const expected = partCount(t.size, t.partSize);
     let list: WireLanded[] = Array.isArray(body.parts) ? body.parts : [];
-    if (list.length !== expected) list = (await r2.listParts(t.path, t.uploadId)).map(({ n, etag }) => ({ n, etag }));
+    if (list.length !== expected && t.uploadId) list = (await r2.listParts(t.path, t.uploadId)).map(({ n, etag }) => ({ n, etag }));
     if (list.length !== expected) throw new BlobError('invalid_input', { message: `expected ${expected} parts, ${list.length} landed` });
     for (const p of list) {
       if (!Number.isInteger(p?.n) || typeof p.etag !== 'string') throw new BlobError('invalid_input', { message: 'parts must be [{ n, etag }]' });
@@ -197,11 +209,18 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     // from, and then a refusal deliberately leaves the object rather than delete one it cannot
     // identify.
     let completedEtag: string | undefined;
-    try {
-      completedEtag = await r2.completeMultipart(t.path, t.uploadId, list);
-    } catch (e) {
-      // NoSuchUpload after the object landed is a retried 'end': the earlier call completed it.
-      if (!BlobError.is(e) || e.code !== 'not_found' || !(await r2.head(t.path))) throw e;
+    if (t.uploadId) {
+      try {
+        completedEtag = await r2.completeMultipart(t.path, t.uploadId, list);
+      } catch (e) {
+        // NoSuchUpload after the object landed is a retried 'end': the earlier call completed it.
+        if (!BlobError.is(e) || e.code !== 'not_found' || !(await r2.head(t.path))) throw e;
+      }
+    } else {
+      // A single PUT stored the object itself, so there is nothing to complete and a retried 'end'
+      // is idempotent for free. The etag the browser read off the PUT is the only thing that can say
+      // the object still holds this upload's bytes; without one, discard() refuses to delete.
+      completedEtag = landedEtag(list);
     }
 
     const head = await r2.head(t.path);
@@ -275,7 +294,16 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
 
   async function cancel(body: any, details: ErrorDetails): Promise<{ ok: true }> {
     const t = await verify(body.completionToken, details);
-    await r2.abortMultipart(t.path, t.uploadId);
+    if (t.uploadId) {
+      await r2.abortMultipart(t.path, t.uploadId);
+      return { ok: true };
+    }
+    // A single PUT has nothing to abort: an aborted PUT stores nothing at all, and a cancel that
+    // arrives after the bytes landed is a whole object no callback ever accepted. Only the etag the
+    // browser read says the object is this upload's, and a cancel mid-flight carries none -- there
+    // is nothing there to delete then, so silence is the right answer rather than discard()'s log.
+    const etag = landedEtag(Array.isArray(body.parts) ? body.parts : []);
+    if (etag) await discard(t.path, etag);
     return { ok: true };
   }
 
@@ -293,7 +321,22 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     return r2.signingSecret;
   }
 
-  async function presignParts(t: { path: string; size: number; uploadId: string; partSize: number }, from: number): Promise<WirePart[]> {
+  async function presignParts(t: { path: string; size: number; uploadId?: string; partSize: number; headers: Record<string, string> }, from: number): Promise<WirePart[]> {
+    // A single PUT writes the object itself, so what a multipart upload pinned at create -- the
+    // content type, the cache-control, the metadata -- has to be signed into this url instead and
+    // sent with it. Signed, not merely sent: an unsigned header would be the browser's to choose,
+    // and metadata the app reads back in onUploadComplete is not the client's to write.
+    if (!t.uploadId) {
+      if (from > 1) return [];
+      const url = await r2.presign({
+        method: 'PUT',
+        path: t.path,
+        expiresIn: PRESIGN_REQUESTED_SECONDS,
+        minRemainingSeconds: PRESIGN_MIN_REMAINING_SECONDS,
+        signedHeaders: { ...t.headers, 'content-length': String(t.size) },
+      });
+      return [{ n: 1, url, headers: { ...t.headers } }];
+    }
     const count = partCount(t.size, t.partSize);
     const out: WirePart[] = [];
     for (let n = from; n < from + PARTS_PER_BATCH && n <= count; n++) {
@@ -314,6 +357,12 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
   }
 
   return { GET, POST };
+}
+
+/** The etag the browser read off a single PUT, when it read one: a CORS-hidden etag is no etag. */
+function landedEtag(list: WireLanded[]): string | undefined {
+  const etag = list.find((p) => p?.n === 1)?.etag;
+  return typeof etag === 'string' && etag ? etag : undefined;
 }
 
 /**

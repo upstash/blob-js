@@ -3,7 +3,7 @@ import type { BlobObject, CompletedBlob } from '../shared/types.ts';
 import { cacheControl, formatBytes, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
-import { partCount, partSizeFor, PUT_MULTIPART_THRESHOLD } from './multipart.ts';
+import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
 import { errorFromBody, errorFromResponse, headFromHeaders, R2, type MultipartUpload } from './r2.ts';
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
@@ -48,11 +48,12 @@ export interface PutOptions {
   /** An etag: If-Match, so the write fails with 'conflict' if the object changed. */
   ifUnchanged?: string;
   /**
-   * Force or forbid the multipart path. The default is by size: a body over 16 MB goes up in parts,
-   * which is the only way past R2's ~5 GiB single-PUT cap and the only way a failed chunk can be
-   * retried. `overwrite: false` and `ifUnchanged` are single-PUT only, so they turn it off.
+   * Where the multipart path starts. The default is 16 MB: under it a body goes up as one PUT, over
+   * it in parts, which is the only way past R2's ~5 GiB single-PUT cap and the only way a failed
+   * chunk can be retried. A size moves the line (`'100mb'`), `true` always parts, `false` never
+   * does. `overwrite: false` and `ifUnchanged` are single-PUT only, so they turn it off.
    */
-  multipart?: boolean;
+  multipart?: MultipartOption;
 }
 
 export interface ListOptions {
@@ -223,7 +224,7 @@ export class Bucket {
       throw new BlobError('invalid_input', { message: 'multipart: overwrite:false and ifUnchanged are single-PUT only' });
     }
     // A zero-byte multipart upload is not a thing, and its stream has already been released.
-    if (size > 0 && (options.multipart ?? (size > PUT_MULTIPART_THRESHOLD && !conditional))) {
+    if (size > 0 && !conditional && wantsMultipart(options.multipart, size)) {
       return this.putMultipart(path, stream, size, objectHeaders, contentType);
     }
 

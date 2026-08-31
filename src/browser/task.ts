@@ -43,6 +43,12 @@ interface PartState {
   etag?: string;
 }
 
+/** A presigned url and the headers its signature pins, which have to be sent with it verbatim. */
+interface Signed {
+  url: string;
+  headers: Record<string, string>;
+}
+
 interface InFlight {
   loaded: number;
   backingOff: boolean;
@@ -70,8 +76,11 @@ class Task implements InternalTask {
   private token: string | undefined;
   private storeKey: string;
   private partSize = 0;
+  // Whether the route cut this file into real multipart parts. False is a single PUT: one url, one
+  // object write, and nothing on the other side to pause into or resume from.
+  private multipart = false;
   private parts = new Map<number, PartState>();
-  private urls = new Map<number, string>();
+  private urls = new Map<number, Signed>();
   private batch: Promise<void> | undefined;
   private inflight = new Map<number, InFlight>();
   private represigned = new Set<number>();
@@ -122,7 +131,9 @@ class Task implements InternalTask {
       loaded,
       total,
       percent: this.status === 'done' ? 100 : total > 0 ? Math.min(99, Math.floor((loaded / total) * 100)) : 0,
-      canPause: this.status === 'queued' || this.status === 'uploading' || this.status === 'paused',
+      // A single PUT is one request that is either on the wire or not: stopping it throws its bytes
+      // away rather than parking them, so it is not offered as a pause.
+      canPause: this.multipart && (this.status === 'queued' || this.status === 'uploading' || this.status === 'paused'),
       pending: this.status !== 'done' && this.status !== 'error' && this.status !== 'canceled',
       stalled: this.inflight.size > 0 && [...this.inflight.values()].every((f) => f.backingOff),
     };
@@ -168,7 +179,9 @@ class Task implements InternalTask {
   pause(): boolean {
     // Status 'finishing' is not pausable: every part has landed and phase 'end' is running, so there
     // is nothing left to hold back. Pausing there only mislabelled an upload that completed anyway.
-    if (this.status !== 'uploading' || this.paused) return false;
+    // Neither is a single PUT: nothing about it can be held back, and answering true there labelled
+    // an upload paused that then went on and finished.
+    if (!this.multipart || this.status !== 'uploading' || this.paused) return false;
     this.paused = true;
     this.status = 'paused';
     for (const f of this.inflight.values()) if (f.loaded === 0) f.controller.abort();
@@ -187,8 +200,9 @@ class Task implements InternalTask {
     return true;
   }
 
-  // The error is terminal for the attempt, not for the upload: the multipart still exists, every
-  // landed part is still landed, and done is a fresh promise because the old one already rejected.
+  // The error is terminal for the attempt, not for the upload: the upload the route began still
+  // exists, every landed part is still landed, and done is a fresh promise because the old one
+  // already rejected.
   retry(): boolean {
     if (this.status !== 'error') return false;
     this.error = undefined;
@@ -218,14 +232,20 @@ class Task implements InternalTask {
     return true;
   }
 
-  // A multipart upload the server already created is billed storage list() cannot see, so the
-  // token must be spent on a cancel even when it arrives after the user asked for one.
+  // A multipart upload the server already created is storage nothing else can see, and a single PUT
+  // that landed is an object no callback accepted, so the token is spent on a cancel either way --
+  // with whatever landed, which is what lets the route identify a single PUT it has to delete.
   private abortServerSide(): void {
     clearPending(this.storeKey);
     const token = this.token;
     if (!token) return;
     this.token = undefined;
-    this.routeCall({ phase: 'cancel', completionToken: token }, undefined, 1).catch(() => {});
+    const landed = this.landed();
+    this.routeCall({ phase: 'cancel', completionToken: token, ...(landed.length ? { parts: landed } : {}) }, undefined, 1).catch(() => {});
+  }
+
+  private landed(): WireLanded[] {
+    return [...this.parts.values()].filter((p) => p.etag !== undefined).map((p) => ({ n: p.n, etag: p.etag! }));
   }
 
   /* ---------------------------------------------------------------- run */
@@ -271,8 +291,8 @@ class Task implements InternalTask {
     this.status = 'uploading';
     this.notify();
 
-    await this.runMultipart();
-    const landed: WireLanded[] = [...this.parts.values()].map((p) => ({ n: p.n, etag: p.etag! }));
+    await this.runParts();
+    const landed = this.landed();
     if (signal.aborted) throw abortError();
 
     this.status = 'finishing';
@@ -296,8 +316,9 @@ class Task implements InternalTask {
     )) as WireBeginResponse;
     this.token = res.completionToken;
     this.partSize = res.upload.partSize;
+    this.multipart = res.upload.multipart !== false;
     this.layoutParts();
-    for (const p of res.upload.parts) this.urls.set(p.n, p.url);
+    for (const p of res.upload.parts) this.urls.set(p.n, { url: p.url, headers: p.headers ?? {} });
     this.urlsMintedAt = clock.now();
     writePending(this.storeKey, { completionToken: this.token });
   }
@@ -312,6 +333,7 @@ class Task implements InternalTask {
       if (res.size !== this.file.size) throw new Error('not resumable');
       this.token = rec.completionToken;
       this.partSize = res.partSize;
+      this.multipart = res.multipart !== false;
       this.layoutParts();
       this.applyBatch(res);
       return true;
@@ -335,7 +357,7 @@ class Task implements InternalTask {
   }
 
   private applyBatch(res: WirePartsResponse): void {
-    for (const p of res.parts) this.urls.set(p.n, p.url);
+    for (const p of res.parts) this.urls.set(p.n, { url: p.url, headers: p.headers ?? {} });
     this.urlsMintedAt = clock.now();
     for (const l of res.landed) {
       const p = this.parts.get(l.n);
@@ -343,9 +365,9 @@ class Task implements InternalTask {
     }
   }
 
-  /* ---------------------------------------------------------- multipart */
+  /* -------------------------------------------------------------- parts */
 
-  private async runMultipart(): Promise<void> {
+  private async runParts(): Promise<void> {
     const pending = [...this.parts.values()].filter((p) => !p.etag).map((p) => p.n);
     let failure: unknown;
     const worker = async () => {
@@ -382,16 +404,16 @@ class Task implements InternalTask {
     return new Promise((resolve) => this.resumeWaiters.push(resolve));
   }
 
-  private async urlFor(n: number): Promise<{ url: string; headers: Record<string, string> }> {
+  private async urlFor(n: number): Promise<Signed> {
     const cached = this.urls.get(n);
-    if (cached) return { url: cached, headers: {} };
+    if (cached) return cached;
     this.batch ??= this.fetchBatch(n).finally(() => {
       this.batch = undefined;
     });
     await this.batch;
-    const url = this.urls.get(n);
-    if (!url) return this.urlFor(n);
-    return { url, headers: {} };
+    const signed = this.urls.get(n);
+    if (!signed) return this.urlFor(n);
+    return signed;
   }
 
   private async fetchBatch(from: number): Promise<void> {

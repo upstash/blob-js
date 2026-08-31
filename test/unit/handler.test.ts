@@ -146,7 +146,8 @@ describe('dispatch', () => {
     }
     // An empty one is the same as none.
     expect((await post(uploads, '', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } })).status).toBe(200);
-    expect(r2Calls().filter((c) => c.method === 'POST')).toHaveLength(2);
+    // A file this size goes up as one PUT, so neither begin created anything to clean up.
+    expect(r2Calls().filter((c) => c.method === 'POST')).toHaveLength(0);
   });
 
   test('an empty routes map is a build error, not a handler that answers 404 to everything', () => {

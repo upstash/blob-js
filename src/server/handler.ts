@@ -3,6 +3,7 @@ import type { CompletedBlob, UploadFile, UploadRouteTypes } from '../shared/type
 import type { CacheOption, Size } from '../shared/units.ts';
 import type { Bucket } from './bucket.ts';
 import { answerError, deriveRouteId, handleUpload, resolveConstraints, type ErrorDetails, type StandardSchema, type UploadConstraints } from './handle-upload.ts';
+import type { MultipartOption } from './multipart.ts';
 
 /**
  * One upload endpoint. With no `routes` it is the route: the client calls `useUpload()` and nothing
@@ -10,8 +11,8 @@ import { answerError, deriveRouteId, handleUpload, resolveConstraints, type Erro
  * -- `useUpload('avatar')` -- and the client reads each route's input and completion data off
  * `typeof uploads`, so a page never spells out a url and a typo does not compile.
  *
- * `bucket`, `constraints`, `input`, `onBeforeUpload`, `onUploadComplete` and `onError` at the top
- * are DEFAULTS: a route replaces them key by key and inherits the rest.
+ * `bucket`, `constraints`, `multipart`, `input`, `onBeforeUpload`, `onUploadComplete` and `onError`
+ * at the top are DEFAULTS: a route replaces them key by key and inherits the rest.
  *
  * One rule about `context`: write it above the callbacks that read `ctx`. `(request) =>` with no
  * annotation is fine there. Written below `routes`, TypeScript has already typed the routes with
@@ -73,8 +74,11 @@ interface CompleteBase<TCtx, TState> extends CompletedBlob {
 }
 
 interface DirectCompleteExtras {
-  /** R2's own multipart id, for a bucket.abortMultipartUpload({ path, uploadId }). */
-  multipartUploadId: string;
+  /**
+   * R2's own multipart id, for a bucket.abortMultipartUpload({ path, uploadId }). Undefined when the
+   * file went up as a single PUT, which is every file under the route's `multipart` threshold.
+   */
+  multipartUploadId: string | undefined;
 }
 
 interface ErrorArgs<TCtx> {
@@ -121,6 +125,8 @@ interface PlainRouteBase<TCtx, TInput> {
   bucket?: Bucket;
   /** Replaces the handler's per key; `null` clears one the handler set. */
   constraints?: RouteConstraints;
+  /** Replaces the handler's. Where this route's uploads start going up in parts. */
+  multipart?: MultipartOption;
   /** Replaces the handler's. */
   onBeforeUpload?: (args: BeforeArgs<TCtx, TInput>) => BeforeResult<undefined> | Promise<BeforeResult<undefined>>;
   /** Replaces the handler's. What it returns is `upload.blob.data` in the browser, typed. */
@@ -161,6 +167,7 @@ export type UploadRoutes<TCtx = unknown, TInput = undefined> = Record<string, An
 export interface UploadRouteOptions<TCtx, TSchema extends StandardSchema<any, any> | undefined, TState, TData> {
   bucket?: Bucket;
   constraints?: RouteConstraints;
+  multipart?: MultipartOption;
   /** A Standard Schema the browser's `input` is validated against before onBeforeUpload runs. */
   input?: TSchema;
   onBeforeUpload?: (args: BeforeArgs<TCtx, RouteInputOf<TSchema>>) => BeforeResult<TState> | Promise<BeforeResult<TState>>;
@@ -217,6 +224,17 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
   bucket?: Bucket;
   /** Every route inherits it; a route's `constraints` replaces per key and `null` clears one. */
   constraints?: RouteConstraints;
+  /**
+   * Where a file stops going up as one PUT and starts going up in parts. 16 MB by default; a size
+   * moves the line (`'100mb'`), `true` parts every upload, `false` parts none. Parts buy pause,
+   * resume and per-chunk retry, and are the only way past R2's ~5 GiB single-PUT cap; under the
+   * threshold an upload is one PUT the browser simply runs again if it fails.
+   *
+   * The threshold also decides when the object exists: a file that went up in parts is created by
+   * phase 'end', a file that went up as one PUT is stored the moment its last byte lands and is
+   * deleted again if onUploadComplete refuses it.
+   */
+  multipart?: MultipartOption;
   /**
    * Where this handler is mounted. Only used to separate two handlers on one bucket, whose route
    * names would otherwise derive the same completion-token id.
@@ -286,6 +304,7 @@ interface Slot {
 interface AnyRouteSpec {
   bucket?: Bucket;
   constraints?: RouteConstraints;
+  multipart?: MultipartOption;
   input?: StandardSchema<any, any>;
   onBeforeUpload?: (args: any) => any;
   onUploadComplete?: (args: any) => any;
@@ -331,6 +350,7 @@ export function uploadHandler<
     const onRouteError = route.onError ?? (options.onError as ((args: any) => ErrorReturn) | undefined);
     const input = route.input ?? options.input;
     const constraints = mergeConstraints(options.constraints, route.constraints);
+    const multipart = route.multipart ?? options.multipart;
 
     const ctxOf = (request: Request): unknown => slots.get(request)?.ctx;
     const onError = onRouteError
@@ -344,6 +364,7 @@ export function uploadHandler<
       // An endpoint separates two handlers sharing one bucket.
       id: deriveRouteId(resolveConstraints(constraints), input !== undefined, options.endpoint ? `${options.endpoint}?route=${name}` : name),
       constraints,
+      multipart,
       input,
       onBeforeUpload: (args: any) => onBeforeUpload({ ...args, ctx: ctxOf(args.request as Request) }),
       onUploadComplete: onUploadComplete ? (args: any) => onUploadComplete({ ...args, ctx: ctxOf(args.request as Request) }) : undefined,

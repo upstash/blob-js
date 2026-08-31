@@ -17,9 +17,22 @@ const restore: (() => void)[] = [];
 
 const BLOB = { path: 'p', url: 'https://h/p', versionedUrl: 'https://h/p?v=%22x%22', size: 3, etag: '"x"', uploadedAt: '2026-08-24T00:00:00.000Z' };
 
-// Every direct upload is multipart, one part when the file fits one, so there is only one shape.
+// What the route answers with. Under the threshold that is one presigned object PUT carrying the
+// headers its signature pins; over it, real multipart parts. The client walks the same list either
+// way, so the two shapes differ only in `multipart` and in what a part url means.
+const THRESHOLD = 16_000_000;
+const SINGLE_HEADERS = { 'content-type': 'image/png', 'cache-control': 'public, max-age=3600' };
+
 function multipartBegin(size: number, partSize = 5 * MIB) {
-  return { completionToken: 'tok', path: 'p', upload: { partSize, parts: partUrls(1, size, partSize) } };
+  return { completionToken: 'tok', path: 'p', upload: { partSize, multipart: true, parts: partUrls(1, size, partSize) } };
+}
+
+function singleBegin(size: number, gen = 0) {
+  return { completionToken: 'tok', path: 'p', upload: { partSize: size, multipart: false, parts: singleUrl(gen) } };
+}
+
+function singleUrl(gen = 0) {
+  return [{ n: 1, url: `https://r2.test/object?g=${gen}`, headers: SINGLE_HEADERS }];
 }
 
 function partUrls(from: number, size: number, partSize: number, gen = 0) {
@@ -31,11 +44,13 @@ function partUrls(from: number, size: number, partSize: number, gen = 0) {
 
 function defaultRoute(size: number, landed: { n: number; etag: string }[] = []) {
   let gen = 0;
+  const multipart = size > THRESHOLD;
   return (body: any) => {
-    if (body.phase === 'begin') return multipartBegin(size);
+    if (body.phase === 'begin') return multipart ? multipartBegin(size) : singleBegin(size);
     if (body.phase === 'parts') {
       gen++;
-      return { partSize: 5 * MIB, size, parts: partUrls(body.from, size, 5 * MIB, gen), landed };
+      if (!multipart) return { partSize: size, size, multipart: false, parts: singleUrl(gen), landed: [] };
+      return { partSize: 5 * MIB, size, multipart: true, parts: partUrls(body.from, size, 5 * MIB, gen), landed };
     }
     if (body.phase === 'end') return { blob: { ...BLOB, size }, data: { rowId: '1', parts: body.parts } };
     if (body.phase === 'cancel') return { ok: true };
@@ -119,12 +134,13 @@ async function wake() {
 const png = () => new File([new Uint8Array(3)], 'a.png', { type: 'image/png', lastModified: 1 });
 const big = (size: number) => new File([new ArrayBuffer(size)], 'big.bin', { type: 'application/octet-stream', lastModified: 2 });
 
-describe('one part', () => {
-  test('begin, PUT the one part, progress, end, done with typed data', async () => {
+describe('a single PUT', () => {
+  test('begin, PUT the object, progress, end, done with typed data', async () => {
     onPhase = defaultRoute(3);
     const task = upload(png(), { route: '/api/upload', headers: () => ({ authorization: 'Bearer j' }), input: { threadId: 't' } });
-    // A three-byte file is a multipart of one part, so it pauses and resumes like any other upload.
-    expect(task.snapshot()).toMatchObject({ status: 'queued', loaded: 0, total: 3, percent: 0, canPause: true, stalled: false });
+    // A three-byte file is one object PUT, not a multipart of one part: there is no upload on the
+    // other side to park bytes in, so it is not offered as pausable.
+    expect(task.snapshot()).toMatchObject({ status: 'queued', loaded: 0, total: 3, percent: 0, canPause: false, stalled: false });
     const same = task.snapshot();
     expect(task.snapshot()).toBe(same);
     await settle();
@@ -132,10 +148,10 @@ describe('one part', () => {
     expect(ManualXhr.pending.length).toBe(1);
     const xhr = ManualXhr.pending[0]!;
     expect(xhr.method).toBe('PUT');
-    expect(xhr.url).toBe('https://r2.test/part/1?g=0');
-    // A part url signs content-length and nothing else: the type and the cache header were pinned
-    // when the multipart was created, so the browser sends no headers of its own.
-    expect(xhr.headers).toEqual({});
+    expect(xhr.url).toBe('https://r2.test/object?g=0');
+    // A single PUT writes the object, so what a multipart pins at create is signed into this url
+    // instead and sent with it verbatim.
+    expect(xhr.headers).toEqual(SINGLE_HEADERS);
     expect(xhr.body).toBeInstanceOf(Blob);
     expect(task.snapshot().status).toBe('uploading');
     xhr.progress(2);
@@ -231,7 +247,7 @@ describe('one part', () => {
     ManualXhr.pending[0]!.respond(403);
     await settle();
     expect(calls.map((c) => c.phase)).toEqual(['begin', 'parts']);
-    expect(ManualXhr.pending[0]!.url).toBe('https://r2.test/part/1?g=1');
+    expect(ManualXhr.pending[0]!.url).toBe('https://r2.test/object?g=1');
     ManualXhr.pending[0]!.respond(403);
     await expect(task.done).rejects.toMatchObject({ code: 'signature_mismatch', status: 403 });
     expect(task.snapshot().status).toBe('error');
@@ -406,11 +422,12 @@ describe('one part', () => {
   test('the controls answer false instead of throwing when they cannot act', async () => {
     onPhase = defaultRoute(3);
     const task = upload(png(), { route: '/api/upload' });
-    // Queued: pause has nothing on the wire to hold back yet, though the upload is pausable.
     expect(task.pause()).toBe(false);
     expect(task.resume()).toBe(false);
     await settle();
-    expect(task.snapshot().canPause).toBe(true);
+    // A single PUT is never pausable: stopping it throws its bytes away rather than parking them.
+    expect(task.snapshot().canPause).toBe(false);
+    expect(task.pause()).toBe(false);
     expect(task.resume()).toBe(false);
     ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
     await task.done;
@@ -563,7 +580,9 @@ describe('multipart', () => {
     expect(task.cancel()).toBe(true);
     await expect(task.done).rejects.toMatchObject({ name: 'AbortError' });
     await settle();
-    expect(calls.at(-1)!.body).toEqual({ phase: 'cancel', completionToken: 'tok' });
+    // The cancel carries what landed: for a multipart it is only bookkeeping, but it is the same
+    // field that lets the route identify a single PUT it has to delete.
+    expect(calls.at(-1)!.body).toEqual({ phase: 'cancel', completionToken: 'tok', parts: [{ n: 1, etag: '"e1"' }, { n: 2, etag: '"e2"' }] });
     expect(memory.size).toBe(0);
     expect(task.resume()).toBe(false);
   });

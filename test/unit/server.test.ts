@@ -4,7 +4,7 @@ import { r2Of } from '../../src/server/bucket.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { deriveRouteId } from '../../src/server/handle-upload.ts';
 import { encodeToken } from '../../src/server/token.ts';
-import type { WireBeginResponse } from '../../src/shared/types.ts';
+import type { WireBeginResponse, WirePartsResponse } from '../../src/shared/types.ts';
 
 // The server path against a scripted R2: what a live bucket cannot be made to do on purpose (expire
 // a credential mid-request, answer 503 three times, refuse a create) is exactly what needs proving.
@@ -515,17 +515,60 @@ describe('uploadHandler: the direct transport', () => {
     expect(again.status).toBe(304);
   });
 
-  test('a file that fits one part is still a multipart, so it can be paused and resumed', async () => {
+  test('a file under the threshold is one presigned object PUT, with nothing created behind it', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
-    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'small.png' }) });
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'small.png', metadata: { rowId: '7' } }) });
     const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
-    expect(started.upload.partSize).toBe(5 * 1024 * 1024);
+    expect(started.upload.multipart).toBe(false);
+    // One part covering the whole file: the browser walks the same list either way.
+    expect(started.upload.partSize).toBe(10);
     expect(started.upload.parts.map((p) => p.n)).toEqual([1]);
-    expect(new URL(started.upload.parts[0]!.url).searchParams.get('partNumber')).toBe('1');
-    expect(new URL(started.upload.parts[0]!.url).searchParams.get('uploadId')).toBe('mp-1');
-    // The object does not exist yet: nothing has been completed, so nothing can be served.
-    expect(r2Calls().filter((c) => c.method === 'PUT')).toEqual([]);
+    const url = new URL(started.upload.parts[0]!.url);
+    expect(url.searchParams.get('partNumber')).toBe(null);
+    expect(url.searchParams.get('uploadId')).toBe(null);
+    // The headers a multipart pins at create are signed into the url instead, and handed back so the
+    // browser can send them verbatim. Signed, so metadata the app reads back is not the client's.
+    expect(started.upload.parts[0]!.headers).toEqual({ 'content-type': 'image/png', 'cache-control': 'public, max-age=3600', 'x-amz-meta-rowid': '7' });
+    const signed = url.searchParams.get('X-Amz-SignedHeaders')!.split(';');
+    expect(signed).toContain('content-type');
+    expect(signed).toContain('cache-control');
+    expect(signed).toContain('x-amz-meta-rowid');
+    expect(signed).toContain('content-length');
+    // Nothing reached R2: no multipart to create, and none to sweep up if the tab closes.
+    expect(r2Calls().filter((c) => c.method === 'POST')).toEqual([]);
+  });
+
+  test('multipart: a size moves the line, true and false pin it', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const b = bucket();
+    const under = uploadHandler({ bucket: b, constraints: { maxBytes: '5gb' }, onBeforeUpload: () => ({ path: 'a.bin' }) });
+    expect((await begin(under, { name: 'a.bin', type: '', size: 16_000_000 })).upload.multipart).toBe(false);
+    expect((await begin(under, { name: 'a.bin', type: '', size: 16_000_001 })).upload.multipart).toBe(true);
+
+    const moved = uploadHandler({ bucket: b, constraints: { maxBytes: '5gb' }, multipart: '100mb', onBeforeUpload: () => ({ path: 'a.bin' }) });
+    expect((await begin(moved, { name: 'a.bin', type: '', size: 99_000_000 })).upload.multipart).toBe(false);
+    expect((await begin(moved, { name: 'a.bin', type: '', size: 100_000_001 })).upload.multipart).toBe(true);
+
+    const always = uploadHandler({ bucket: b, multipart: true, onBeforeUpload: () => ({ path: 'a.bin' }) });
+    const parted = await begin(always, { name: 'a.bin', type: '', size: 10 });
+    expect(parted.upload.multipart).toBe(true);
+    expect(parted.upload.partSize).toBe(5 * 1024 * 1024);
+    expect(new URL(parted.upload.parts[0]!.url).searchParams.get('uploadId')).toBe('mp-1');
+    // A part url signs content-length and nothing else: the rest was pinned at create.
+    expect(parted.upload.parts[0]!.headers).toBeUndefined();
+
+    // A route replaces the handler's, like every other inherited option.
+    const mixed = uploadHandler({
+      bucket: b,
+      multipart: true,
+      onBeforeUpload: () => ({ path: 'a.bin' }),
+      routes: { small: { multipart: false }, big: {} },
+    });
+    const named = (name: string) => ({ POST: (r: Request) => mixed.POST(new Request(`https://app.test/api/upload?route=${name}`, r)) });
+    expect((await begin(named('small'), { name: 'a.bin', type: '', size: 10 })).upload.multipart).toBe(false);
+    expect((await begin(named('big'), { name: 'a.bin', type: '', size: 10 })).upload.multipart).toBe(true);
   });
 
   test('an empty file is refused before anything is created', async () => {
@@ -545,6 +588,8 @@ describe('uploadHandler: the direct transport', () => {
     // The builder, because `state` and `uploadId` are a route's, not a shared default's.
     const route = uploadHandler({
       bucket: bucket(),
+      // In parts, so there is an R2 upload id for the callback to be handed.
+      multipart: true,
       routes: {
         doc: upload()({
           onBeforeUpload: () => ({ path: 'a.png', state: { rowId: 7 } }),
@@ -673,7 +718,7 @@ describe('uploadHandler: the direct transport', () => {
   test('bytes refused at the end are deleted, which bounds the exposure without undoing it', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
-    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    const route = uploadHandler({ bucket: bucket(), multipart: true, onBeforeUpload: () => ({ path: 'a.png' }) });
     const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
     r2Handler = fullR2({ 'content-length': '99', etag: '"e"', 'content-type': 'image/png' });
     calls = [];
@@ -687,7 +732,7 @@ describe('uploadHandler: the direct transport', () => {
   test('a refusal leaves a newer object alone: a stable path is not a licence to delete', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
-    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'avatars/u1.png' }) });
+    const route = uploadHandler({ bucket: bucket(), multipart: true, onBeforeUpload: () => ({ path: 'avatars/u1.png' }) });
     const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
     // The size check refuses, but by then the HEAD reports an etag from a later upload to the same
     // key. Deleting here would destroy a file that was accepted.
@@ -702,7 +747,7 @@ describe('uploadHandler: the direct transport', () => {
   test('a retried end that finds no upload still will not delete blind', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
-    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'avatars/u1.png' }) });
+    const route = uploadHandler({ bucket: bucket(), multipart: true, onBeforeUpload: () => ({ path: 'avatars/u1.png' }) });
     const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
     // The first 'end' completed the upload and its response was lost. By the time it is retried, a
     // second upload has replaced the object, so completeMultipart has no upload left to complete and
@@ -728,6 +773,7 @@ describe('uploadHandler: the direct transport', () => {
     const route = uploadHandler({
       bucket: bucket(),
       constraints: { contentTypes: ['image/png'] },
+      multipart: true,
       onBeforeUpload: () => ({ path: 'a.png' }),
     });
     const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
@@ -785,6 +831,7 @@ describe('uploadHandler: the direct transport', () => {
     r2Handler = beginR2;
     const route = uploadHandler({
       bucket: bucket(),
+      multipart: true,
       onBeforeUpload: () => ({ path: 'a.png' }),
       onUploadComplete: () => {
         throw new BlobError('conflict', { message: 'that thread was deleted' });
@@ -805,6 +852,7 @@ describe('uploadHandler: the direct transport', () => {
     r2Handler = beginR2;
     const route = uploadHandler({
       bucket: bucket(),
+      multipart: true,
       onBeforeUpload: () => ({ path: 'a.png' }),
       onUploadComplete: () => {
         throw new BlobError('conflict', { message: 'that thread was deleted' });
@@ -829,11 +877,135 @@ describe('uploadHandler: the direct transport', () => {
   test('cancel aborts the multipart the browser walked away from', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
-    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    const route = uploadHandler({ bucket: bucket(), multipart: true, onBeforeUpload: () => ({ path: 'a.png' }) });
     const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
     calls = [];
     expect((await post(route, { phase: 'cancel', completionToken: started.completionToken })).status).toBe(200);
     const aborted = r2Calls().find((c) => c.method === 'DELETE')!;
     expect(new URL(aborted.url).searchParams.get('uploadId')).toBe('mp-1');
+  });
+
+  /** A single PUT stores the object itself, so 'end' only reads it back. */
+  const storedR2 =
+    (head: Record<string, string> = { 'content-length': '10', etag: '"stored"', 'content-type': 'image/png' }) =>
+    (call: Call): Response =>
+      call.method === 'HEAD' ? new Response('', { status: 200, headers: head }) : new Response('', { status: 204 });
+
+  test('a single PUT completes nothing: phase end reads the object back and records it', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    let seen: { multipartUploadId: string | undefined } | undefined;
+    const route = uploadHandler({
+      bucket: bucket(),
+      onBeforeUpload: () => ({ path: 'a.png' }),
+      onUploadComplete: ({ multipartUploadId }) => {
+        seen = { multipartUploadId };
+        return { ok: true };
+      },
+    });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    r2Handler = storedR2();
+    calls = [];
+    const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"stored"' }] });
+    expect(end.status).toBe(200);
+    expect((await end.json()).blob.etag).toBe('"stored"');
+    // No complete to make, which is what makes a retried 'end' idempotent for free.
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD']);
+    expect((await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"stored"' }] })).status).toBe(200);
+    // There is no R2 upload id to hand out: nothing was ever created.
+    expect(seen).toEqual({ multipartUploadId: undefined });
+  });
+
+  test('a single PUT is stored before the callback runs, so a refusal deletes it', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({
+      bucket: bucket(),
+      onBeforeUpload: () => ({ path: 'a.png' }),
+      onUploadComplete: () => {
+        throw new BlobError('conflict', { message: 'that thread was deleted' });
+      },
+    });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    r2Handler = storedR2();
+    calls = [];
+    const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"stored"' }] });
+    expect(end.status).toBe(409);
+    // The etag the browser read off its PUT is what says the object is still this upload's.
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'HEAD', 'DELETE']);
+  });
+
+  test('a single PUT whose object was replaced is left alone, and one with no etag is not deleted blind', async () => {
+    resetCredentialCaches();
+    const refuse = { bucket: bucket(), onUploadComplete: () => { throw new BlobError('conflict'); } };
+
+    r2Handler = beginR2;
+    const replaced = uploadHandler({ ...refuse, onBeforeUpload: () => ({ path: 'avatars/u1.png' }) });
+    const one = await begin(replaced, { name: 'a.png', type: 'image/png', size: 10 });
+    r2Handler = storedR2({ 'content-length': '10', etag: '"newer"', 'content-type': 'image/png' });
+    calls = [];
+    expect((await post(replaced, { phase: 'end', completionToken: one.completionToken, parts: [{ n: 1, etag: '"stored"' }] })).status).toBe(409);
+    expect(r2Calls().some((c) => c.method === 'DELETE')).toBe(false);
+
+    // A browser whose CORS setup hid the etag reports none, and no etag is no permission to delete.
+    r2Handler = beginR2;
+    const blind = uploadHandler({ ...refuse, onBeforeUpload: () => ({ path: 'avatars/u2.png' }) });
+    const two = await begin(blind, { name: 'a.png', type: 'image/png', size: 10 });
+    r2Handler = storedR2();
+    calls = [];
+    const logged = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await post(blind, { phase: 'end', completionToken: two.completionToken, parts: [{ n: 1, etag: '' }] })).status).toBe(409);
+      expect(r2Calls().some((c) => c.method === 'DELETE')).toBe(false);
+      expect(String(logged.mock.calls[0]![0])).toContain('could not be identified');
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  test('cancel deletes what a single PUT already stored, and says nothing when nothing landed', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+
+    // Canceled mid-flight: an aborted PUT stores nothing, so there is nothing to delete and no log.
+    const early = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    r2Handler = storedR2();
+    calls = [];
+    const logged = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await post(route, { phase: 'cancel', completionToken: early.completionToken })).status).toBe(200);
+      expect(r2Calls()).toEqual([]);
+      expect(logged).toHaveBeenCalledTimes(0);
+    } finally {
+      logged.mockRestore();
+    }
+
+    // Canceled after the bytes landed: a whole object no callback ever accepted.
+    r2Handler = beginR2;
+    const late = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    r2Handler = storedR2();
+    calls = [];
+    expect((await post(route, { phase: 'cancel', completionToken: late.completionToken, parts: [{ n: 1, etag: '"stored"' }] })).status).toBe(200);
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'DELETE']);
+  });
+
+  test('phase parts re-presigns the one url and reports nothing landed', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    calls = [];
+    const again = (await (await post(route, { phase: 'parts', completionToken: started.completionToken, from: 1 })).json()) as WirePartsResponse;
+    expect(again.multipart).toBe(false);
+    expect(again.size).toBe(10);
+    // Nothing lands early on one object write, so a resumed upload simply runs it again.
+    expect(again.landed).toEqual([]);
+    expect(again.parts.map((p) => p.n)).toEqual([1]);
+    expect(again.parts[0]!.headers).toEqual({ 'content-type': 'image/png', 'cache-control': 'public, max-age=3600' });
+    // ListParts has no upload to list.
+    expect(r2Calls().filter((c) => c.method === 'GET')).toEqual([]);
+    const past = (await (await post(route, { phase: 'parts', completionToken: started.completionToken, from: 2 })).json()) as WirePartsResponse;
+    expect(past.parts).toEqual([]);
   });
 });

@@ -1,18 +1,50 @@
 import { describe, expect, test } from 'bun:test';
-import { partCount, partSizeFor, PUT_MULTIPART_THRESHOLD } from '../../src/server/multipart.ts';
+import { BlobError } from '../../src/shared/errors.ts';
+import { MULTIPART_THRESHOLD, partCount, partSizeFor, SINGLE_PUT_MAX, wantsMultipart } from '../../src/server/multipart.ts';
 
 const MIB = 1024 * 1024;
 
-describe('PUT_MULTIPART_THRESHOLD', () => {
+describe('MULTIPART_THRESHOLD', () => {
   test('is 16MB decimal, like every other user-facing size', () => {
-    expect(PUT_MULTIPART_THRESHOLD).toBe(16_000_000);
+    expect(MULTIPART_THRESHOLD).toBe(16_000_000);
   });
 
-  test('governs bucket.put() alone: a browser upload is multipart at every size', () => {
-    // One part when the file fits one, which is what makes pause, resume and retry work for a 3kb
-    // avatar as well as a 3gb video, and what keeps the object from existing before phase 'end'.
-    expect(partCount(3_000, partSizeFor(3_000))).toBe(1);
-    expect(partCount(1, partSizeFor(1))).toBe(1);
+  test('is one line for both halves of the SDK: a put and a browser upload split at the same size', () => {
+    expect(wantsMultipart(undefined, MULTIPART_THRESHOLD)).toBe(false);
+    expect(wantsMultipart(undefined, MULTIPART_THRESHOLD + 1)).toBe(true);
+    // The small upload every app actually does: one PUT, and nothing half-created behind it.
+    expect(wantsMultipart(undefined, 3_000)).toBe(false);
+  });
+});
+
+describe('wantsMultipart', () => {
+  test('a size is the threshold, in the same units as every other option', () => {
+    expect(wantsMultipart('100mb', 99_000_000)).toBe(false);
+    expect(wantsMultipart('100mb', 100_000_001)).toBe(true);
+    expect(wantsMultipart(5_000, 5_001)).toBe(true);
+  });
+
+  test('true and false pin it, whatever the size', () => {
+    expect(wantsMultipart(true, 1)).toBe(true);
+    expect(wantsMultipart(false, 4_000_000_000)).toBe(false);
+  });
+
+  test('past R2 single-PUT cap there is no choice, and a false that forbids it says so', () => {
+    expect(wantsMultipart(undefined, SINGLE_PUT_MAX + 1)).toBe(true);
+    expect(wantsMultipart('50gb', SINGLE_PUT_MAX + 1)).toBe(true);
+    try {
+      wantsMultipart(false, SINGLE_PUT_MAX + 1);
+      throw new Error('expected a refusal');
+    } catch (e) {
+      expect(BlobError.is(e)).toBe(true);
+      expect((e as BlobError).code).toBe('too_large');
+      expect((e as BlobError).hint).toContain('multipart: false');
+    }
+  });
+
+  test('a single part still covers the whole file, so the browser runs one loop either way', () => {
+    expect(partCount(3_000, 3_000)).toBe(1);
+    expect(partCount(1, 1)).toBe(1);
   });
 });
 

@@ -17,6 +17,7 @@ export type {
   UpdateOptions,
 } from './server/bucket.ts';
 export type { PutBody } from './server/body.ts';
+export type { MultipartOption } from './server/multipart.ts';
 export type { StandardSchema, UploadConstraints } from './server/handle-upload.ts';
 export { upload, uploadHandler } from './server/handler.ts';
 export type {

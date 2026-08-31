@@ -46,22 +46,31 @@ export interface WireConstraints {
 export interface WirePart {
   n: number;
   url: string;
+  /**
+   * Headers pinned into the signature, so they have to be sent with the PUT verbatim. Only a
+   * single-PUT upload carries any: content-type, cache-control and the object's x-amz-meta-*, which
+   * a multipart upload writes at create instead. Storage refuses the PUT if they are changed.
+   */
+  headers?: Record<string, string>;
 }
 
 /**
- * Every direct upload is multipart, one part when the file fits one: the object does not exist until
- * phase 'end' completes it, so no callback can be handed an object it never saw, and pause, resume
- * and retry work at every size instead of only past a threshold.
+ * The parts to send and how the file is cut into them. One part, `partSize` the whole file and
+ * `parts[0].headers` set is a single PUT: past `multipart` (16 MB by default) the file is cut into
+ * real multipart parts, and only then does the object come into existence at phase 'end' rather
+ * than when the last byte lands.
  */
-export interface WireMultipart {
+export interface WireUploadPlan {
   partSize: number;
   parts: WirePart[];
+  /** False for a single PUT: there is no upload to pause into, only a PUT to run again. */
+  multipart: boolean;
 }
 
 export interface WireBeginResponse {
   completionToken: string;
   path: string;
-  upload: WireMultipart;
+  upload: WireUploadPlan;
 }
 
 export interface WireLanded {
@@ -74,6 +83,7 @@ export interface WirePartsResponse {
   size: number;
   parts: WirePart[];
   landed: WireLanded[];
+  multipart: boolean;
 }
 
 export interface WireEndResponse<TData = unknown> {
@@ -85,7 +95,9 @@ export type WireRequest =
   | { phase: 'begin'; file: WireFile; head?: string; input?: unknown }
   | { phase: 'parts'; completionToken: string; from: number }
   | { phase: 'end'; completionToken: string; parts?: WireLanded[] }
-  | { phase: 'cancel'; completionToken: string };
+  // `parts` on a cancel is what identifies a single PUT that already landed, so an object no
+  // callback accepted can be deleted instead of left stored.
+  | { phase: 'cancel'; completionToken: string; parts?: WireLanded[] };
 
 /* -------------------------------------------------------------- browser -- */
 
@@ -93,6 +105,11 @@ export type UploadSnapshot = {
   loaded: number;
   total: number;
   percent: number;
+  /**
+   * Whether pause() would do anything. False for a single PUT -- every file under the route's
+   * multipart threshold -- because there is nothing to park its bytes in, and false once the upload
+   * has settled or reached 'finishing'.
+   */
   canPause: boolean;
   /**
    * Not settled: queued, uploading, finishing or paused. Every caller wants this and hand-rolling
@@ -104,7 +121,7 @@ export type UploadSnapshot = {
   stalled: boolean;
 } & (
   /**
-   * 'finishing': every byte is sent and phase 'end' is completing the upload and running
+   * 'finishing': every byte is sent and phase 'end' is recording the object and running
    * onUploadComplete. percent sits at 99 for exactly that stretch, and naming it is the
    * difference between a bar that is working and one that looks stuck.
    */

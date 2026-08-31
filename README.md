@@ -28,11 +28,11 @@ per token for the whole process, so calling it per request does not mint one per
 credential service asks for a backoff longer than a request can sit through, the call fails with
 `mint_backoff` carrying `retryAfter` rather than blocking on it.
 
-A `put()` body over 16 MB goes up as a multipart upload: that is the only way past R2's ~5 GiB
-single-PUT cap, and a part that fails can be retried on its own. (A browser upload is always
-multipart, whatever it weighs: see below.) `{ multipart: false }` forces one PUT, and
-`overwrite: false` / `ifUnchanged` are single-PUT only, so they turn it off by themselves. A
-multipart put that fails aborts itself rather than leaving parts behind.
+A body over 16 MB goes up as a multipart upload: that is the only way past R2's ~5 GiB single-PUT
+cap, and a part that fails can be retried on its own. `{ multipart: '100mb' }` moves the line,
+`true` and `false` pin it, and `overwrite: false` / `ifUnchanged` are single-PUT only, so they turn
+it off by themselves. A multipart put that fails aborts itself rather than leaving parts behind.
+Direct browser uploads split at the same size: see below.
 
 Object metadata is printable ASCII: R2 hands anything else back re-encoded (`café` reads as
 `=?utf-8?Q?caf=C3=A9?=`), so the SDK refuses it with `invalid_input` rather than storing a value you
@@ -78,8 +78,9 @@ wins over the option.
 
 ### Incomplete uploads
 
-A multipart upload that was started and never finished is billed storage that `list()` cannot see,
-and a bucket cannot be deleted while one exists. The SDK aborts the ones it knows about: a `put()`
+A multipart upload that was started and never finished is storage that `list()` cannot see, and a
+bucket cannot be deleted while one exists. Only a file over the multipart threshold can leave one:
+under it there is nothing to leave half-created. The SDK aborts the ones it knows about -- a `put()`
 that throws mid-stream, an upload the browser cancels, an upload a callback refuses. The one that
 survives is the tab that closed, so a cron reaps it:
 
@@ -97,8 +98,8 @@ await bucket.abortMultipartUpload(open[0]);   // { path, uploadId }
 ## Direct browser uploads
 
 `uploadHandler` is the direct-browser-upload path. It authorizes and presigns an upload, the browser
-sends multipart parts straight to storage, and the handler completes the object and runs your
-callback. Application servers do not carry the file bytes.
+sends the bytes straight to storage, and the handler records the object and runs your callback.
+Application servers do not carry the file bytes.
 
 ```ts
 // lib/uploads.ts
@@ -157,10 +158,21 @@ needed. `pending` covers queued, uploading, finishing and paused, which is the p
 a progress bar actually wants -- spelling it out from `status` is how an input gets re-enabled during
 `finishing` and how a progress bar ends up drawn under an error line.
 
-Every direct upload is multipart, including a file that fits in one part. The object does not exist
-until completion. Upload records support progress, pause, resume, cancel, retry, and a `finishing`
-state while the route completes the multipart upload and runs
-`onUploadComplete`. `percent` remains at 99 during that state.
+A file under 16 MB goes up as a single presigned PUT; anything larger is cut into multipart parts.
+`multipart` on the handler, or on one route, moves that line: `'100mb'` for a size, `true` to part
+every upload, `false` to part none. Only parts can be paused, resumed and retried chunk by chunk, so
+`canPause` is false for a single PUT and `pause()` answers false rather than labelling an upload
+paused that then finishes anyway. A single PUT that fails is simply run again.
+
+The threshold also decides when the object exists. A file that went up in parts is created by the
+handler at completion, so no callback is ever handed an object that was already readable. A file
+that went up as one PUT is stored the moment its last byte lands: `onUploadComplete` refusing it, or
+the browser cancelling after it landed, deletes it, which bounds the exposure on a public bucket
+without undoing it. The delete is guarded by the etag the browser read off its own PUT, so a later
+upload to the same path is never the one deleted.
+
+Upload records support progress, cancel, retry, and a `finishing` state while the route records the
+object and runs `onUploadComplete`. `percent` remains at 99 during that state.
 
 `onUploadComplete` delivery is at-least-once: a successful response can be lost and retried. Its
 `uploadId` is stable, so enforce it as a unique database key and atomically insert-or-return.
@@ -200,7 +212,7 @@ numeric `constraints` result, and an early size refusal; the server is authorita
 
 `contentTypes` is an allow list checked against the media type the browser declares. When a route
 declares one, the hook sends the file's first bytes with phase 'begin', so a file whose bytes prove
-a different type is refused before a multipart exists. A route with no `contentTypes` has nothing to
+a different type is refused before anything is created or signed. A route with no `contentTypes` has nothing to
 check them against, and then the file is not read for them and nothing is sent. Treat that byte check as ergonomics, not a control: the part
 bodies go straight to storage and never reach your server, so a client is free to send an honest
 head and upload something else. What is stored and served is the declared type either way. It is

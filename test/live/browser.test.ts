@@ -87,14 +87,15 @@ const tid = '4d4a2a2c-5d6e-4f7a-8b9c-0d1e2f3a4b5c';
 const headers = () => ({ authorization: 'Bearer u7' });
 
 describe('upload()', () => {
-  test('one part: queued -> uploading -> done, blob.data typed by the route', async () => {
+  test('a single PUT: queued -> uploading -> done, blob.data typed by the route', async () => {
     const png = new Uint8Array(new ArrayBuffer(2000));
     png.set(PNG);
     const file = new File([png], 'Pic One.png', { type: 'image/png' });
     const task = upload(file, { route: '/api/upload', headers, input: { threadId: tid } });
     expect(task.snapshot().status).toBe('queued');
-    // Every upload is multipart now, so every upload is pausable, whatever the file weighs.
-    expect(task.snapshot().canPause).toBe(true);
+    // Under the route's threshold, so it is one presigned object PUT: nothing to pause into, and
+    // the content type, cache-control and metadata ride the url's signature instead of a create.
+    expect(task.snapshot().canPause).toBe(false);
     const seen: string[] = [];
     task.subscribe(() => seen.push(task.snapshot().status));
     const blob = await task.done;
@@ -105,7 +106,7 @@ describe('upload()', () => {
     expect(task.snapshot().status).toBe('done');
     expect(task.snapshot().percent).toBe(100);
     expect(seen).toContain('uploading');
-    // The stretch where every byte is sent and phase 'end' is completing the object.
+    // The stretch where every byte is sent and phase 'end' is recording the object.
     expect(seen).toContain('finishing');
     expect(task.pause()).toBe(false);
     expect(task.cancel()).toBe(false);
