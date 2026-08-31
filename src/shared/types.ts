@@ -82,7 +82,7 @@ export interface WireEndResponse<TData = unknown> {
 }
 
 export type WireRequest =
-  | { phase: 'begin'; file: WireFile; input?: unknown }
+  | { phase: 'begin'; file: WireFile; head?: string; input?: unknown }
   | { phase: 'parts'; completionToken: string; from: number }
   | { phase: 'end'; completionToken: string; parts?: WireLanded[] }
   | { phase: 'cancel'; completionToken: string };
@@ -104,9 +104,9 @@ export type UploadSnapshot = {
   stalled: boolean;
 } & (
   /**
-   * 'finishing': every byte is sent and phase 'end' is completing the upload -- sniffing it,
-   * recording it, running onUploadComplete. percent sits at 99 for exactly that stretch, and
-   * naming it is the difference between a bar that is working and one that looks stuck.
+   * 'finishing': every byte is sent and phase 'end' is completing the upload and running
+   * onUploadComplete. percent sits at 99 for exactly that stretch, and naming it is the
+   * difference between a bar that is working and one that looks stuck.
    */
   // The payload a state does not carry is declared `?: undefined` rather than left out, so
   // `upload.blob?.path` and `upload.error?.message` read straight off the union with no narrowing.

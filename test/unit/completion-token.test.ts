@@ -14,7 +14,6 @@ const grant: TokenPayload = {
   type: 'image/png',
   size: 4211,
   headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=31536000, immutable' },
-  allowed: ['image/png'],
   ctx: { rowId: 7, owner: '42' },
   exp: Date.now() + 86_400_000,
   uploadId: 'r2-upload-id',

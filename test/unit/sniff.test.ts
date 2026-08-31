@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { BlobError } from '../../src/shared/errors.ts';
-import { SNIFF_BYTES, checkContentType, expandContentTypes, isSniffable, sniff } from '../../src/server/sniff.ts';
+import { SNIFF_BYTES, checkContentType, expandContentTypes, sniff } from '../../src/server/sniff.ts';
 
 /** Byte literals and ASCII runs, in file order. */
 function bytes(...parts: (number | string)[]): Uint8Array {
@@ -32,75 +32,38 @@ const GIF = bytes('GIF89a', 0x01, 0x00, 0x01, 0x00);
 const WEBP = bytes('RIFF', 0x24, 0, 0, 0, 'WEBPVP8 ');
 const WAV = bytes('RIFF', 0x24, 0, 0, 0, 'WAVEfmt ');
 const AVI = bytes('RIFF', 0x24, 0, 0, 0, 'AVI LIST');
-const MP4 = bytes(0, 0, 0, 0x18, 'ftyp', 'isom', 0, 0, 0x02, 0);
+const BMP = bytes('BM', 0x36, 0x10, 0, 0, ...zeros(8), 0x28, 0, 0, 0);
+const ZIP = bytes('PK', 0x03, 0x04, 0x14, 0x00);
+const PDF = bytes('%PDF-1.7', 0x0a);
 const HTML = bytes('<!doctype html><html><body>hi</body></html>');
+/** A fragmented mp4: a real ffmpeg brand that no signature table below is asked to know. */
+const MP4_DASH = bytes(0, 0, 0, 0x18, 'ftyp', 'dash', 0, 0, 0x02, 0);
+const MP3_FFE3 = bytes(0xff, 0xe3, 0x90, 0x00);
 
-describe('sniff', () => {
+describe('sniff: the closed set it will name', () => {
   const cases: [string, Uint8Array, string][] = [
     ['png', PNG, 'image/png'],
     ['jpeg', JPEG, 'image/jpeg'],
     ['gif87a', bytes('GIF87a', 0x01, 0x00), 'image/gif'],
     ['gif89a', GIF, 'image/gif'],
     ['webp', WEBP, 'image/webp'],
-    ['bmp', bytes('BM', 0x36, 0, 0, 0), 'image/bmp'],
-    ['tiff little endian', bytes(0x49, 0x49, 0x2a, 0x00, 0x08), 'image/tiff'],
-    ['tiff big endian', bytes(0x4d, 0x4d, 0x00, 0x2a, 0x00), 'image/tiff'],
-    ['avif', bytes(0, 0, 0, 0x1c, 'ftyp', 'avif'), 'image/avif'],
-    ['avis', bytes(0, 0, 0, 0x1c, 'ftyp', 'avis'), 'image/avif'],
-    ['heic', bytes(0, 0, 0, 0x18, 'ftyp', 'heic'), 'image/heic'],
-    ['heix', bytes(0, 0, 0, 0x18, 'ftyp', 'heix'), 'image/heic'],
-    ['hevc', bytes(0, 0, 0, 0x18, 'ftyp', 'hevc'), 'image/heic'],
-    ['mif1', bytes(0, 0, 0, 0x18, 'ftyp', 'mif1'), 'image/heic'],
-    ['ico', bytes(0x00, 0x00, 0x01, 0x00, 0x01, 0x00), 'image/x-icon'],
-    ['pdf', bytes('%PDF-1.7', 0x0a), 'application/pdf'],
-    ['zip', bytes('PK', 0x03, 0x04, 0x14, 0x00), 'application/zip'],
+    ['bmp', BMP, 'image/bmp'],
+    ['wav', WAV, 'audio/wav'],
+    ['avi', AVI, 'video/x-msvideo'],
+    ['pdf', PDF, 'application/pdf'],
+    ['zip', ZIP, 'application/zip'],
     ['empty zip', bytes('PK', 0x05, 0x06, 0x00, 0x00), 'application/zip'],
     ['gzip', bytes(0x1f, 0x8b, 0x08, 0x00), 'application/gzip'],
     ['7z', bytes(0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0x00), 'application/x-7z-compressed'],
     ['rar', bytes('Rar!', 0x1a, 0x07, 0x00), 'application/x-rar-compressed'],
-    ['rar5', bytes('Rar!', 0x1a, 0x07, 0x01, 0x00), 'application/x-rar-compressed'],
-    ['tar', bytes('name.txt', ...zeros(249), 'ustar', 0x00, '00'), 'application/x-tar'],
-    ['bzip2', bytes('BZh9', 0x31), 'application/x-bzip2'],
-    ['mp4 isom', MP4, 'video/mp4'],
-    ['mp4 mp42', bytes(0, 0, 0, 0x18, 'ftyp', 'mp42'), 'video/mp4'],
-    ['mp4 avc1', bytes(0, 0, 0, 0x18, 'ftyp', 'avc1'), 'video/mp4'],
-    ['m4v', bytes(0, 0, 0, 0x18, 'ftyp', 'M4V '), 'video/mp4'],
-    ['quicktime ftyp', bytes(0, 0, 0, 0x14, 'ftyp', 'qt  '), 'video/quicktime'],
-    ['quicktime moov', bytes(0, 0, 0, 0x14, 'moov'), 'video/quicktime'],
-    ['quicktime mdat', bytes(0, 0, 0x10, 0x00, 'mdat'), 'video/quicktime'],
-    ['webm', bytes(0x1a, 0x45, 0xdf, 0xa3, 0x01, ...zeros(6), 0x1f, 0x42, 0x86, 0x81, 0x01, 0x42, 0x82, 0x84, 'webm'), 'video/webm'],
-    [
-      'matroska',
-      bytes(0x1a, 0x45, 0xdf, 0xa3, 0x01, ...zeros(6), 0x23, 0x42, 0x86, 0x81, 0x01, 0x42, 0x82, 0x88, 'matroska'),
-      'video/x-matroska',
-    ],
-    ['avi', AVI, 'video/x-msvideo'],
-    ['mp3 id3', bytes('ID3', 0x03, 0x00), 'audio/mpeg'],
-    ['mp3 frame sync fffb', bytes(0xff, 0xfb, 0x90, 0x00), 'audio/mpeg'],
-    ['mp3 frame sync fff3', bytes(0xff, 0xf3, 0x90, 0x00), 'audio/mpeg'],
-    ['mp3 frame sync fff2', bytes(0xff, 0xf2, 0x90, 0x00), 'audio/mpeg'],
-    ['wav', WAV, 'audio/wav'],
-    ['ogg', bytes('OggS', 0x00, 0x02), 'audio/ogg'],
-    ['flac', bytes('fLaC', 0x00, 0x00), 'audio/flac'],
-    ['aac fff1', bytes(0xff, 0xf1, 0x50, 0x80), 'audio/aac'],
-    ['aac fff9', bytes(0xff, 0xf9, 0x50, 0x80), 'audio/aac'],
-    ['woff', bytes('wOFF', 0x00, 0x01), 'font/woff'],
-    ['woff2', bytes('wOF2', 0x00, 0x01), 'font/woff2'],
-    ['ttf', bytes(0x00, 0x01, 0x00, 0x00, 0x00, 0x0c), 'font/ttf'],
-    ['otf', bytes('OTTO', 0x00, 0x0c), 'font/otf'],
+    ['bzip2', bytes('BZh9', 0x31, 0x41, 0x59, 0x26, 0x53, 0x59), 'application/x-bzip2'],
   ];
 
   for (const [name, input, expected] of cases) {
-    test(name, () => {
-      expect(sniff(input)).toBe(expected);
-      expect(isSniffable(expected)).toBe(true);
-    });
+    test(name, () => expect(sniff(input)).toBe(expected));
   }
 
   test('RIFF is ambiguous until offset 8', () => {
-    expect(sniff(WEBP)).toBe('image/webp');
-    expect(sniff(WAV)).toBe('audio/wav');
-    expect(sniff(AVI)).toBe('video/x-msvideo');
     expect(sniff(bytes('RIFF', 0x24, 0, 0, 0, 'NOPE'))).toBeUndefined();
     expect(sniff(bytes('RIFF'))).toBeUndefined();
   });
@@ -110,52 +73,78 @@ describe('sniff', () => {
     expect(sniff(bytes(0x89, 'PNG', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 'IEND'))).toBeUndefined();
   });
 
+  test('BM alone is not a bmp: the DIB header size is what makes it a signature', () => {
+    expect(sniff(bytes('BMW,model,year', 0x0a, '1,x,2020'))).toBeUndefined();
+    expect(sniff(bytes('BM', ...zeros(12), 0x99, 0, 0, 0))).toBeUndefined();
+    expect(sniff(BMP)).toBe('image/bmp');
+  });
+
+  test('BZh needs its level digit and block magic', () => {
+    expect(sniff(bytes('BZh is how the log line starts'))).toBeUndefined();
+    expect(sniff(bytes('BZh9'))).toBeUndefined();
+    // Exactly three bytes: the level digit is read off the end of the buffer.
+    expect(sniff(bytes('BZh'))).toBeUndefined();
+    expect(sniff(bytes('BZh0', 0x31, 0x41, 0x59, 0x26, 0x53, 0x59))).toBeUndefined();
+  });
+
   test('truncated and unknown inputs return undefined without throwing', () => {
     expect(sniff(new Uint8Array(0))).toBeUndefined();
     expect(sniff(bytes(0x89))).toBeUndefined();
     expect(sniff(bytes(0xff))).toBeUndefined();
-    expect(sniff(bytes('ft'))).toBeUndefined();
-    expect(sniff(bytes(0, 0, 0, 0x18, 'ftyp', 'zzzz'))).toBeUndefined();
-    expect(sniff(bytes('ustar'))).toBeUndefined();
     expect(sniff(HTML)).toBeUndefined();
     expect(sniff(bytes('{"a":1}'))).toBeUndefined();
   });
 
-  test('ico and ttf do not collide', () => {
-    expect(sniff(bytes(0x00, 0x00, 0x01, 0x00))).toBe('image/x-icon');
-    expect(sniff(bytes(0x00, 0x01, 0x00, 0x00))).toBe('font/ttf');
+  test('containers and partial-coverage formats are deliberately unnamed', () => {
+    // Each of these used to be named, and each named it wrongly for some real file.
+    expect(sniff(MP4_DASH)).toBeUndefined();
+    expect(sniff(bytes(0, 0, 0, 0x18, 'ftyp', 'isom'))).toBeUndefined();
+    expect(sniff(bytes(0, 0, 0, 0x18, 'ftyp', 'heic'))).toBeUndefined();
+    expect(sniff(MP3_FFE3)).toBeUndefined();
+    expect(sniff(bytes(0xff, 0xfb, 0x90, 0x00))).toBeUndefined();
+    expect(sniff(bytes('OggS', 0x00, 0x02))).toBeUndefined();
+    expect(sniff(bytes(0x49, 0x49, 0x2a, 0x00, 0x08))).toBeUndefined();
+    expect(sniff(bytes(0x1a, 0x45, 0xdf, 0xa3))).toBeUndefined();
+    expect(sniff(bytes(0x00, 0x01, 0x00, 0x00, 0x00, 0x0c))).toBeUndefined();
   });
 
-  test('SNIFF_BYTES covers the deepest probe', () => {
+  test('a tar is never refused for what its first member is called', () => {
+    // A tar's first 512 bytes are a filename the uploader picks, and every signature here is read at
+    // offset 0, so sniff() can be steered into naming one. It costs nothing: application/x-tar is
+    // outside the closed set, so whatever is named, the declaration stands.
+    const tar = (first: string) => bytes(first, ...zeros(257 - first.length), 'ustar', 0x00, '00');
+    const allowed = expandContentTypes(['application/x-tar']);
+    for (const name of ['BMW-sales.csv', 'GIF89a-list.txt', '%PDF-notes.txt', 'PK-archive.txt']) {
+      expect(() => checkContentType('application/x-tar', tar(name), allowed)).not.toThrow();
+    }
+  });
+
+  test('SNIFF_BYTES is the documented peek', () => {
     expect(SNIFF_BYTES).toBe(4100);
-    expect(SNIFF_BYTES).toBeGreaterThan(257 + 5);
-  });
-
-  test('isSniffable is false for the unsniffable types', () => {
-    expect(isSniffable('text/plain')).toBe(false);
-    expect(isSniffable('text/csv')).toBe(false);
-    expect(isSniffable('application/json')).toBe(false);
-    expect(isSniffable('image/svg+xml')).toBe(false);
-    expect(isSniffable('image/jpg')).toBe(true);
   });
 });
 
 describe('expandContentTypes', () => {
-  test('image/* is every sniffable image subtype and never svg', () => {
+  test('image/* is the media family, not the sniffable subset, and never svg', () => {
     const out = expandContentTypes(['image/*']);
     expect(out).toContain('image/png');
-    expect(out).toContain('image/webp');
+    expect(out).toContain('image/heic');
     expect(out).toContain('image/avif');
-    expect(out).toContain('image/x-icon');
+    expect(out).toContain('image/tiff');
     expect(out).not.toContain('image/svg+xml');
     expect(out.every((t) => t.startsWith('image/'))).toBe(true);
   });
 
-  test('video/* and audio/* expand likewise', () => {
-    expect(expandContentTypes(['video/*'])).toContain('video/webm');
-    expect(expandContentTypes(['video/*']).every((t) => t.startsWith('video/'))).toBe(true);
-    expect(expandContentTypes(['audio/*'])).toContain('audio/mpeg');
+  test('audio/* includes audio/mp4, so an m4a voice memo is accepted', () => {
+    expect(expandContentTypes(['audio/*'])).toContain('audio/mp4');
+    expect(expandContentTypes(['audio/*'])).toContain('audio/opus');
     expect(expandContentTypes(['audio/*']).every((t) => t.startsWith('audio/'))).toBe(true);
+  });
+
+  test('video/* likewise', () => {
+    expect(expandContentTypes(['video/*'])).toContain('video/webm');
+    expect(expandContentTypes(['video/*'])).toContain('video/3gpp');
+    expect(expandContentTypes(['video/*']).every((t) => t.startsWith('video/'))).toBe(true);
   });
 
   test('svg passes through when listed explicitly', () => {
@@ -168,6 +157,8 @@ describe('expandContentTypes', () => {
 
   test('aliases collapse to the canonical name', () => {
     expect(expandContentTypes(['image/jpg', 'audio/mp3', 'audio/x-wav'])).toEqual(['image/jpeg', 'audio/mpeg', 'audio/wav']);
+    expect(expandContentTypes(['application/x-zip-compressed'])).toEqual(['application/zip']);
+    expect(expandContentTypes(['image/vnd.microsoft.icon'])).toEqual(['image/x-icon']);
   });
 
   test('deduplicates across wildcards and exact types', () => {
@@ -190,8 +181,7 @@ describe('expandContentTypes', () => {
   });
 
   test('an empty list throws', () => {
-    const e = thrown(() => expandContentTypes([]));
-    expect(e.code).toBe('invalid_content_type_pattern');
+    expect(thrown(() => expandContentTypes([])).code).toBe('invalid_content_type_pattern');
   });
 
   test('a non "a/b" string throws and names it', () => {
@@ -203,21 +193,8 @@ describe('expandContentTypes', () => {
   });
 });
 
-describe('checkContentType', () => {
+describe('checkContentType: the allow list', () => {
   const images = expandContentTypes(['image/png', 'image/jpeg']);
-
-  test('html bytes declared image/png are rejected', () => {
-    const e = thrown(() => checkContentType('image/png', HTML, images));
-    expect(e.code).toBe('content_type_not_allowed');
-    expect(e.status).toBe(400);
-    expect(e.message).toContain('image/png');
-  });
-
-  test('bytes that sniff as another type are rejected by both names', () => {
-    const e = thrown(() => checkContentType('image/png', GIF, expandContentTypes(['image/png', 'image/gif'])));
-    expect(e.message).toContain('image/gif');
-    expect(e.message).toContain('image/png');
-  });
 
   test('a declared type outside the list is rejected with the list as the hint', () => {
     const e = thrown(() => checkContentType('image/gif', GIF, images));
@@ -226,52 +203,91 @@ describe('checkContentType', () => {
     expect(e.hint).toBe('allowed: image/png, image/jpeg');
   });
 
+  test('the list is checked before the bytes, with or without them', () => {
+    expect(thrown(() => checkContentType('image/gif', undefined, images)).code).toBe('content_type_not_allowed');
+    expect(thrown(() => checkContentType('text/html', HTML, expandContentTypes(['text/plain']))).code).toBe('content_type_not_allowed');
+  });
+
+  test('charset and other parameters are stripped', () => {
+    expect(() => checkContentType('IMAGE/PNG; charset=binary', PNG, images)).not.toThrow();
+    expect(thrown(() => checkContentType('image/gif; charset=binary', GIF, images)).message).toContain('image/gif is not allowed');
+  });
+
+  test('aliases are the same type on both sides', () => {
+    expect(() => checkContentType('image/jpg', JPEG, images)).not.toThrow();
+    expect(() => checkContentType('image/jpeg', JPEG, expandContentTypes(['image/jpg']))).not.toThrow();
+    expect(() => checkContentType('audio/x-wav', WAV, expandContentTypes(['audio/wav']))).not.toThrow();
+  });
+});
+
+describe('checkContentType: refuses a proven conflict, and only that', () => {
+  const images = expandContentTypes(['image/png', 'image/jpeg']);
+
   test('matching bytes pass', () => {
     expect(() => checkContentType('image/png', PNG, images)).not.toThrow();
     expect(() => checkContentType('image/jpeg', JPEG, images)).not.toThrow();
   });
 
-  test('text/plain passes on the declaration', () => {
+  test('bytes proven to be another closed type are refused, naming both', () => {
+    const e = thrown(() => checkContentType('image/png', GIF, expandContentTypes(['image/png', 'image/gif'])));
+    expect(e.code).toBe('content_type_not_allowed');
+    expect(e.status).toBe(400);
+    expect(e.message).toContain('image/gif');
+    expect(e.message).toContain('image/png');
+    expect(e.hint).toContain('contentTypes');
+  });
+
+  test('the renamed archive, which is the case this exists for', () => {
+    expect(thrown(() => checkContentType('image/png', ZIP, images)).message).toContain('application/zip');
+    expect(thrown(() => checkContentType('image/jpeg', PDF, images)).message).toContain('application/pdf');
+  });
+
+  test('bytes that prove nothing pass: the check never guesses', () => {
+    expect(() => checkContentType('image/png', HTML, images)).not.toThrow();
+    expect(() => checkContentType('image/png', new Uint8Array(0), images)).not.toThrow();
+    expect(() => checkContentType('image/png', undefined, images)).not.toThrow();
+  });
+
+  test('a declaration outside the closed set is never contradicted', () => {
+    // A .docx really is a zip. So is an .epub, a .jar and an .apk.
+    for (const t of [
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/epub+zip',
+      'application/java-archive',
+      'application/vnd.android.package-archive',
+    ]) {
+      expect(() => checkContentType(t, ZIP, expandContentTypes([t]))).not.toThrow();
+    }
+    // A .svgz really is a gzip.
+    expect(() => checkContentType('image/svg+xml', bytes(0x1f, 0x8b, 0x08, 0x00), expandContentTypes(['image/svg+xml']))).not.toThrow();
+  });
+
+  test('application/octet-stream is a shrug, not a claim, so bytes never contradict it', () => {
+    const allowed = expandContentTypes(['application/octet-stream']);
+    expect(() => checkContentType('application/octet-stream', PNG, allowed)).not.toThrow();
+    expect(() => checkContentType('application/octet-stream', ZIP, allowed)).not.toThrow();
+  });
+
+  test('text declarations pass on the declaration, whatever the bytes look like', () => {
     const allowed = expandContentTypes(['text/plain', 'text/csv', 'application/json']);
     expect(() => checkContentType('text/plain', HTML, allowed)).not.toThrow();
-    expect(() => checkContentType('text/csv', bytes('a,b\n1,2\n'), allowed)).not.toThrow();
+    expect(() => checkContentType('text/csv', bytes('BMW,model,year', 0x0a), allowed)).not.toThrow();
+    expect(() => checkContentType('text/plain', bytes('ID3 tag notes', 0x0a), allowed)).not.toThrow();
+    expect(() => checkContentType('text/plain', bytes('%PDF is the pdf magic', 0x0a), allowed)).not.toThrow();
     expect(() => checkContentType('application/json', bytes('{"a":1}'), allowed)).not.toThrow();
   });
 
-  test('an unsniffable declaration still has to be in the list', () => {
-    const e = thrown(() => checkContentType('text/html', HTML, expandContentTypes(['text/plain'])));
-    expect(e.code).toBe('content_type_not_allowed');
-  });
-
-  test('image/jpg and image/jpeg are the same type', () => {
-    expect(() => checkContentType('image/jpg', JPEG, images)).not.toThrow();
-    expect(() => checkContentType('image/jpeg', JPEG, expandContentTypes(['image/jpg']))).not.toThrow();
-  });
-
-  test('audio aliases are the same type', () => {
-    expect(() => checkContentType('audio/x-wav', WAV, expandContentTypes(['audio/wav']))).not.toThrow();
-    expect(() => checkContentType('audio/mp3', bytes('ID3', 0x03, 0x00), expandContentTypes(['audio/mpeg']))).not.toThrow();
-  });
-
-  test('charset and other parameters are stripped', () => {
-    expect(() => checkContentType('IMAGE/PNG; charset=binary', PNG, images)).not.toThrow();
-    expect(() => checkContentType('text/plain;charset=utf-8', HTML, expandContentTypes(['text/plain']))).not.toThrow();
-    const e = thrown(() => checkContentType('image/gif; charset=binary', GIF, images));
-    expect(e.message).toContain('image/gif is not allowed');
-  });
-
-  test('without bytes only the declaration is checked', () => {
-    expect(() => checkContentType('image/png', undefined, images)).not.toThrow();
-    expect(thrown(() => checkContentType('image/gif', undefined, images)).code).toBe('content_type_not_allowed');
-  });
-
-  test('empty bytes cannot prove a sniffable type', () => {
-    expect(thrown(() => checkContentType('image/png', new Uint8Array(0), images)).code).toBe('content_type_not_allowed');
-  });
-
-  test('a video declaration is checked against its own bytes', () => {
-    const allowed = expandContentTypes(['video/*']);
-    expect(() => checkContentType('video/mp4', MP4, allowed)).not.toThrow();
-    expect(thrown(() => checkContentType('video/webm', MP4, allowed)).message).toContain('video/mp4');
+  test('real media the old table refused now passes', () => {
+    const av = expandContentTypes(['video/*', 'audio/*']);
+    expect(() => checkContentType('video/mp4', MP4_DASH, av)).not.toThrow();
+    for (const brand of ['iso5', 'iso6', 'msf1', 'mmp4', 'M4A ']) {
+      expect(() => checkContentType('video/mp4', bytes(0, 0, 0, 0x18, 'ftyp', brand), av)).not.toThrow();
+    }
+    expect(() => checkContentType('audio/mpeg', MP3_FFE3, av)).not.toThrow();
+    expect(() => checkContentType('audio/mpeg', bytes(0xff, 0xfa, 0x90, 0x00), av)).not.toThrow();
+    expect(() => checkContentType('audio/mp4', bytes(0, 0, 0, 0x18, 'ftyp', 'M4A '), av)).not.toThrow();
+    expect(() => checkContentType('audio/opus', bytes('OggS', 0x00, 0x02), av)).not.toThrow();
+    expect(() => checkContentType('video/webm', bytes(0x1a, 0x45, 0xdf, 0xa3), av)).not.toThrow();
   });
 });

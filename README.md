@@ -159,7 +159,7 @@ a progress bar actually wants -- spelling it out from `status` is how an input g
 
 Every direct upload is multipart, including a file that fits in one part. The object does not exist
 until completion. Upload records support progress, pause, resume, cancel, retry, and a `finishing`
-state while the route completes the multipart upload, verifies the stored bytes, and runs
+state while the route completes the multipart upload and runs
 `onUploadComplete`. `percent` remains at 99 during that state.
 
 `onUploadComplete` delivery is at-least-once: a successful response can be lost and retried. Its
@@ -196,9 +196,14 @@ callbacks are defaults; a route replaces them key by key. A route constraint set
 clear a handler default. Route names must match `/^[A-Za-z_][\w-]*$/`.
 
 `GET` serves `{ constraints }` with an ETag and `max-age=60`. The hook uses it for `accept`, the
-numeric `constraints` result, and an early size refusal; the server is authoritative. `contentTypes`
-checks the declared media type before upload and supported file signatures after storage. This is
-file-type validation, not malware scanning or a general security scan.
+numeric `constraints` result, and an early size refusal; the server is authoritative.
+
+`contentTypes` is an allow list checked against the media type the browser declares. The client also
+sends the file's first bytes with phase 'begin', so a file whose bytes prove a different type is
+refused before a multipart exists. Treat that byte check as ergonomics, not a control: the part
+bodies go straight to storage and never reach your server, so a client is free to send an honest
+head and upload something else. What is stored and served is the declared type either way. It is
+not malware scanning or a general security scan.
 
 `context` runs once per POST request and does not run for the public cacheable GET. Write it above
 callbacks that read `ctx`; TypeScript reads an object literal top to bottom. `onError` can map an
@@ -287,7 +292,11 @@ cache: 'public, max-age=60, s-maxage=31536000'     // yours, verbatim
 Keep the limit below the hosting platform's request-body cap. `request.formData()` buffers the
 multipart body. `Bucket.put` also buffers an unknown-length `Request` or `ReadableStream` up to
 `maxBytes` to determine the content length; pass `size` when it is known to avoid that buffering.
-`contentTypes` validates supported signatures, but it is not malware scanning.
+`contentTypes` here is checked against the bytes themselves, which `put` has in hand before it
+stores anything. It refuses only a proven conflict, so a body whose bytes are recognisably some
+other type is refused rather than stored, while bytes that prove nothing pass and are stored under
+the declared type. A type whose signature names a container passes too, because a .docx really is a
+zip. It is not malware scanning.
 
 A stable key gives last-write-wins behavior under concurrent requests. If a database update after
 `put` fails, blindly deleting the key can delete a newer concurrent upload. Use an immutable/versioned
