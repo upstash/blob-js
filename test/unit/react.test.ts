@@ -842,6 +842,50 @@ test('a direct upload is finishing between the last byte and the end response', 
 
 /* -------------------------------------------------------- createUploadHooks -- */
 
+test('a route with no contentTypes is not asked for the file head', async () => {
+  const sizeOnly = `/api/size-only/${++routeId}`;
+  const bodies: any[] = [];
+  restore.push(
+    installRouter({
+      [sizeOnly]: {
+        GET: async () => jsonResponse({ constraints: { maxBytes: 1000 } }),
+        POST: async (request: Request) => {
+          const body = (await request.json()) as any;
+          bodies.push(body);
+          if (body?.phase === 'begin') {
+            return jsonResponse({ completionToken: 't', path: 'p', upload: { partSize: PART_SIZE, parts: ONE_PART } });
+          }
+          return jsonResponse(END_BODY);
+        },
+      },
+    }),
+  );
+  const hook = await render(() => useUpload(sizeOnly));
+  // The constraints have to have landed, or the head is sent because nothing is known yet.
+  await flush();
+  expect(hook.current.constraints).toEqual({ maxBytes: 1000 });
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  await flush(3);
+  const begin = bodies.find((b) => b.phase === 'begin');
+  expect(begin).toBeDefined();
+  expect(begin.head).toBeUndefined();
+});
+
+test('a route that declares contentTypes is sent the head with begin', async () => {
+  const hook = await render(() => useUpload(route));
+  await flush();
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  await flush(3);
+  const begin = calls.find((c) => c.method === 'POST' && (c.body as any)?.phase === 'begin');
+  expect(typeof (begin!.body as any).head).toBe('string');
+  // 'x'.repeat(10), which proves nothing and so is accepted.
+  expect(atob((begin!.body as any).head)).toBe('x'.repeat(10));
+});
+
 test('createUploadHooks applies direct defaults and runs its onError before the call site handler', async () => {
   const seen: string[] = [];
   const failing = `/api/configured/${++routeId}`;

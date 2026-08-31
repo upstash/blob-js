@@ -1,5 +1,6 @@
 import { BlobError } from '../shared/errors.ts';
 import type { CompletedBlob, UploadSnapshot, UploadTask, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
+import { SNIFF_BYTES } from '../shared/units.ts';
 import { abortError, clock } from './clock.ts';
 import { acquire } from './pool.ts';
 import { backoffMs, classify, MAX_ATTEMPTS, MAX_NETWORK_ATTEMPTS, NO_BYTES_NETWORK_ATTEMPTS, STALL_TIMEOUT_MS } from './retry.ts';
@@ -13,6 +14,13 @@ export interface UploadOptions<TInput = unknown> {
   /** A function is re-read per call to the route, so a rotated JWT still ends the upload. */
   headers?: HeadersProvider;
   input?: TInput;
+  /**
+   * Whether to send the file's leading bytes with phase 'begin' for the route's type check. The
+   * hooks set it from the constraints the route serves, so a route with no contentTypes reads no
+   * bytes and sends none. Undefined means send: a caller that does not know what the route enforces
+   * must not be the reason the check does not happen.
+   */
+  sendHead?: boolean;
 }
 
 export interface InternalTask extends UploadTask {
@@ -274,7 +282,7 @@ class Task implements InternalTask {
   }
 
   private async begin(): Promise<void> {
-    const head = await readHead(this.file);
+    const head = this.options.sendHead === false ? undefined : await readHead(this.file);
     const res = (await this.routeCall(
       {
         phase: 'begin',
@@ -577,9 +585,6 @@ export async function resolveHeaders(h: HeadersProvider | undefined): Promise<Re
   return await h();
 }
 
-/** Matches SNIFF_BYTES on the server. Duplicated rather than imported: this file ships to browsers. */
-const HEAD_BYTES = 4100;
-
 /**
  * The file's first bytes, base64, for the server's type check at 'begin'. Best effort: a file the
  * browser will not read yet is not worth failing the upload over, so the head is simply omitted and
@@ -587,7 +592,7 @@ const HEAD_BYTES = 4100;
  */
 async function readHead(file: Blob): Promise<string | undefined> {
   try {
-    const buf = await file.slice(0, HEAD_BYTES).arrayBuffer();
+    const buf = await file.slice(0, SNIFF_BYTES).arrayBuffer();
     const bytes = new Uint8Array(buf);
     let bin = '';
     for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] as number);

@@ -198,9 +198,10 @@ clear a handler default. Route names must match `/^[A-Za-z_][\w-]*$/`.
 `GET` serves `{ constraints }` with an ETag and `max-age=60`. The hook uses it for `accept`, the
 numeric `constraints` result, and an early size refusal; the server is authoritative.
 
-`contentTypes` is an allow list checked against the media type the browser declares. The client also
-sends the file's first bytes with phase 'begin', so a file whose bytes prove a different type is
-refused before a multipart exists. Treat that byte check as ergonomics, not a control: the part
+`contentTypes` is an allow list checked against the media type the browser declares. When a route
+declares one, the hook sends the file's first bytes with phase 'begin', so a file whose bytes prove
+a different type is refused before a multipart exists. A route with no `contentTypes` has nothing to
+check them against, and then the file is not read for them and nothing is sent. Treat that byte check as ergonomics, not a control: the part
 bodies go straight to storage and never reach your server, so a client is free to send an honest
 head and upload something else. What is stored and served is the declared type either way. It is
 not malware scanning or a general security scan.

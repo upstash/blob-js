@@ -115,3 +115,11 @@ export function cacheControl(cache: CacheOption | undefined, visibility: 'public
   if (typeof cache === 'string' && RAW_HEADER.test(cache)) return cache.trim();
   return `${scope}, max-age=${Math.floor(parseDuration(cache, 'cache') / 1000)}`;
 }
+
+/**
+ * The leading bytes a type check looks at. The browser slices this many off the file for phase
+ * 'begin' and the server clamps what it decodes to the same number, so it lives here rather than in
+ * either half: every signature the SDK knows sits in the first 32 bytes, but the two sides must
+ * agree on what they are talking about.
+ */
+export const SNIFF_BYTES = 4100;
