@@ -141,7 +141,14 @@ export function useUpload(route: string, maybeOptions?: any): any {
     (args: { file?: File | null; files?: File[] | FileList | null; input?: unknown }) => {
       const make = (file: File): ListEntry<AnyRecord> => {
         const refusal = deny(file, constraintsRef.current);
-        return refusal ? refusedEntry(file, refusal) : taskEntry(createTask(file, { route: url, headers: headersRef.current, input: args.input }, false));
+        // A route with no contentTypes has nothing to check the leading bytes against, so the file
+        // is not read for them. Constraints that have not arrived yet are not an answer: send, and
+        // let the route decide.
+        const known = constraintsRef.current;
+        const sendHead = known === undefined ? undefined : (known.contentTypes?.length ?? 0) > 0;
+        return refusal
+          ? refusedEntry(file, refusal)
+          : taskEntry(createTask(file, { route: url, headers: headersRef.current, input: args.input, sendHead }, false));
       };
       if ('files' in args) return add(args.files ? Array.from(args.files).map(make) : []);
       if (!args.file) return null;

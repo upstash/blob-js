@@ -1,13 +1,7 @@
 import { BlobError } from '../shared/errors.ts';
 
-/**
- * Bytes peeked from a stream before sniffing. Every signature below lives in the first 32 bytes; the
- * rest of the buffer is slack so a caller can hand the same head to something stricter later.
- * HEAD_BYTES in src/browser/task.ts is this same number, duplicated because that file ships to
- * browsers. They may drift without breaking anything -- the server clamps what it decodes, and no
- * signature reaches past 32 -- but keep them equal.
- */
-export const SNIFF_BYTES = 4100;
+/** Re-exported so the server half reads it from the module it sniffs with. @see units.ts */
+export { SNIFF_BYTES } from '../shared/units.ts';
 
 function magic(b: Uint8Array, offset: number, sig: readonly number[]): boolean {
   if (b.length < offset + sig.length) return false;
