@@ -256,7 +256,9 @@ export async function POST(request: Request) {
       contentType: file.type,
       contentTypes: ['image/png', 'image/jpeg', 'image/webp'],
       maxBytes: '2mb',
-      cache: '1m',
+      // A stable path that is overwritten: keep the copy, check it. An unchanged avatar is a 304
+      // with no body. 'immutable' belongs on a versioned path, a max-age on neither.
+      cache: 'revalidate',
     });
     await db.users.update(user.id, { avatarEtag: blob.etag });
     return Response.json({ blob });

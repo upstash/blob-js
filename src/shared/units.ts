@@ -76,11 +76,15 @@ export function parseDuration(input: Duration, what = 'duration'): number {
   return Math.floor(Number(m[1]) * mult);
 }
 
-export type CacheOption = Duration | 'immutable' | 'no-store';
+export type CacheOption = Duration | 'immutable' | 'revalidate' | 'no-store';
 
 export function cacheControl(cache: CacheOption | undefined): string {
   if (cache === undefined) return 'public, max-age=3600';
   if (cache === 'immutable') return 'public, max-age=31536000, immutable';
+  // For a stable path that is overwritten: the copy is kept and checked with If-None-Match, so an
+  // unchanged object costs a 304 with no body instead of the whole object once every max-age.
+  // A short max-age is the wrong tool there -- it is stale until it expires, then re-downloads.
+  if (cache === 'revalidate') return 'public, max-age=0, must-revalidate';
   if (cache === 'no-store') return 'no-store';
   return `public, max-age=${Math.floor(parseDuration(cache, 'cache') / 1000)}`;
 }

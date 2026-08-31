@@ -78,8 +78,9 @@ describe('cacheControl', () => {
     expect(cacheControl('1500ms')).toBe('public, max-age=1');
   });
 
-  test('the two words are not durations', () => {
+  test('the three words are not durations', () => {
     expect(cacheControl('immutable')).toBe('public, max-age=31536000, immutable');
+    expect(cacheControl('revalidate')).toBe('public, max-age=0, must-revalidate');
     expect(cacheControl('no-store')).toBe('no-store');
   });
 });
