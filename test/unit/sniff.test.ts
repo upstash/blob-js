@@ -82,6 +82,9 @@ describe('sniff: the closed set it will name', () => {
   test('BZh needs its level digit and block magic', () => {
     expect(sniff(bytes('BZh is how the log line starts'))).toBeUndefined();
     expect(sniff(bytes('BZh9'))).toBeUndefined();
+    // Exactly three bytes: the level digit is read off the end of the buffer.
+    expect(sniff(bytes('BZh'))).toBeUndefined();
+    expect(sniff(bytes('BZh0', 0x31, 0x41, 0x59, 0x26, 0x53, 0x59))).toBeUndefined();
   });
 
   test('truncated and unknown inputs return undefined without throwing', () => {

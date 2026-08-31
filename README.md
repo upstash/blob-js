@@ -293,9 +293,10 @@ Keep the limit below the hosting platform's request-body cap. `request.formData(
 multipart body. `Bucket.put` also buffers an unknown-length `Request` or `ReadableStream` up to
 `maxBytes` to determine the content length; pass `size` when it is known to avoid that buffering.
 `contentTypes` here is checked against the bytes themselves, which `put` has in hand before it
-stores anything, so a mislabelled body is refused rather than stored. The check refuses only a
-proven conflict: bytes that prove nothing pass, and a type whose signature names a container passes
-too, because a .docx really is a zip. It is not malware scanning.
+stores anything. It refuses only a proven conflict, so a body whose bytes are recognisably some
+other type is refused rather than stored, while bytes that prove nothing pass and are stored under
+the declared type. A type whose signature names a container passes too, because a .docx really is a
+zip. It is not malware scanning.
 
 A stable key gives last-write-wins behavior under concurrent requests. If a database update after
 `put` fails, blindly deleting the key can delete a newer concurrent upload. Use an immutable/versioned

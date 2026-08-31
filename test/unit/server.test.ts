@@ -699,6 +699,29 @@ describe('uploadHandler: the direct transport', () => {
     expect(r2Calls().some((c) => c.method === 'DELETE')).toBe(false);
   });
 
+  test('a retried end that finds no upload still will not delete blind', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'avatars/u1.png' }) });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    // The first 'end' completed the upload and its response was lost. By the time it is retried, a
+    // second upload has replaced the object, so completeMultipart has no upload left to complete and
+    // there is no etag from it: the fallback is the head, and the sizes disagree.
+    r2Handler = (call: Call): Response => {
+      const created = initiated(call);
+      if (created) return created;
+      if (call.method === 'POST') return new Response('<Error><Code>NoSuchUpload</Code></Error>', { status: 404 });
+      if (call.method === 'HEAD') return new Response('', { status: 200, headers: { 'content-length': '99', etag: '"newer"', 'content-type': 'image/png' } });
+      return new Response('', { status: 204 });
+    };
+    calls = [];
+    const end = await post(route, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
+    expect(end.status).toBe(403);
+    // No complete means no etag, and an object that cannot be identified is not one to delete.
+    expect(r2Calls().some((c) => c.method === 'DELETE')).toBe(false);
+    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'HEAD']);
+  });
+
   test('phase end never reads the stored bytes back', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;

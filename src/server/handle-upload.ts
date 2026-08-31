@@ -191,7 +191,11 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       if (!Number.isInteger(p?.n) || typeof p.etag !== 'string') throw new BlobError('invalid_input', { message: 'parts must be [{ n, etag }]' });
     }
     // Kept for discard(): it is what says the object still holds this upload's bytes and not a later
-    // upload's, which matters whenever onBeforeUpload returns a stable path.
+    // upload's, which matters whenever onBeforeUpload returns a stable path. It is the only thing
+    // that can say so: the head read afterwards is whatever is stored now, so guarding on that would
+    // compare the object to itself. On the retried-'end' path below there is no complete to take it
+    // from, and then a refusal deliberately leaves the object rather than delete one it cannot
+    // identify.
     let completedEtag: string | undefined;
     try {
       completedEtag = await r2.completeMultipart(t.path, t.uploadId, list);
@@ -247,13 +251,17 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
    */
   async function discard(path: string, etag: string | undefined): Promise<void> {
     try {
-      if (etag) {
-        const current = await r2.head(path);
-        if (!current) return;
-        if (current.etag !== etag) {
-          console.warn(`[upstash-blob] refused upload ${JSON.stringify(path)} was replaced before it could be deleted; leaving the newer object alone`);
-          return;
-        }
+      // No etag is no permission. An orphan costs storage and a log line; a blind delete costs
+      // somebody else's accepted file, so the cheaper mistake is the one to make.
+      if (!etag) {
+        console.error(`[upstash-blob] refused upload ${JSON.stringify(path)} could not be identified and was left stored rather than risk deleting a newer object`);
+        return;
+      }
+      const current = await r2.head(path);
+      if (!current) return;
+      if (current.etag !== etag) {
+        console.warn(`[upstash-blob] refused upload ${JSON.stringify(path)} was replaced before it could be deleted; leaving the newer object alone`);
+        return;
       }
       const res = await r2.fetch({ method: 'DELETE', path });
       await res.body?.cancel();
@@ -387,7 +395,8 @@ export function enforce(constraints: ResolvedConstraints, file: UploadFile, head
 function readHead(raw: unknown): Uint8Array | undefined {
   if (typeof raw !== 'string' || raw.length === 0) return undefined;
   try {
-    const bin = atob(raw);
+    // Clamped before decoding, not after: raw is whatever the client chose to send.
+    const bin = atob(raw.slice(0, Math.ceil(SNIFF_BYTES / 3) * 4));
     const out = new Uint8Array(Math.min(bin.length, SNIFF_BYTES));
     for (let i = 0; i < out.length; i++) out[i] = bin.charCodeAt(i);
     return out;
