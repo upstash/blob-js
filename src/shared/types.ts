@@ -1,6 +1,11 @@
 import type { BlobError } from './errors.ts';
 
-/** The object fields available from a bucket listing and shared by every completed write. */
+/**
+ * The record of a stored blob -- the fields a bucket listing carries, shared by every completed
+ * write. Never its bytes: the DOM `Blob` is bytes, so the two never swap places here. `blob` is
+ * only ever something the SDK answers with, or a field on one; bytes go in as `body` (see PutBody)
+ * and nothing in the API takes a parameter named `blob`. Keep it that way when adding to it.
+ */
 export interface BlobObject {
   path: string;
   /** Undefined on a private bucket: no public host serves it, so use signedRead(). */

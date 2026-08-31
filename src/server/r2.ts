@@ -15,7 +15,7 @@ export interface R2RequestInit {
   signal?: AbortSignal;
 }
 
-export interface ObjectHead {
+export interface BlobHead {
   size: number;
   etag: string;
   contentType: string;
@@ -199,7 +199,7 @@ export class R2 {
     return capOf(await this.creds.get());
   }
 
-  async head(path: string): Promise<ObjectHead | undefined> {
+  async head(path: string): Promise<BlobHead | undefined> {
     const res = await this.fetch({ method: 'HEAD', path });
     await res.body?.cancel();
     if (res.status === 404) return undefined;
@@ -311,7 +311,7 @@ function backoff(attempt: number, retryAfter: string | null): number {
   return Math.floor(Math.random() * Math.min(4_000, 200 * 2 ** attempt));
 }
 
-export function headFromHeaders(h: Headers): ObjectHead {
+export function headFromHeaders(h: Headers): BlobHead {
   const metadata: Record<string, string> = {};
   h.forEach((v, k) => {
     if (k.startsWith('x-amz-meta-')) metadata[k.slice(11)] = v;
