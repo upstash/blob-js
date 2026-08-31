@@ -10,7 +10,7 @@ export type {
   SignedReadUrlOptions,
   SignedRead,
   ListMultipartOptions,
-  AbortStaleOptions,
+  AbortStaleMultipartOptions,
   MultipartUpload,
   DeleteTarget,
   S3Config,

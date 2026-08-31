@@ -85,11 +85,11 @@ survives is the tab that closed, so a cron reaps it:
 
 ```ts
 // list + abort, in one call: returns the uploads it aborted
-await bucket.abortStaleUploads({ olderThan: '1d', prefix: 'uploads/' });
+await bucket.abortStaleMultipartUploads({ olderThan: '1d', prefix: 'uploads/' });
 
 // or look first, and abort a specific one
 const open = await bucket.listMultipartUploads({ prefix: 'uploads/' });
-await bucket.abortMultipart(open[0]);   // { path, uploadId }
+await bucket.abortMultipartUpload(open[0]);   // { path, uploadId }
 ```
 
 `del({ prefix })` refuses an empty prefix unless you say you mean it: `del({ prefix: '', all: true })`.

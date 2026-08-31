@@ -388,7 +388,7 @@ describe('listMultipartUploads', () => {
   });
 });
 
-describe('abortMultipart', () => {
+describe('abortMultipartUpload', () => {
   test('sends the DELETE for the listed record', async () => {
     resetCredentialCaches();
     let seen: URL | undefined;
@@ -396,7 +396,7 @@ describe('abortMultipart', () => {
       seen = new URL(call.url);
       return new Response(null, { status: 204 });
     };
-    await bucket().abortMultipart({ path: 'a&b.txt', uploadId: 'u1' });
+    await bucket().abortMultipartUpload({ path: 'a&b.txt', uploadId: 'u1' });
     expect(seen!.pathname.endsWith('a%26b.txt')).toBe(true);
     expect(seen!.searchParams.get('uploadId')).toBe('u1');
   });
@@ -405,7 +405,7 @@ describe('abortMultipart', () => {
     resetCredentialCaches();
     r2Handler = () => new Response(null, { status: 204 });
     // A missing upload is success at the wire, so bad input has to be caught before it is sent.
-    await expect(bucket().abortMultipart({ path: 'a.txt', uploadId: '' })).rejects.toThrow('uploadId is required');
+    await expect(bucket().abortMultipartUpload({ path: 'a.txt', uploadId: '' })).rejects.toThrow('uploadId is required');
   });
 });
 

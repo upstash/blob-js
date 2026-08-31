@@ -100,7 +100,7 @@ export interface ListMultipartOptions {
   prefix?: string;
 }
 
-export interface AbortStaleOptions extends ListMultipartOptions {
+export interface AbortStaleMultipartOptions extends ListMultipartOptions {
   /** Only abort uploads started longer ago than this. */
   olderThan: Duration;
 }
@@ -439,9 +439,9 @@ export class Bucket {
    * why it takes the record listMultipartUploads() returned rather than two strings: a swapped pair
    * would abort nothing and report that it worked.
    */
-  async abortMultipart(upload: Pick<MultipartUpload, 'path' | 'uploadId'>): Promise<void> {
-    if (!upload || typeof upload !== 'object') throw new BlobError('invalid_input', { message: 'abortMultipart({ path, uploadId }): an upload is required' });
-    if (typeof upload.uploadId !== 'string' || !upload.uploadId) throw new BlobError('invalid_input', { message: 'abortMultipart({ path, uploadId }): uploadId is required' });
+  async abortMultipartUpload(upload: Pick<MultipartUpload, 'path' | 'uploadId'>): Promise<void> {
+    if (!upload || typeof upload !== 'object') throw new BlobError('invalid_input', { message: 'abortMultipartUpload({ path, uploadId }): an upload is required' });
+    if (typeof upload.uploadId !== 'string' || !upload.uploadId) throw new BlobError('invalid_input', { message: 'abortMultipartUpload({ path, uploadId }): uploadId is required' });
     encodeKey(upload.path);
     await this.r2.abortMultipart(upload.path, upload.uploadId);
   }
@@ -450,7 +450,7 @@ export class Bucket {
    * List plus abort, for an app cron: an abandoned upload is not expired for you, and one that
    * list() cannot see is what turns "delete the bucket" into a dead end. Returns what it aborted.
    */
-  async abortStaleUploads(options: AbortStaleOptions): Promise<MultipartUpload[]> {
+  async abortStaleMultipartUploads(options: AbortStaleMultipartOptions): Promise<MultipartUpload[]> {
     const cutoff = Date.now() - parseDuration(options.olderThan, 'olderThan');
     const stale = (await this.listMultipartUploads(options)).filter((u) => u.initiatedAt.getTime() <= cutoff);
     for (const u of stale) await this.r2.abortMultipart(u.path, u.uploadId);

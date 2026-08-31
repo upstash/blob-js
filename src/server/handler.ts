@@ -73,7 +73,7 @@ interface CompleteBase<TCtx, TState> extends CompletedBlob {
 }
 
 interface DirectCompleteExtras {
-  /** R2's own multipart id, for a bucket.abortMultipart({ path, uploadId }). */
+  /** R2's own multipart id, for a bucket.abortMultipartUpload({ path, uploadId }). */
   multipartUploadId: string;
 }
 

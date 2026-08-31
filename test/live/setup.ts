@@ -10,7 +10,7 @@ export const p = (name: string) => `${root}${name}`;
 // A crashed run leaves test/<runId>/ behind, and a killed one leaves multipart uploads nothing can
 // list; sweep both, anything older than an hour.
 export async function sweep(bucket: Bucket): Promise<void> {
-  await bucket.abortStaleUploads({ olderThan: '1h', prefix: 'test/' });
+  await bucket.abortStaleMultipartUploads({ olderThan: '1h', prefix: 'test/' });
   const cutoff = Date.now() - 3600_000;
   let cursor: string | undefined;
   const stale = new Set<string>();
