@@ -170,6 +170,15 @@ function safeContentType(type: string): string {
   return type;
 }
 
+/** The variable `Bucket.fromEnv()` and an `uploadHandler` with no bucket read. */
+export const TOKEN_ENV = 'UPSTASH_BLOB_TOKEN';
+
+/** The token in the environment, or undefined -- including on Workers, where there is no process. */
+export function tokenFromEnv(name: string = TOKEN_ENV): string | undefined {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return env?.[name] || undefined;
+}
+
 const INTERNALS = new WeakMap<Bucket, R2>();
 
 /** Not exported from the package: the upload handler's access to the signing core. */
@@ -191,9 +200,8 @@ export class Bucket {
     INTERNALS.set(this, this.r2);
   }
 
-  static fromEnv(name = 'UPSTASH_BLOB_TOKEN', options: Omit<BucketOptions, 'token'> = {}): Bucket {
-    const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
-    const token = env?.[name];
+  static fromEnv(name = TOKEN_ENV, options: Omit<BucketOptions, 'token'> = {}): Bucket {
+    const token = tokenFromEnv(name);
     if (!token) throw new TypeError(`Bucket.fromEnv: ${name} is not set (on Workers, pass it explicitly: new Bucket({ token: env.${name} }))`);
     return new Bucket({ ...options, token });
   }
