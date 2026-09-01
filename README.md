@@ -42,14 +42,13 @@ cannot read back. Percent-encode first.
 
 ```ts
 await bucket.updateJson<Settings>('u/7/settings.json', (prev) => ({ ...(prev ?? {}), theme: 'dark' }));
-await bucket.updateText('u/7/notes.md', (prev) => `${prev ?? ''}- another note\n`);
 ```
 
-Both read the object, hand the callback what is stored, and write the result back conditionally:
-`If-Match` on the etag it read, or `If-None-Match: *` when nothing was there. A write that lost the
-race is retried against what actually landed, up to five times, so two concurrent updates cannot
-silently drop one of them. `prev` is `null` when nothing is stored at the path; `updateText` keeps
-the content type the object already had, `updateJson` always writes `application/json`.
+`updateJson` reads the document, hands the callback what is stored, and writes the result back
+conditionally: `If-Match` on the etag it read, or `If-None-Match: *` when nothing was there. A write
+that lost the race is retried against what actually landed, up to five times, so two concurrent
+updates cannot silently drop one of them. `prev` is `null` when nothing is stored at the path, and
+existing metadata is carried over unless `options.metadata` replaces it.
 
 ### Signed reads
 

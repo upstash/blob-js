@@ -14,7 +14,6 @@ export type {
   DeleteTarget,
   S3Config,
   UpdateJsonOptions,
-  UpdateTextOptions,
 } from './server/bucket.ts';
 export type { PutBody } from './server/body.ts';
 export type { MultipartOption } from './server/multipart.ts';
