@@ -171,8 +171,26 @@ describe('dispatch', () => {
     expect(build('a-b_C1')).toBeDefined();
   });
 
-  test('a route with no bucket anywhere is a build error naming the route', () => {
-    expect(() => uploadHandler({ routes: { avatar: { onBeforeUpload: () => ({ path: 'x' }) } } })).toThrow(/"avatar" has no bucket/);
+  test('no bucket anywhere falls back to UPSTASH_BLOB_TOKEN', async () => {
+    process.env.UPSTASH_BLOB_TOKEN = TOKEN;
+    try {
+      const uploads = uploadHandler({ routes: { avatar: { onBeforeUpload: () => ({ path: 'avatar/1.png' }) } } });
+      const begin = await began(uploads, 'avatar', { name: 'a.png', type: 'image/png', size: 10 });
+      expect(begin.path).toBe('avatar/1.png');
+    } finally {
+      delete process.env.UPSTASH_BLOB_TOKEN;
+    }
+  });
+
+  test('no bucket and no token is a build error naming the route and the variable', () => {
+    const saved = process.env.UPSTASH_BLOB_TOKEN;
+    delete process.env.UPSTASH_BLOB_TOKEN;
+    try {
+      expect(() => uploadHandler({ routes: { avatar: { onBeforeUpload: () => ({ path: 'x' }) } } })).toThrow(/"avatar" has no bucket and UPSTASH_BLOB_TOKEN is not set/);
+      expect(() => uploadHandler({ onBeforeUpload: () => ({ path: 'x' }) })).toThrow(/uploadHandler has no bucket and UPSTASH_BLOB_TOKEN is not set/);
+    } finally {
+      if (saved !== undefined) process.env.UPSTASH_BLOB_TOKEN = saved;
+    }
   });
 
   test('a route with no onBeforeUpload anywhere is a build error naming the route', () => {

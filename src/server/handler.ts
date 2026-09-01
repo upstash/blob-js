@@ -1,7 +1,7 @@
 import { BlobError } from '../shared/errors.ts';
 import type { CompletedBlob, UploadFile, UploadRouteTypes } from '../shared/types.ts';
 import type { CacheOption, Size } from '../shared/units.ts';
-import type { Bucket } from './bucket.ts';
+import { Bucket, TOKEN_ENV, tokenFromEnv } from './bucket.ts';
 import { answerError, deriveRouteId, handleUpload, resolveConstraints, type ErrorDetails, type StandardSchema, type UploadConstraints } from './handle-upload.ts';
 import { resolveMultipart, type MultipartOption } from './multipart.ts';
 
@@ -12,7 +12,8 @@ import { resolveMultipart, type MultipartOption } from './multipart.ts';
  * `typeof uploads`, so a page never spells out a url and a typo does not compile.
  *
  * `bucket`, `constraints`, `multipart`, `input`, `onBeforeUpload`, `onUploadComplete` and `onError`
- * at the top are DEFAULTS: a route replaces them key by key and inherits the rest.
+ * at the top are DEFAULTS: a route replaces them key by key and inherits the rest. `bucket` is the
+ * one with a default of its own: with none written anywhere the handler reads `UPSTASH_BLOB_TOKEN`.
  *
  * One rule about `context`: write it above the callbacks that read `ctx`. `(request) =>` with no
  * annotation is fine there. Written below `routes`, TypeScript has already typed the routes with
@@ -121,7 +122,7 @@ interface PlainRouteBase<TCtx, TInput> {
   proxy?: never;
   /** @internal Rejects a removed route option despite TypeScript's generic intersection excess-property gap. */
   field?: never;
-  /** Defaults to the handler's. */
+  /** Defaults to the handler's, which defaults to `UPSTASH_BLOB_TOKEN`. */
   bucket?: Bucket;
   /** Replaces the handler's per key; `null` clears one the handler set. */
   constraints?: RouteConstraints;
@@ -165,6 +166,7 @@ export type UploadRoutes<TCtx = unknown, TInput = undefined> = Record<string, An
  * schema and a `state` typed from what onBeforeUpload returned.
  */
 export interface UploadRouteOptions<TCtx, TSchema extends StandardSchema<any, any> | undefined, TState, TData> {
+  /** Defaults to the handler's, which defaults to `UPSTASH_BLOB_TOKEN`. */
   bucket?: Bucket;
   constraints?: RouteConstraints;
   multipart?: MultipartOption;
@@ -220,7 +222,12 @@ export type HandlerRoutes<TRoutes, TData, TInput> = string extends keyof TRoutes
   : { readonly [K in keyof TRoutes]: RouteBrand<InputOf<TRoutes[K], TInput>, DataOf<TRoutes[K], TData>> };
 
 export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends StandardSchema<any, any> | undefined> {
-  /** Every route inherits it; a route may name its own. */
+  /**
+   * Every route inherits it; a route may name its own. Omit it and the handler builds one from
+   * `UPSTASH_BLOB_TOKEN`, once, the way `Bucket.fromEnv()` does -- so name a bucket when the token
+   * lives under another variable, when the bucket needs `cache` or `visibility`, or on Workers,
+   * where the token only exists on the request's `env`.
+   */
   bucket?: Bucket;
   /** Every route inherits it; a route's `constraints` replaces per key and `null` clears one. */
   constraints?: RouteConstraints;
@@ -332,6 +339,18 @@ export function uploadHandler<
   // completion token. Weak: nothing here outlives the request it belongs to.
   const slots = new WeakMap<Request, Slot>();
 
+  // Built at most once for the whole handler, and only when nothing named a bucket: two routes
+  // falling back to the environment are the same bucket, not two credential caches.
+  let envBucket: Bucket | undefined;
+  function fallbackBucket(name: string): Bucket {
+    if (!tokenFromEnv()) {
+      const where = named ? `upload route ${JSON.stringify(name)} has no bucket` : 'uploadHandler has no bucket';
+      throw new TypeError(`${where} and ${TOKEN_ENV} is not set: set it, or pass bucket (on Workers it has to be bucket: new Bucket({ token: env.${TOKEN_ENV} }))`);
+    }
+    envBucket ??= Bucket.fromEnv();
+    return envBucket;
+  }
+
   // Object.create(null), not {}: `?route=toString` on a plain object literal finds Object.prototype's
   // and dispatches to a function with no onBeforeUpload. Object.hasOwn below is the second lock.
   const table: Record<string, Mounted> = Object.create(null) as Record<string, Mounted>;
@@ -342,8 +361,7 @@ export function uploadHandler<
   const sole = named ? undefined : table['']!;
 
   function mount(name: string, route: AnyRouteSpec): Mounted {
-    const bucket = route.bucket ?? options.bucket;
-    if (!bucket) throw new TypeError(named ? `upload route ${JSON.stringify(name)} has no bucket: name one on the route or on the handler` : 'uploadHandler needs a bucket');
+    const bucket = route.bucket ?? options.bucket ?? fallbackBucket(name);
     const onBeforeUpload = route.onBeforeUpload ?? (options.onBeforeUpload as ((args: any) => any) | undefined);
     if (!onBeforeUpload) throw new TypeError(named ? `upload route ${JSON.stringify(name)} has no onBeforeUpload: write one on the route or on the handler` : 'uploadHandler needs an onBeforeUpload');
     const onUploadComplete = route.onUploadComplete ?? (options.onUploadComplete as ((args: any) => any) | undefined);

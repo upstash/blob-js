@@ -75,10 +75,9 @@ Bytes go straight to storage; your server only authorizes, signs, and records.
 ```ts
 // lib/uploads.ts
 import 'server-only';
-import { Bucket, uniquePath, uploadHandler } from '@upstash/blob';
+import { uniquePath, uploadHandler } from '@upstash/blob';
 
 export const uploads = uploadHandler({
-  bucket: Bucket.fromEnv(),
   constraints: { maxBytes: '20mb', contentTypes: ['image/*', 'application/pdf'] },
   context: (request) => requireUser(request),
   onBeforeUpload: ({ ctx, file }) => ({ path: uniquePath`${ctx.id}/${file.name}` }),
@@ -101,6 +100,9 @@ const { start, upload, accept } = useUpload();
 
 - `routes: { attachment: {...}, large: {...} }` mounts several routes at one endpoint;
   `useUpload('attachment')` picks one. Route options replace handler defaults key by key.
+- No `bucket` reads `UPSTASH_BLOB_TOKEN`, like `Bucket.fromEnv()`. Pass `bucket:` when the token is
+  under another variable, the bucket needs `cache` or `visibility`, or you are on Workers, where the
+  token only exists on the request's `env`.
 - `GET` serves the constraints with an ETag and `max-age=60`, for `accept` and an early refusal. The
   server is authoritative.
 - A file under 16 MB is one presigned PUT, larger is multipart; only parts can pause, resume and
