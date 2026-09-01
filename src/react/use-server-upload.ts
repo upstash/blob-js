@@ -2,7 +2,7 @@ import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
 import type { HeadersProvider } from '../browser/task.ts';
 import type { BlobError } from '../shared/errors.ts';
-import type { WireConstraints } from '../shared/types.ts';
+import type { ServedConstraints } from '../shared/types.ts';
 import { deny, useConstraints } from './constraints.ts';
 import { ServerUploadTask } from './server-upload-task.ts';
 import { useTaskList, type ListEntry } from './task-list.ts';
@@ -60,7 +60,7 @@ export interface UseServerUploadResult<R> {
    * What the route says it accepts, its own numbers. Undefined until its GET answers, and for a
    * route this SDK did not write, which serves no constraints document at all.
    */
-  constraints: WireConstraints | undefined;
+  constraints: ServedConstraints | undefined;
 }
 
 interface Payload {

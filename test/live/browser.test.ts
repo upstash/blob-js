@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import * as z from 'zod';
-import { BlobError, uniquePath, upload as uploadRoute, uploadHandler } from '../../src/index.ts';
+import { BlobError, uniquePath, uploadRoute, uploadHandler } from '../../src/index.ts';
 import { upload } from '../../src/browser/index.ts';
 import { clock } from '../../src/browser/clock.ts';
 import { FetchXhr, installRouter, installXhr } from '../helpers/xhr.ts';

@@ -1,7 +1,7 @@
 import type { UploadRouteTypes } from '../shared/types.ts';
 
 /**
- * The route map behind `createUploadHooks<T>()`. `T` is an upload handler (`typeof uploads`), a
+ * The route map behind `uploadHooks<T>()`. `T` is an upload handler (`typeof uploads`), a
  * branded POST handler, or a union of those; this is the record of names the hooks accept.
  */
 

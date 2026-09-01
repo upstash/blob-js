@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import * as z from 'zod';
-import { BlobError, uniquePath, upload, uploadHandler } from '../../src/index.ts';
+import { BlobError, uniquePath, uploadRoute, uploadHandler } from '../../src/index.ts';
 import type { WireBeginResponse, WireEndResponse, WirePartsResponse } from '../../src/shared/types.ts';
 import { bytes, cleanup, p, PNG, priv, pub, root, sweep } from './setup.ts';
 
@@ -42,9 +42,9 @@ const chat = uploadHandler({
   },
 });
 
-// An `upload()` route is written on its own, not inline in `routes`: inline, TypeScript settles the
+// An `uploadRoute()` route is written on its own, not inline in `routes`: inline, TypeScript settles the
 // route's state before it types the completion callback.
-const fileRoute = upload()({
+const fileRoute = uploadRoute()({
   onBeforeUpload: ({ file }) => ({
     path: p(`large/${crypto.randomUUID()}-${file.name}`),
     metadata: { originalName: file.name },
@@ -59,7 +59,7 @@ const fileRoute = upload()({
 });
 
 // `thumb` narrows the handler's maxBytes and inherits the bucket and everything else.
-const thumbRoute = upload()({
+const thumbRoute = uploadRoute()({
   constraints: { maxBytes: '1mb' },
   onBeforeUpload: ({ file }) => ({ path: p(`thumb/${file.name}`) }),
 });

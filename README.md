@@ -38,14 +38,25 @@ Object metadata is printable ASCII: R2 hands anything else back re-encoded (`caf
 `=?utf-8?Q?caf=C3=A9?=`), so the SDK refuses it with `invalid_input` rather than storing a value you
 cannot read back. Percent-encode first.
 
+### Read-modify-write
+
+```ts
+await bucket.updateJson<Settings>('u/7/settings.json', (prev) => ({ ...(prev ?? {}), theme: 'dark' }));
+```
+
+`updateJson` reads the document, hands the callback what is stored, and writes the result back
+conditionally: `If-Match` on the etag it read, or `If-None-Match: *` when nothing was there. A write
+that lost the race is retried against what actually landed, up to five times, so two concurrent
+updates cannot silently drop one of them. `prev` is `null` when nothing is stored at the path, and
+existing metadata is carried over unless `options.metadata` replaces it.
+
 ### Signed reads
 
 ```ts
-const { url, expiresAt } = await bucket.signedRead('private/report.pdf');
-await bucket.signedReadUrl('private/report.pdf'); // the url alone
+const { url, expiresAt } = await bucket.signedReadUrl('private/report.pdf');
 
 // saves as report.pdf instead of opening in the tab
-await bucket.signedReadUrl('u/7/9f3c2a', { downloadAs: 'report.pdf' });
+const download = await bucket.signedReadUrl('u/7/9f3c2a', { downloadAs: 'report.pdf' });
 ```
 
 The link is signed with the bucket's temporary credential and cannot outlive it. That cap moves:
@@ -71,9 +82,9 @@ A public URL needs no request: `bucket.publicUrl(path)` computes it from the buc
 
 ### Private buckets
 
-`new Bucket({ token, private: true })` drops `url` and `versionedUrl` from every
+`new Bucket({ token, visibility: 'private' })` drops `url` and `versionedUrl` from every
 `BlobObject`: nothing serves a private bucket over the public host, so a url there is a link that
-404s. Reads go through `signedRead()`. If the credential service reports the visibility itself, that
+404s. Reads go through `signedReadUrl()`. If the credential service reports the visibility itself, that
 wins over the option.
 
 ### Incomplete uploads
@@ -133,10 +144,10 @@ export const { GET, POST } = uploads;
 ```ts
 // lib/upload-client.ts
 'use client';
-import { createUploadHooks } from '@upstash/blob/react';
+import { uploadHooks } from '@upstash/blob/react';
 import type { uploads } from './uploads';
 
-export const { useUpload } = createUploadHooks<typeof uploads>({
+export const { useUpload } = uploadHooks<typeof uploads>({
   headers: () => ({ authorization: `Bearer ${getToken()}` }),
   onError: ({ error }) => { if (error.code === 'unauthorized') signOut(); },
 });
@@ -149,7 +160,7 @@ const { start, upload, accept } = useUpload();
 
 `useUpload(route, options?)` takes a named route first; a handler with no `routes` uses
 `useUpload(options?)`. A route name resolves against `/api/upload` by default, while a string
-starting with `/` or `http` is used as an explicit URL. `createUploadHooks` can set another
+starting with `/` or `http` is used as an explicit URL. `uploadHooks` can set another
 `endpoint`, shared `headers`, concurrency, and `onError`; call-site options win, and both error
 handlers run. Headers functions are re-read for every request so rotated credentials are not cached.
 
@@ -241,10 +252,10 @@ error to a `BlobError` or `Response` and receives as much state as the request r
 
 ### Inputs and typed state
 
-`upload()` adds a Standard Schema input and typed per-route state:
+`uploadRoute()` adds a Standard Schema input and typed per-route state:
 
 ```ts
-const thread = upload<Session>()({
+const thread = uploadRoute<Session>()({
   input: z.object({ threadId: z.string() }),
   onBeforeUpload: ({ ctx, input, file }) => ({
     path: uniquePath`${ctx.id}/${input.threadId}/${file.name}`,
@@ -348,7 +359,7 @@ start({ body: file }); // raw body
 console.log(upload?.response?.blob.versionedUrl, upload?.error?.message, upload?.pending);
 ```
 
-Configure `useServerUpload` directly; it is not part of `HandlerRoutes` or `createUploadHooks`.
+Configure `useServerUpload` directly; it is not part of `HandlerRoutes` or `uploadHooks`.
 
 ## Errors and sizes
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { clock } from '../browser/clock.ts';
 import { resolveHeaders, type HeadersProvider } from '../browser/task.ts';
 import { BlobError } from '../shared/errors.ts';
-import type { WireConstraints, WireConstraintsResponse } from '../shared/types.ts';
+import type { ServedConstraints, WireConstraintsResponse } from '../shared/types.ts';
 import { formatBytes } from '../shared/units.ts';
 
 /** The constraints a direct upload route serves from its GET endpoint. */
@@ -11,7 +11,7 @@ const cache = new Map<string, RouteFacts & { at: number }>();
 const inFlight = new Map<string, Promise<RouteFacts>>();
 
 export interface RouteFacts {
-  constraints: WireConstraints | undefined;
+  constraints: ServedConstraints | undefined;
   /** Why the route could not be asked. Failed responses are not cached. */
   error?: BlobError;
 }
@@ -61,7 +61,7 @@ async function fetchFacts(route: string, headers: HeadersProvider | undefined): 
     }
     return { constraints: undefined, error: BlobError.fromJSON(body, res.status) ?? BlobError.fromStatus(res.status) };
   }
-  let constraints: WireConstraints | undefined;
+  let constraints: ServedConstraints | undefined;
   try {
     const body = (await res.json()) as WireConstraintsResponse | undefined;
     if (body?.constraints && typeof body.constraints === 'object') constraints = body.constraints;
@@ -76,12 +76,12 @@ function remember(route: string, facts: RouteFacts): RouteFacts {
   return facts;
 }
 
-export function acceptOf(constraints: WireConstraints | undefined): string {
+export function acceptOf(constraints: ServedConstraints | undefined): string {
   return constraints?.contentTypes?.join(',') ?? '';
 }
 
 /** Size only. The server remains authoritative for type validation. */
-export function deny(file: File, constraints: WireConstraints | undefined): BlobError | undefined {
+export function deny(file: File, constraints: ServedConstraints | undefined): BlobError | undefined {
   if (constraints?.maxBytes !== undefined && file.size > constraints.maxBytes) {
     return new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(constraints.maxBytes)} limit` });
   }
@@ -94,8 +94,8 @@ export function useConstraints(route: string, headers: HeadersProvider | undefin
   const routeRef = useRef(route);
   routeRef.current = route;
 
-  const constraintsRef = useRef<WireConstraints | undefined>(cachedFacts(route)?.constraints);
-  const [constraints, setConstraints] = useState<WireConstraints | undefined>(() => cachedFacts(route)?.constraints);
+  const constraintsRef = useRef<ServedConstraints | undefined>(cachedFacts(route)?.constraints);
+  const [constraints, setConstraints] = useState<ServedConstraints | undefined>(() => cachedFacts(route)?.constraints);
   const [accept, setAccept] = useState(() => acceptOf(cachedFacts(route)?.constraints));
 
   const load = useCallback(async (): Promise<RouteFacts> => {

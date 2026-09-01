@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
-import { Bucket, BlobError, upload, uploadHandler } from '../../src/index.ts';
+import { Bucket, BlobError, uploadRoute, uploadHandler } from '../../src/index.ts';
 import { r2Of } from '../../src/server/bucket.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { deriveRouteId } from '../../src/server/handle-upload.ts';
@@ -159,11 +159,11 @@ describe('r2 retries', () => {
   });
 });
 
-describe('signedRead', () => {
+describe('signedReadUrl', () => {
   test('answers a url and transparently uses the credential cap', async () => {
     resetCredentialCaches();
     const b = bucket();
-    const read = await b.signedRead('secret.txt', { expiresIn: '2m' });
+    const read = await b.signedReadUrl('secret.txt', { expiresIn: '2m' });
     expect(read.url).toContain('X-Amz-Expires=120');
     expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + 110_000);
     expect(read.expiresAt.getTime()).toBeLessThan(Date.now() + 130_000);
@@ -172,10 +172,10 @@ describe('signedRead', () => {
     expect(cap).toBeLessThanOrEqual(600);
     expect(mints).toBe(1);
 
-    const capped = await b.signedRead('secret.txt', { expiresIn: '1h' });
+    const capped = await b.signedReadUrl('secret.txt', { expiresIn: '1h' });
     expect(Number(new URL(capped.url).searchParams.get('X-Amz-Expires'))).toBeGreaterThanOrEqual(cap - 2);
     // No expiresIn is the shorter of five minutes and the cap, so it never throws.
-    expect(await b.signedReadUrl('secret.txt')).toContain('X-Amz-Expires=300');
+    expect((await b.signedReadUrl('secret.txt')).url).toContain('X-Amz-Expires=300');
   });
 
   test('an aged credential is re-minted before signing, but not once per call', async () => {
@@ -190,7 +190,7 @@ describe('signedRead', () => {
     const cache = (await import('../../src/server/credentials.ts')).credentialCacheFor(TOKEN, true);
     const held = cache.peek()!;
     held.expiresAt = Math.floor(Date.now() / 1000) + 100;
-    const asked = await b.signedRead('a', { expiresIn: 200 });
+    const asked = await b.signedReadUrl('a', { expiresIn: 200 });
     expect(mints).toBe(2);
     expect(Number(new URL(asked.url).searchParams.get('X-Amz-Expires'))).toBe(200);
     // The agent answered with the same credential, so asking again straight away would only spend
@@ -198,8 +198,8 @@ describe('signedRead', () => {
     expiresAt = Math.floor(Date.now() / 1000) + 100;
     cache.peek()!.expiresAt = expiresAt;
     cache.peek()!.lifetime = 600;
-    await b.signedRead('a', { expiresIn: 200 });
-    await b.signedRead('a', { expiresIn: 200 });
+    await b.signedReadUrl('a', { expiresIn: 200 });
+    await b.signedReadUrl('a', { expiresIn: 200 });
     expect(mints).toBe(3);
   });
 
@@ -208,7 +208,7 @@ describe('signedRead', () => {
     mintResponse = () =>
       Response.json(creds({ signing: { accessKeyId: 'AKIASIGNING', secretAccessKey: 'ss', expiresAt: Math.floor(Date.now() / 1000) + 86_400 } }));
     const b = bucket();
-    const read = await b.signedRead('secret.txt', { expiresIn: '1h' });
+    const read = await b.signedReadUrl('secret.txt', { expiresIn: '1h' });
     expect(read.url).toContain('X-Amz-Credential=AKIASIGNING');
     expect(read.url).toContain('X-Amz-Expires=3600');
     expect(mints).toBe(1);
@@ -220,14 +220,14 @@ describe('signedRead', () => {
   test('a malformed signing block is ignored rather than trusted', async () => {
     resetCredentialCaches();
     mintResponse = () => Response.json(creds({ signing: { accessKeyId: 'AKIABAD' } }));
-    const read = await bucket().signedRead('secret.txt', { expiresIn: '2m' });
+    const read = await bucket().signedReadUrl('secret.txt', { expiresIn: '2m' });
     expect(read.url).toContain('X-Amz-Credential=AKIAOBJECT');
   });
 });
 
-describe('signedRead download', () => {
-  const disposition = async (path: string, options: Parameters<Bucket['signedRead']>[1] = {}) =>
-    new URL((await bucket().signedRead(path, options)).url).searchParams.get('response-content-disposition');
+describe('signedReadUrl download', () => {
+  const disposition = async (path: string, options: Parameters<Bucket['signedReadUrl']>[1] = {}) =>
+    new URL((await bucket().signedReadUrl(path, options)).url).searchParams.get('response-content-disposition');
 
   test('downloadAs: name is the name it saves as', async () => {
     resetCredentialCaches();
@@ -260,11 +260,11 @@ describe('signedRead download', () => {
 
   test('contentType overrides what the object was stored as, and must be a media type', async () => {
     resetCredentialCaches();
-    const url = new URL((await bucket().signedRead('u/1/abc', { contentType: 'application/pdf' })).url);
+    const url = new URL((await bucket().signedReadUrl('u/1/abc', { contentType: 'application/pdf' })).url);
     expect(url.searchParams.get('response-content-type')).toBe('application/pdf');
-    expect(new URL((await bucket().signedRead('a', { contentType: 'text/plain; charset=utf-8' })).url).searchParams.get('response-content-type')).toBe('text/plain; charset=utf-8');
+    expect(new URL((await bucket().signedReadUrl('a', { contentType: 'text/plain; charset=utf-8' })).url).searchParams.get('response-content-type')).toBe('text/plain; charset=utf-8');
     const e = await bucket()
-      .signedRead('a', { contentType: 'text/plain\r\nX-Evil: 1' })
+      .signedReadUrl('a', { contentType: 'text/plain\r\nX-Evil: 1' })
       .catch((x) => x);
     expect(BlobError.is(e)).toBe(true);
     expect(e.code).toBe('invalid_input');
@@ -273,8 +273,8 @@ describe('signedRead download', () => {
   test('the disposition is inside the signature, not appended to it', async () => {
     resetCredentialCaches();
     const b = bucket();
-    const plain = new URL((await b.signedRead('a.txt', { expiresIn: 60 })).url);
-    const named = new URL((await b.signedRead('a.txt', { expiresIn: 60, downloadAs: 'x.txt' })).url);
+    const plain = new URL((await b.signedReadUrl('a.txt', { expiresIn: 60 })).url);
+    const named = new URL((await b.signedReadUrl('a.txt', { expiresIn: 60, downloadAs: 'x.txt' })).url);
     expect(named.searchParams.get('X-Amz-Signature')).not.toBe(plain.searchParams.get('X-Amz-Signature'));
     // Sorted into the canonical query with everything else, before the signature is appended.
     expect(named.search.indexOf('response-content-disposition')).toBeLessThan(named.search.indexOf('X-Amz-Signature'));
@@ -338,16 +338,16 @@ describe('bucket guards', () => {
 
   test('publicUrl is local, encoded, and absent for a private bucket', () => {
     resetCredentialCaches();
-    const pub = new Bucket({ token: TOKEN, private: false });
+    const pub = new Bucket({ token: TOKEN, visibility: 'public' });
     expect(pub.publicUrl('reports/Q3 final.pdf')).toMatch(/\/reports\/Q3%20final\.pdf$/);
-    expect(new Bucket({ token: TOKEN, private: true }).publicUrl('a.txt')).toBeUndefined();
+    expect(new Bucket({ token: TOKEN, visibility: 'private' }).publicUrl('a.txt')).toBeUndefined();
     expect(mints).toBe(0);
   });
 
   test('a private bucket has no public url', async () => {
     resetCredentialCaches();
     r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
-    const blob = await new Bucket({ token: TOKEN, private: true }).put('a.txt', 'x');
+    const blob = await new Bucket({ token: TOKEN, visibility: 'private' }).put('a.txt', 'x');
     expect(blob.url).toBeUndefined();
     expect(blob.versionedUrl).toBeUndefined();
     expect(blob.path).toBe('a.txt');
@@ -355,7 +355,7 @@ describe('bucket guards', () => {
     resetCredentialCaches();
     mintResponse = () => Response.json(creds({ visibility: 'private' }));
     // The credentials response wins over the option: the bucket knows what it is.
-    const declaredPublic = await new Bucket({ token: TOKEN, private: false }).put('a.txt', 'x');
+    const declaredPublic = await new Bucket({ token: TOKEN, visibility: 'public' }).put('a.txt', 'x');
     expect(declaredPublic.url).toBeUndefined();
   });
 });
@@ -603,7 +603,7 @@ describe('uploadHandler: the direct transport', () => {
       // In parts, so there is an R2 upload id for the callback to be handed.
       multipart: true,
       routes: {
-        doc: upload()({
+        doc: uploadRoute()({
           onBeforeUpload: () => ({ path: 'a.png', state: { rowId: 7 } }),
           onUploadComplete: ({ file, route: name, state, uploadId, multipartUploadId }) => {
             seen = { file, name, state, hasUploadId: typeof uploadId === 'string', multipartUploadId };

@@ -8,7 +8,7 @@ import type { BlobError } from './errors.ts';
  */
 export interface BlobObject {
   path: string;
-  /** Undefined on a private bucket: no public host serves it, so use signedRead(). */
+  /** Undefined on a private bucket: no public host serves it, so use signedReadUrl(). */
   url?: string;
   /** `${url}?v=${etag}`: the fix for a stable path that gets overwritten. Undefined when url is. */
   versionedUrl?: string;
@@ -27,7 +27,7 @@ export interface CompletedBlob extends BlobObject {
 /**
  * What a route is told about a file before a byte of it is sent: what the browser claimed, which is
  * why onUploadComplete's `contentType` is the one to record. Exported so a shared onBeforeUpload
- * can be written outside the `upload({ ... })` that runs it.
+ * can be written outside the `uploadRoute({ ... })` that runs it.
  */
 export interface UploadFile {
   name: string;
@@ -38,7 +38,8 @@ export interface UploadFile {
 /** The name this crosses the wire under, kept for the wire types below. */
 export type WireFile = UploadFile;
 
-export interface WireConstraints {
+/** What the constraints endpoint serves and `useUpload().constraints` exposes, sizes in bytes. */
+export interface ServedConstraints {
   contentTypes?: readonly string[];
   maxBytes?: number;
 }
@@ -160,5 +161,5 @@ export type UploadRoute<TInput = unknown, TData = unknown, TRoute extends string
 
 /** What GET on an upload route answers: the constraints the route enforces. */
 export interface WireConstraintsResponse {
-  constraints: WireConstraints;
+  constraints: ServedConstraints;
 }

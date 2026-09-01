@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { UploadRoute } from '../../src/index.ts';
-import { createUploadHooks, useServerUpload, useUpload } from '../../src/react/index.ts';
+import { uploadHooks, useServerUpload, useUpload } from '../../src/react/index.ts';
 
 // Compile-only. The @ts-expect-error lines are assertions.
 type Chat = UploadRoute<{ threadId: string }, { rowId: string }>;
@@ -65,7 +65,7 @@ function _server(file: File) {
 }
 
 function _configured(file: File) {
-  const configured = createUploadHooks({
+  const configured = uploadHooks({
     headers: () => ({ authorization: 'Bearer x' }),
     onError: ({ error }) => void error.code,
   });

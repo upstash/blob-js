@@ -20,7 +20,7 @@ export interface UploadOptions<TInput = unknown> {
    * bytes and sends none. Undefined means send: a caller that does not know what the route enforces
    * must not be the reason the check does not happen.
    */
-  sendHead?: boolean;
+  sniffBytes?: boolean;
 }
 
 export interface InternalTask extends UploadTask {
@@ -309,7 +309,7 @@ class Task implements InternalTask {
   }
 
   private async begin(): Promise<void> {
-    const head = this.options.sendHead === false ? undefined : await readHead(this.file);
+    const head = this.options.sniffBytes === false ? undefined : await readHead(this.file);
     const res = (await this.routeCall(
       {
         phase: 'begin',

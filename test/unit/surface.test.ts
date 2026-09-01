@@ -11,7 +11,7 @@ describe('public surface', () => {
   test('fromEnv takes the constructor options too', () => {
     process.env.UPSTASH_BLOB_SURFACE = encodeToken('bucket', 'pw', 'bdeadbeef012');
     try {
-      const b = Bucket.fromEnv('UPSTASH_BLOB_SURFACE', { private: true, cache: '1m' });
+      const b = Bucket.fromEnv('UPSTASH_BLOB_SURFACE', { visibility: 'private', cache: '1m' });
       expect(b).toBeInstanceOf(Bucket);
       // The token in the options is ignored: fromEnv's whole job is to read it from the environment.
       // @ts-expect-error token is not one of fromEnv's options

@@ -139,7 +139,7 @@ interface PlainRouteBase<TCtx, TInput> {
 export type DirectUploadRoute<TCtx = unknown, TInput = undefined> = PlainRouteBase<TCtx, TInput>;
 
 /**
- * What `upload()` returns. The brand is types only: it is how `createUploadHooks<typeof uploads>`
+ * What `uploadRoute()` returns. The brand is types only: it is how `uploadHooks<typeof uploads>`
  * knows this route's input and completion data.
  */
 export interface UploadRouteDefinition<TInput = undefined, TData = void> {
@@ -152,7 +152,7 @@ export type AnyUploadRouteConfig<TCtx = unknown, TInput = undefined> = DirectUpl
 export type UploadRouteMap = Record<string, UploadRouteDefinition<any, any>>;
 
 /**
- * What `routes` is checked against: every route as a plain object or an `upload()`, with the ctx
+ * What `routes` is checked against: every route as a plain object or an `uploadRoute()`, with the ctx
  * the handler's `context` returned. Written as a separate type so that TypeScript keeps `TCtx` in
  * the route callbacks' contextual type (see the note at `routes` in UploadHandlerOptions).
  */
@@ -161,7 +161,7 @@ export type UploadRoutes<TCtx = unknown, TInput = undefined> = Record<string, An
 /* -------------------------------------------------------------- builder -- */
 
 /**
- * The options `upload()` takes: a plain object plus the two things it cannot express -- an `input`
+ * The options `uploadRoute()` takes: a plain object plus the two things it cannot express -- an `input`
  * schema and a `state` typed from what onBeforeUpload returned.
  */
 export interface UploadRouteOptions<TCtx, TSchema extends StandardSchema<any, any> | undefined, TState, TData> {
@@ -187,14 +187,14 @@ export interface UploadBuilder<TCtx> {
  * gets it from the handler it sits in, and this one is written on its own:
  *
  * ```ts
- * const thread = upload<Owner>()({
+ * const thread = uploadRoute<Owner>()({
  *   input: z.object({ threadId: z.string() }),
  *   onBeforeUpload: ({ ctx, input, file }) => ({ path: `${ctx}/${input.threadId}`, state: { name: file.name } }),
  *   onUploadComplete: ({ state, url }) => db.files.insert({ name: state.name, url }),
  * });
  * ```
  */
-export function upload<TCtx = undefined>(): UploadBuilder<TCtx> {
+export function uploadRoute<TCtx = undefined>(): UploadBuilder<TCtx> {
   return ((options: object) => ({ [BUILT]: options })) as unknown as UploadBuilder<TCtx>;
 }
 
@@ -212,7 +212,7 @@ interface RouteBrand<TInput, TData> {
 }
 
 /**
- * The map `createUploadHooks<typeof uploads>` reads. No `routes` means one route under the empty
+ * The map `uploadHooks<typeof uploads>` reads. No `routes` means one route under the empty
  * name, which is what makes the bound `useUpload()` take no argument.
  */
 export type HandlerRoutes<TRoutes, TData, TInput> = string extends keyof TRoutes
@@ -281,7 +281,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
 export interface UploadHandler<TRoutes = UploadRouteMap, TCtx = unknown> {
   GET: (request: Request) => Promise<Response>;
   POST: (request: Request) => Promise<Response>;
-  /** The route map, as types. This is what `createUploadHooks<typeof uploads>` reads. */
+  /** The route map, as types. This is what `uploadHooks<typeof uploads>` reads. */
   readonly __upstashUploadHandler: TRoutes;
   /** What `context` returned, as types. This is what `UploadContext<typeof uploads>` reads. */
   readonly __upstashUploadContext: TCtx;
@@ -428,9 +428,9 @@ export function uploadHandler<
   };
 }
 
-/** A plain object is its own spec; an `upload()` parked its options under the builder's key. */
+/** A plain object is its own spec; an `uploadRoute()` parked its options under the builder's key. */
 function specOf(route: unknown): AnyRouteSpec {
-  if (!route || typeof route !== 'object') throw new TypeError('every route is a plain object or an upload({ ... })');
+  if (!route || typeof route !== 'object') throw new TypeError('every route is a plain object or an uploadRoute({ ... })');
   const built = (route as Record<string, unknown>)[BUILT];
   const spec = (built ?? route) as Record<string, unknown>;
   if (Object.hasOwn(spec, 'proxy')) throw new TypeError('upload routes no longer take proxy: use an ordinary server route with Bucket.put instead');

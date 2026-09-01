@@ -36,8 +36,8 @@ export interface UnboundUploadHooks {
 }
 
 /** Configure defaults and, optionally, bind `useUpload` to an upload handler's route map. */
-export function createUploadHooks<T = never>(defaults?: UploadDefaults): [T] extends [never] ? UnboundUploadHooks : UploadHooks<T>;
-export function createUploadHooks(defaults: UploadDefaults = {}): any {
+export function uploadHooks<T = never>(defaults?: UploadDefaults): [T] extends [never] ? UnboundUploadHooks : UploadHooks<T>;
+export function uploadHooks(defaults: UploadDefaults = {}): any {
   const merge = (options: any) => ({
     ...options,
     endpoint: options?.endpoint ?? defaults.endpoint,
@@ -48,7 +48,7 @@ export function createUploadHooks(defaults: UploadDefaults = {}): any {
           try {
             defaults.onError!(upload);
           } catch (e) {
-            console.error('[upstash-blob] createUploadHooks onError threw', e);
+            console.error('[upstash-blob] uploadHooks onError threw', e);
           }
           options?.onError?.(upload);
         }
