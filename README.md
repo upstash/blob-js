@@ -75,14 +75,23 @@ Bytes go straight to storage; your server only authorizes, signs, and records.
 ```ts
 // lib/uploads.ts
 import 'server-only';
-import { uniquePath, uploadHandler } from '@upstash/blob';
+import { BlobError, uniquePath, uploadHandler } from '@upstash/blob';
 
 export const uploads = uploadHandler({
   constraints: { maxBytes: '20mb', contentTypes: ['image/*', 'application/pdf'] },
-  context: (request) => requireUser(request),
-  onBeforeUpload: ({ ctx, file }) => ({ path: uniquePath`${ctx.id}/${file.name}` }),
-  onUploadComplete: ({ ctx, path, url, size, uploadId }) =>
-    db.files.insertOrReturn({ uploadId, owner: ctx.id, path, url, size }),
+
+  onBeforeUpload: async ({ request, file }) => {
+    const user = await getUser(request);
+    if (!user) throw new BlobError('unauthorized'); // the 401; nothing is signed
+    return { path: uniquePath`${user.id}/${file.name}`, metadata: { owner: user.id } };
+  },
+
+  onUploadComplete: async ({ metadata, url, uploadId }) => {
+    // uploadId is stable across retries, so the same completion twice writes one row
+    await sql`insert into files (upload_id, owner, url)
+              values (${uploadId}, ${metadata.owner}, ${url})
+              on conflict (upload_id) do nothing`;
+  },
 });
 
 // app/api/upload/route.ts
@@ -100,6 +109,10 @@ const { start, upload, accept } = useUpload();
 
 - `routes: { attachment: {...}, large: {...} }` mounts several routes at one endpoint;
   `useUpload('attachment')` picks one. Route options replace handler defaults key by key.
+- `context: (request) => ...` runs once per POST, before any body is read, and its value is `ctx` in
+  every callback. `onBeforeUpload` only runs on the first request of an upload, so `context` is how
+  the user reaches `onUploadComplete` and `onError` too, and how several routes share one auth check.
+  With a single route, authorizing in `onBeforeUpload` and carrying an id in `metadata` is shorter.
 - No `bucket` reads `UPSTASH_BLOB_TOKEN`, like `Bucket.fromEnv()`. Pass `bucket:` when the token is
   under another variable, the bucket needs `cache` or `visibility`, or you are on Workers, where the
   token only exists on the request's `env`.
