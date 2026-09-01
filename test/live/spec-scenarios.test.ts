@@ -102,7 +102,7 @@ describe('4. files', () => {
       if (!row || row.owner !== user.id || row.status !== 'ready') return Response.json({ error: 'not found' }, { status: 404 });
       // No expiresIn: 15m was answered with a link that quietly died with the credential, and the
       // cap moves, so the default asks for the shorter of five minutes and what it can actually sign.
-      const url = await priv.signedReadUrl(row.path, { downloadAs: row.name });
+      const { url } = await priv.signedReadUrl(row.path, { downloadAs: row.name });
       return Response.json({ url });
     });
     const ok = await GET_fileUrl(new Request('https://app/api/file?id=r1', { headers: { authorization: 'Bearer 7' } }));
@@ -137,8 +137,8 @@ describe('4. files', () => {
     await pub.del({ prefix: p('chat/7/t1/') });
     expect((await pub.list({ prefix: p('chat/7/') })).blobs).toEqual([]);
 
-    await priv.update<Record<string, unknown>>(p('settings.json'), (prev) => ({ ...(prev ?? {}), theme: 'dark' }), { metadata: { owner: '7' } });
-    await priv.update<Record<string, unknown>>(p('settings.json'), (prev) => ({ ...(prev ?? {}), lang: 'tr' }));
+    await priv.updateJson<Record<string, unknown>>(p('settings.json'), (prev) => ({ ...(prev ?? {}), theme: 'dark' }), { metadata: { owner: '7' } });
+    await priv.updateJson<Record<string, unknown>>(p('settings.json'), (prev) => ({ ...(prev ?? {}), lang: 'tr' }));
     const res = await priv.get(p('settings.json'));
     expect(res.contentType).toBe('application/json');
     const served = new Response(res.body, { headers: { 'content-type': res.contentType } });

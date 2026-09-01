@@ -13,11 +13,11 @@ export type { MultipartUpload };
 export interface BucketOptions {
   token: string;
   /**
-   * Drops `url` and `versionedUrl` from every BlobObject: nothing serves a private bucket over
-   * the public host, so a url there is a link that 404s. A visibility in the credentials response
-   * wins over this.
+   * `'private'` drops `url` and `versionedUrl` from every BlobObject: nothing serves a private
+   * bucket over the public host, so a url there is a link that 404s. A visibility in the
+   * credentials response wins over this.
    */
-  private?: boolean;
+  visibility?: 'public' | 'private';
   /**
    * The `Cache-Control` written on every object this bucket stores. A per-call `cache` overrides it.
    * @see CacheOption
@@ -67,15 +67,13 @@ export interface ListPage {
   cursor: string | undefined;
 }
 
-/** What put() answers: the blob, plus the content type it was stored with. */
-export type PutResult = CompletedBlob;
-
 export interface BlobInfo extends BlobObject {
   contentType: string;
   metadata: Record<string, string>;
 }
 
-export interface BlobBody extends BlobInfo {
+/** What get() answers: the blob's facts and its bytes. */
+export interface BlobDownload extends BlobInfo {
   body: ReadableStream<Uint8Array>;
 }
 
@@ -91,7 +89,7 @@ export interface SignedReadUrlOptions {
   contentType?: string;
 }
 
-export interface SignedRead {
+export interface SignedReadUrl {
   url: string;
   /** When the link stops working. Never later than the credential that signed it. */
   expiresAt: Date;
@@ -115,7 +113,7 @@ export interface S3Config {
 
 export type DeleteTarget = string | string[] | { prefix: string; all?: boolean };
 
-export interface UpdateOptions {
+export interface UpdateJsonOptions {
   /** The `Cache-Control` the rewritten object is stored with. @see CacheOption */
   cache?: CacheOption;
   metadata?: Record<string, string>;
@@ -161,7 +159,7 @@ export class Bucket {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
     this.defaultCache = options.cache;
-    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true, options.private === undefined ? undefined : options.private ? 'private' : 'public');
+    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true, options.visibility);
     INTERNALS.set(this, this.r2);
   }
 
@@ -180,7 +178,7 @@ export class Bucket {
 
   /* ------------------------------------------------------------------ put */
 
-  async put(path: string, body: PutBody, options: PutOptions = {}): Promise<PutResult> {
+  async put(path: string, body: PutBody, options: PutOptions = {}): Promise<CompletedBlob> {
     encodeKey(path);
     const allowed = options.contentTypes === undefined ? undefined : expandContentTypes(options.contentTypes);
     const maxBytes = options.maxBytes === undefined ? undefined : parseSize(options.maxBytes, 'maxBytes');
@@ -260,7 +258,7 @@ export class Bucket {
    * would multiply that by the concurrency. An error anywhere aborts the upload rather than leaving
    * parts behind that nothing can see.
    */
-  private async putMultipart(path: string, stream: ReadableStream<Uint8Array>, size: number, headers: Record<string, string>, contentType: string): Promise<PutResult> {
+  private async putMultipart(path: string, stream: ReadableStream<Uint8Array>, size: number, headers: Record<string, string>, contentType: string): Promise<CompletedBlob> {
     const partSize = partSizeFor(size);
     const expected = partCount(size, partSize);
     const uploadId = await this.r2.createMultipart(path, headers);
@@ -326,7 +324,7 @@ export class Bucket {
 
   /* ----------------------------------------------------------------- read */
 
-  async get(path: string): Promise<BlobBody> {
+  async get(path: string): Promise<BlobDownload> {
     const res = await this.r2.fetch({ method: 'GET', path });
     if (!res.ok) throw await errorFromResponse(res);
     const head = headFromHeaders(res.headers);
@@ -365,17 +363,12 @@ export class Bucket {
   }
 
   /** The link and when it dies, so a caller can cache it until then rather than guess. */
-  async signedRead(path: string, options: SignedReadUrlOptions = {}): Promise<SignedRead> {
+  async signedReadUrl(path: string, options: SignedReadUrlOptions = {}): Promise<SignedReadUrl> {
     const expiresIn = options.expiresIn === undefined ? undefined : Math.max(1, Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000));
     const query: Record<string, string> = {};
     if (options.downloadAs !== undefined) query['response-content-disposition'] = attachmentDisposition(options.downloadAs);
     if (options.contentType !== undefined) query['response-content-type'] = safeContentType(options.contentType);
     return this.r2.presignRead({ path, query, expiresIn });
-  }
-
-  /** signedRead(), url only. */
-  async signedReadUrl(path: string, options: SignedReadUrlOptions = {}): Promise<string> {
-    return (await this.signedRead(path, options)).url;
   }
 
   /* ---------------------------------------------------------------- write */
@@ -485,7 +478,7 @@ export class Bucket {
   }
 
   /** Read-modify-write over a JSON document; retried on 'conflict' up to 5 times. Existing metadata is kept unless options.metadata is given. */
-  async update<T = unknown>(path: string, fn: (prev: T | null) => T | Promise<T>, options: UpdateOptions = {}): Promise<BlobObject> {
+  async updateJson<T = unknown>(path: string, fn: (prev: T | null) => T | Promise<T>, options: UpdateJsonOptions = {}): Promise<BlobObject> {
     let lastError: BlobError | undefined;
     for (let attempt = 0; attempt < 6; attempt++) {
       let prev: T | null = null;

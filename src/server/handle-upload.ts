@@ -1,5 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
-import type { UploadFile, WireBeginResponse, WireEndResponse, WireLanded, WireConstraints, WireConstraintsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
+import type { UploadFile, WireBeginResponse, WireEndResponse, WireLanded, ServedConstraints, WireConstraintsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
 import { cacheControl, formatBytes, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
 import { signToken, verifyToken, type TokenPayload } from './completion-token.ts';
@@ -409,10 +409,10 @@ export async function answerError(e: unknown, request: Request, onError: ErrorMa
  * change with a deploy, and a client that cached them forever refuses files the route now accepts.
  */
 export function constraintsEndpoint(routeConstraints: ResolvedConstraints): (request: Request) => Promise<Response> {
-  const wireConstraints: WireConstraints = {};
-  if (routeConstraints.contentTypes) wireConstraints.contentTypes = routeConstraints.contentTypes;
-  if (routeConstraints.maxBytes !== undefined) wireConstraints.maxBytes = routeConstraints.maxBytes;
-  const body = JSON.stringify({ constraints: wireConstraints } satisfies WireConstraintsResponse);
+  const served: ServedConstraints = {};
+  if (routeConstraints.contentTypes) served.contentTypes = routeConstraints.contentTypes;
+  if (routeConstraints.maxBytes !== undefined) served.maxBytes = routeConstraints.maxBytes;
+  const body = JSON.stringify({ constraints: served } satisfies WireConstraintsResponse);
   const etag = `"${hash(body)}"`;
   return async (request: Request): Promise<Response> => {
     const headers = { 'content-type': 'application/json', 'cache-control': `public, max-age=${LIMITS_MAX_AGE}`, etag };

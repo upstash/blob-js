@@ -123,14 +123,14 @@ describe('read', () => {
     expect(page2.cursor).toBeUndefined();
   });
 
-  test('signedRead serves the private object, with a download name and an expiry it can prove', async () => {
+  test('signedReadUrl serves the private object, with a download name and an expiry it can prove', async () => {
     await priv.put(p('secret.txt'), 'shh', { contentType: 'text/plain' });
     // Measured 2026-08-25: the agent serves one credential until it is nearly out, so the cap is
     // anywhere from ~30 s to ~10 min. Ask for something it can cover.
     const cap = await r2Of(priv).readCap();
     expect(cap).toBeGreaterThanOrEqual(30);
     const asked = Math.min(120, cap);
-    const read = await priv.signedRead(p('secret.txt'), { expiresIn: asked, downloadAs: 'Report Q3.txt' });
+    const read = await priv.signedReadUrl(p('secret.txt'), { expiresIn: asked, downloadAs: 'Report Q3.txt' });
     expect(Number(new URL(read.url).searchParams.get('X-Amz-Expires'))).toBe(asked);
     // expiresAt is the truth, including when the current credential shortened what was requested.
     expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + (asked - 10) * 1000);
@@ -138,7 +138,7 @@ describe('read', () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('shh');
     expect(res.headers.get('content-disposition')).toContain('Report Q3.txt');
-    const plain = await fetch(await priv.signedReadUrl(p('secret.txt')));
+    const plain = await fetch((await priv.signedReadUrl(p('secret.txt'))).url);
     expect(plain.status).toBe(200);
     expect(plain.headers.get('content-disposition')).toBeNull();
     const tampered = await fetch(read.url.replace('secret.txt', 'other.txt'));
@@ -148,7 +148,7 @@ describe('read', () => {
   test('an expiresIn over the credential cap is shortened transparently', async () => {
     await priv.put(p('capped.txt'), 'shh', { contentType: 'text/plain' });
     const cap = await r2Of(priv).readCap();
-    const capped = await priv.signedRead(p('capped.txt'), { expiresIn: '1h' });
+    const capped = await priv.signedReadUrl(p('capped.txt'), { expiresIn: '1h' });
     expect(Number(new URL(capped.url).searchParams.get('X-Amz-Expires'))).toBeLessThanOrEqual(cap + 2);
     expect((await fetch(capped.url)).status).toBe(200);
   });
@@ -232,14 +232,14 @@ describe('write verbs', () => {
   });
 
   test('update: create-if-absent then CAS', async () => {
-    await priv.update<Record<string, unknown>>(p('settings.json'), (prev) => ({ ...(prev ?? {}), a: 1 }));
-    await priv.update<Record<string, unknown>>(p('settings.json'), (prev) => ({ ...(prev ?? {}), b: 2 }));
+    await priv.updateJson<Record<string, unknown>>(p('settings.json'), (prev) => ({ ...(prev ?? {}), a: 1 }));
+    await priv.updateJson<Record<string, unknown>>(p('settings.json'), (prev) => ({ ...(prev ?? {}), b: 2 }));
     const got = await priv.get(p('settings.json'));
     expect(got.contentType).toBe('application/json');
     expect(await new Response(got.body).json()).toEqual({ a: 1, b: 2 });
 
     let calls = 0;
-    await priv.update<Record<string, unknown>>(p('settings.json'), async (prev) => {
+    await priv.updateJson<Record<string, unknown>>(p('settings.json'), async (prev) => {
       calls++;
       if (calls === 1) await priv.put(p('settings.json'), JSON.stringify({ ...prev, raced: true }), { contentType: 'application/json' });
       return { ...(prev ?? {}), c: 3 };
@@ -249,7 +249,7 @@ describe('write verbs', () => {
     // Metadata survives an update unless given; five conflicts in a row still land on the sixth try.
     await priv.put(p('meta.json'), '{"n":0}', { contentType: 'application/json', metadata: { owner: 'u9' } });
     let races = 0;
-    await priv.update<{ n: number }>(p('meta.json'), async (prev) => {
+    await priv.updateJson<{ n: number }>(p('meta.json'), async (prev) => {
       if (races < 5) {
         races++;
         await priv.put(p('meta.json'), JSON.stringify({ n: -races }), { contentType: 'application/json', metadata: { owner: 'u9' } });
@@ -260,11 +260,11 @@ describe('write verbs', () => {
     const meta = await priv.get(p('meta.json'));
     expect(meta.metadata).toEqual({ owner: 'u9' });
     expect(await new Response(meta.body).json()).toEqual({ n: -4 });
-    await priv.update(p('meta.json'), () => ({ n: 9 }), { metadata: { owner: 'u10' } });
+    await priv.updateJson(p('meta.json'), () => ({ n: 9 }), { metadata: { owner: 'u10' } });
     expect((await priv.info(p('meta.json'))).metadata).toEqual({ owner: 'u10' });
     let always = 0;
     await expect(
-      priv.update<{ n: number }>(p('meta.json'), async () => {
+      priv.updateJson<{ n: number }>(p('meta.json'), async () => {
         always++;
         await priv.put(p('meta.json'), JSON.stringify({ n: always }), { contentType: 'application/json' });
         return { n: 0 };

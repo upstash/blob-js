@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import * as z from 'zod';
-import { BlobError, Bucket, upload, uploadHandler } from '../../src/index.ts';
+import { BlobError, Bucket, uploadRoute, uploadHandler } from '../../src/index.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { encodeToken } from '../../src/server/token.ts';
 import type { WireBeginResponse } from '../../src/shared/types.ts';
@@ -185,7 +185,7 @@ describe('dispatch', () => {
     expect(() => uploadHandler({ bucket: bucket(), routes: { avatar: { proxy: true, onBeforeUpload: () => ({ path: 'avatar/demo' }) } } } as any)).toThrow(
       'upload routes no longer take proxy',
     );
-    expect(() => uploadHandler({ bucket: bucket(), routes: { avatar: upload()({ field: 'avatar', onBeforeUpload: () => ({ path: 'avatar/demo' }) } as any) } })).toThrow(
+    expect(() => uploadHandler({ bucket: bucket(), routes: { avatar: uploadRoute()({ field: 'avatar', onBeforeUpload: () => ({ path: 'avatar/demo' }) } as any) } })).toThrow(
       'upload routes no longer take field',
     );
   });
@@ -399,7 +399,7 @@ describe('direct routes', () => {
     const uploads = uploadHandler({
       bucket: bucket(),
       routes: {
-        large: upload()({
+        large: uploadRoute()({
           input: z.object({ threadId: z.string() }),
           onBeforeUpload: ({ input, file }) => ({ path: `t/${input.threadId}/${file.name}`, metadata: { thread: input.threadId }, state: { row: 1 } }),
           onUploadComplete: ({ state, size, uploadId }) => ({ row: state.row, size, dedupe: uploadId }),

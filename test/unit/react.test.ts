@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:te
 import { act, createElement, StrictMode } from 'react';
 import { clock } from '../../src/browser/clock.ts';
 import { poolState } from '../../src/browser/pool.ts';
-import { BlobError, createUploadHooks, useServerUpload, useUpload } from '../../src/react/index.ts';
+import { BlobError, uploadHooks, useServerUpload, useUpload } from '../../src/react/index.ts';
 import type { UploadRoute } from '../../src/shared/types.ts';
 import { installRouter, installXhr, ManualXhr } from '../helpers/xhr.ts';
 
@@ -866,7 +866,7 @@ test('a direct upload is finishing between the last byte and the end response', 
   expect(upload.status === 'done' || upload.status === 'finishing').toBe(true);
 });
 
-/* -------------------------------------------------------- createUploadHooks -- */
+/* -------------------------------------------------------- uploadHooks -- */
 
 test('a route with no contentTypes is not asked for the file head', async () => {
   const sizeOnly = `/api/size-only/${++routeId}`;
@@ -912,7 +912,7 @@ test('a route that declares contentTypes is sent the head with begin', async () 
   expect(atob((begin!.body as any).head)).toBe('x'.repeat(10));
 });
 
-test('createUploadHooks applies direct defaults and runs its onError before the call site handler', async () => {
+test('uploadHooks applies direct defaults and runs its onError before the call site handler', async () => {
   const seen: string[] = [];
   const failing = `/api/configured/${++routeId}`;
   restore.push(
@@ -923,7 +923,7 @@ test('createUploadHooks applies direct defaults and runs its onError before the 
       },
     }),
   );
-  const configured = createUploadHooks({
+  const configured = uploadHooks({
     headers: () => ({ authorization: 'Bearer default' }),
     onError: () => seen.push('default'),
   });
@@ -937,7 +937,7 @@ test('createUploadHooks applies direct defaults and runs its onError before the 
 });
 
 test('a direct call-site option wins over the configured default', async () => {
-  const configured = createUploadHooks({ headers: () => ({ authorization: 'Bearer default' }) });
+  const configured = uploadHooks({ headers: () => ({ authorization: 'Bearer default' }) });
   const hook = await render(() =>
     configured.useUpload(route, { headers: () => ({ authorization: 'Bearer own' }) }),
   );
@@ -963,7 +963,7 @@ test('a configured onError that throws does not stop the direct queue or call-si
       },
     }),
   );
-  const configured = createUploadHooks({
+  const configured = uploadHooks({
     onError: () => {
       seen.push('default');
       throw new Error('boom');
@@ -1032,7 +1032,7 @@ function mountHandler(name: string): { endpoint: string; url: string } {
 
 test('a direct route name resolves against the configured endpoint for constraints and upload', async () => {
   const { endpoint, url } = mountHandler('doc');
-  const { useUpload: bound } = createUploadHooks<Uploads>({ endpoint });
+  const { useUpload: bound } = uploadHooks<Uploads>({ endpoint });
   const hook = await render(() => bound('doc'));
   await flush();
   expect(calls[0]).toMatchObject({ url, method: 'GET' });

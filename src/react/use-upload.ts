@@ -2,7 +2,7 @@ import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
 import { createTask, type HeadersProvider, type InternalTask } from '../browser/task.ts';
 import type { BlobError } from '../shared/errors.ts';
-import type { CompletedBlob, UploadRoute, UploadRouteTypes, WireConstraints } from '../shared/types.ts';
+import type { CompletedBlob, UploadRoute, UploadRouteTypes, ServedConstraints } from '../shared/types.ts';
 import { deny, useConstraints } from './constraints.ts';
 import { resolveRouteUrl, type AnyUploadRoute } from './routes.ts';
 import { useTaskList, type ListEntry } from './task-list.ts';
@@ -80,7 +80,7 @@ export interface UseUploadResult<R> {
   /** The route's contentTypes, joined. Empty until GET lands, or when it serves none. */
   accept: string;
   /** The constraints served by the route's GET endpoint. */
-  constraints: WireConstraints | undefined;
+  constraints: ServedConstraints | undefined;
 }
 
 type AnyRecord = UploadRecord<unknown>;
@@ -151,10 +151,10 @@ export function useUpload(route: string, maybeOptions?: any): any {
         // is not read for them. Constraints that have not arrived yet are not an answer: send, and
         // let the route decide.
         const known = constraintsRef.current;
-        const sendHead = known === undefined ? undefined : (known.contentTypes?.length ?? 0) > 0;
+        const sniffBytes = known === undefined ? undefined : (known.contentTypes?.length ?? 0) > 0;
         return refusal
           ? refusedEntry(file, refusal)
-          : taskEntry(createTask(file, { route: url, headers: headersRef.current, input: args.input, sendHead }, false));
+          : taskEntry(createTask(file, { route: url, headers: headersRef.current, input: args.input, sniffBytes }, false));
       };
       if ('files' in args) return add(args.files ? Array.from(args.files).map(make) : []);
       if (!args.file) return null;

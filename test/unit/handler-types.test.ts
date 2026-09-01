@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import * as z from 'zod';
 import {
-  upload,
+  uploadRoute,
   uploadHandler,
   type BeforeUploadArgs,
   type Bucket,
@@ -10,7 +10,7 @@ import {
   type UploadFile,
   type UploadRoute,
 } from '../../src/index.ts';
-import { createUploadHooks, useServerUpload, useUpload, type RoutesOf } from '../../src/react/index.ts';
+import { uploadHooks, useServerUpload, useUpload, type RoutesOf } from '../../src/react/index.ts';
 
 // Compile-only. Nothing below the handler definitions runs: @ts-expect-error lines are assertions,
 // and a signature that stops being wrong fails typecheck.
@@ -40,7 +40,7 @@ function _uploads(value: Bucket) {
       attachment: {},
       large: { constraints: { maxBytes: '2gb', contentTypes: null } },
       audit: { onUploadComplete: ({ ctx, uploadId }) => ({ owner: ctx.id, dedupe: uploadId }) },
-      thread: upload<Session>()({
+      thread: uploadRoute<Session>()({
         input: z.object({ threadId: z.string() }),
         onBeforeUpload: ({ ctx, input, file: picked }) => ({
           path: `${ctx.id}/${input.threadId}`,
@@ -58,7 +58,7 @@ function _uploads(value: Bucket) {
 }
 
 type Uploads = ReturnType<typeof _uploads>;
-const { useUpload: useBound } = createUploadHooks<Uploads>({ headers: () => ({ authorization: 'x' }) });
+const { useUpload: useBound } = uploadHooks<Uploads>({ headers: () => ({ authorization: 'x' }) });
 
 function _ctx() {
   const session: UploadContext<Uploads> = { id: 'demo' };
@@ -96,7 +96,7 @@ function _contextInference() {
     context: (request) => requireUser(request),
     routes: {
       a: { onUploadComplete: saveRow },
-      t: upload<Session>()({ onBeforeUpload: ({ ctx }) => ({ path: ctx.id }) }),
+      t: uploadRoute<Session>()({ onBeforeUpload: ({ ctx }) => ({ path: ctx.id }) }),
     },
   });
   uploadHandler({
@@ -211,7 +211,7 @@ function _single(value: Bucket) {
     onBeforeUpload: ({ ctx, input, file: picked }) => ({ path: `${ctx.id}/${input.threadId}/${picked.name}` }),
     onUploadComplete: ({ ctx, path }) => ({ owner: ctx.id, path }),
   });
-  const hooks = createUploadHooks<typeof _one>({});
+  const hooks = uploadHooks<typeof _one>({});
   const only = hooks.useUpload();
   only.start({ file, input: { threadId: 't1' } });
   // @ts-expect-error the sole route's schema makes input required
@@ -225,17 +225,17 @@ type Unnamed = UploadRoute<undefined, { any: true }>;
 type Dynamic = UploadRoute<undefined, { legacy: boolean }>;
 
 function _routeUnions() {
-  const hooks = createUploadHooks<Uploads | Legacy>({});
+  const hooks = uploadHooks<Uploads | Legacy>({});
   hooks.useUpload('attachment', { onDone: (record) => void (record.blob.data.owner satisfies string) });
   hooks.useUpload('/api/legacy', { onDone: (record) => void (record.blob.data.legacy satisfies boolean) });
   // @ts-expect-error URL typo remains checked against the union
   hooks.useUpload('/api/legcy');
 
-  const mixed = createUploadHooks<Uploads | Unnamed>({});
+  const mixed = uploadHooks<Uploads | Unnamed>({});
   mixed.useUpload('large');
   // @ts-expect-error unnamed route does not widen all keys to string
   mixed.useUpload('larg');
-  const unnamed = createUploadHooks<Unnamed>({});
+  const unnamed = uploadHooks<Unnamed>({});
   // @ts-expect-error an unnamed brand contributes no key
   unnamed.useUpload('anything');
 }
@@ -254,11 +254,11 @@ function _escapeHatches() {
   // @ts-expect-error the route is positional; there is no compatibility object form
   useServerUpload<{ ok: boolean }>({ route: '/api/avatar', concurrency: 1 });
 
-  const configured = createUploadHooks({ headers: () => ({}) });
+  const configured = uploadHooks({ headers: () => ({}) });
   configured.useUpload<Legacy>('/api/legacy');
   // @ts-expect-error the route declared a different path
   configured.useUpload<Legacy>('/api/nope');
-  // @ts-expect-error createUploadHooks configures direct useUpload only
+  // @ts-expect-error uploadHooks configures direct useUpload only
   const missing = configured.useServerUpload;
   void missing;
 }

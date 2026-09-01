@@ -2,24 +2,23 @@ export { Bucket } from './server/bucket.ts';
 export type {
   BucketOptions,
   PutOptions,
-  PutResult,
   ListOptions,
   ListPage,
   BlobInfo,
-  BlobBody,
+  BlobDownload,
   SignedReadUrlOptions,
-  SignedRead,
+  SignedReadUrl,
   ListMultipartOptions,
   AbortStaleMultipartOptions,
   MultipartUpload,
   DeleteTarget,
   S3Config,
-  UpdateOptions,
+  UpdateJsonOptions,
 } from './server/bucket.ts';
 export type { PutBody } from './server/body.ts';
 export type { MultipartOption } from './server/multipart.ts';
 export type { StandardSchema, UploadConstraints } from './server/handle-upload.ts';
-export { upload, uploadHandler } from './server/handler.ts';
+export { uploadRoute, uploadHandler } from './server/handler.ts';
 export type {
   AnyUploadRouteConfig,
   BeforeUploadArgs,
@@ -41,6 +40,6 @@ export type {
 export { uniquePath } from './server/unique-path.ts';
 export { BlobError } from './shared/errors.ts';
 export type { BlobErrorCode, BlobErrorOptions } from './shared/errors.ts';
-export type { BlobObject, CompletedBlob, UploadFile, UploadRoute, WireConstraints } from './shared/types.ts';
+export type { BlobObject, CompletedBlob, UploadFile, UploadRoute, ServedConstraints } from './shared/types.ts';
 export type { CacheOption, Size, Duration } from './shared/units.ts';
 export { formatBytes } from './shared/units.ts';
