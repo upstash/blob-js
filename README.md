@@ -164,6 +164,12 @@ if (BlobError.is(e) && e.code === 'too_large') showError(e.message);
 Requests carry the SDK version, runtime, and platform. Set `UPSTASH_DISABLE_TELEMETRY` or pass
 `enableTelemetry: false`.
 
+## AI agents
+
+The published package ships the Upstash Blob docs under `node_modules/@upstash/blob/docs/` as `.mdx`,
+matching the installed version. `docs/README.md` there is the index. A Claude Code / Cursor skill
+that points agents at them lives in [`skills/blob`](./skills/blob/SKILL.md).
+
 ## License
 
 [MIT](./LICENSE)
