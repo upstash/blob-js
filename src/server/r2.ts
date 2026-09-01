@@ -35,6 +35,11 @@ export interface PresignedRead {
   expiresAt: Date;
 }
 
+export interface PresignedWrite {
+  url: string;
+  expiresAt: Date;
+}
+
 const RETRIABLE_METHODS = new Set(['GET', 'HEAD', 'PUT', 'DELETE']);
 const RETRY_ATTEMPTS = 3;
 // R2 answers a temporary credential that has expired with a 403 naming it, which is indistinguishable
@@ -43,6 +48,7 @@ const CREDENTIAL_REJECTED = /ExpiredToken|InvalidAccessKeyId|TokenRefreshRequire
 // What a read link is signed for when the caller does not say. Shorter than the cap on purpose: an
 // ask at the cap re-mints, and the cap moves with whatever the agent had left.
 const DEFAULT_READ_SECONDS = 300;
+const DEFAULT_WRITE_SECONDS = 3600;
 // A credential this much older than it was minted might be replaced by a newer one; a fresher one
 // would only come back identical.
 const WORTH_REMINTING_S = 30;
@@ -191,6 +197,23 @@ export class R2 {
       { method: 'GET', url, expiresIn: seconds },
     );
     return { url: signed, expiresAt: new Date(Math.min(Date.now() + seconds * 1000, signer.expiresAt * 1000)) };
+  }
+
+  /**
+   * A write link. The read-signing credential is read-only, so the object credential signs this one
+   * and its remaining life is the cap: ask for longer and the SDK re-mints rather than hand back a
+   * url that dies early. `headers` are pinned into the signature and must be sent verbatim.
+   */
+  async presignWrite(init: { path: string; query?: Record<string, string>; headers: Record<string, string>; expiresIn?: number }): Promise<PresignedWrite> {
+    let seconds = init.expiresIn === undefined ? DEFAULT_WRITE_SECONDS : Math.max(1, Math.floor(init.expiresIn));
+    const c = await this.creds.get(seconds);
+    seconds = Math.min(seconds, Math.max(1, Math.floor(c.expiresAt - Date.now() / 1000)));
+    const url = await this.objectUrl(init.path, init.query);
+    const signed = await presign(
+      { accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, sessionToken: c.sessionToken, region: c.region },
+      { method: 'PUT', url, expiresIn: seconds, signedHeaders: init.headers },
+    );
+    return { url: signed, expiresAt: new Date(Date.now() + seconds * 1000) };
   }
 
   /** The cap a presigned read can ask for right now, in seconds. Not public API: `expiresAt` on

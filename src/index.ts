@@ -8,6 +8,8 @@ export type {
   BlobDownload,
   SignedReadUrlOptions,
   SignedReadUrl,
+  SignedUploadUrlOptions,
+  SignedUploadUrl,
   ListMultipartOptions,
   AbortStaleMultipartOptions,
   MultipartUpload,

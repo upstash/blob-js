@@ -145,6 +145,42 @@ describe('read', () => {
     expect(tampered.status).toBe(403);
   });
 
+  test('signedUploadUrl writes one object, pins its headers, and refuses a body it did not sign', async () => {
+    const up = await priv.signedUploadUrl(p('signed-up.txt'), {
+      contentType: 'text/plain',
+      metadata: { owner: 'u7' },
+      size: 5,
+      expiresIn: 120,
+    });
+    expect(up.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(up.headers['content-type']).toBe('text/plain');
+    expect(up.headers['x-amz-meta-owner']).toBe('u7');
+
+    // A header the signature pinned cannot be dropped or changed by whoever holds the url.
+    const bare = await fetch(up.url, { method: 'PUT', body: 'hello' });
+    expect(bare.status).toBe(403);
+    const swapped = await fetch(up.url, { method: 'PUT', headers: { ...up.headers, 'content-type': 'text/html' }, body: 'hello' });
+    expect(swapped.status).toBe(403);
+    // ...and content-length is pinned, so the url is good for five bytes and nothing else.
+    const wrongSize = await fetch(up.url, { method: 'PUT', headers: up.headers, body: 'hello world' });
+    expect(wrongSize.ok).toBe(false);
+
+    const res = await fetch(up.url, { method: 'PUT', headers: up.headers, body: 'hello' });
+    expect(res.status).toBe(200);
+    const info = await priv.info(p('signed-up.txt'));
+    expect(info.size).toBe(5);
+    expect(info.contentType).toBe('text/plain');
+    expect(info.metadata.owner).toBe('u7');
+  });
+
+  test('signedUploadUrl with overwrite:false refuses a path that is already taken', async () => {
+    await priv.put(p('taken.txt'), 'first', { contentType: 'text/plain' });
+    const up = await priv.signedUploadUrl(p('taken.txt'), { contentType: 'text/plain', overwrite: false });
+    const res = await fetch(up.url, { method: 'PUT', headers: up.headers, body: 'second' });
+    expect(res.status).toBe(412);
+    expect(await (await priv.get(p('taken.txt'))).body.getReader().read().then((r) => new TextDecoder().decode(r.value))).toBe('first');
+  });
+
   test('an expiresIn over the credential cap is shortened transparently', async () => {
     await priv.put(p('capped.txt'), 'shh', { contentType: 'text/plain' });
     const cap = await r2Of(priv).readCap();
