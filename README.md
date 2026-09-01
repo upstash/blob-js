@@ -38,6 +38,42 @@ Object metadata is printable ASCII: R2 hands anything else back re-encoded (`caf
 `=?utf-8?Q?caf=C3=A9?=`), so the SDK refuses it with `invalid_input` rather than storing a value you
 cannot read back. Percent-encode first.
 
+### Reading, listing, deleting
+
+```ts
+const blob = await bucket.get('avatars/me.png');    // the record plus a ReadableStream body
+const info = await bucket.info('avatars/me.png');   // the same record without the bytes: a HEAD
+await bucket.exists('avatars/me.png');              // false instead of a throw
+
+const { blobs, cursor } = await bucket.list({ prefix: 'avatars/', limit: 100 });
+const next = await bucket.list({ prefix: 'avatars/', cursor });
+
+await bucket.del('a.png');                          // one path
+await bucket.del(['a.png', 'b.png']);               // batched, 1000 keys per request
+await bucket.del({ prefix: 'tmp/' });               // everything under a prefix
+```
+
+`get` and `info` throw `not_found` rather than answering `undefined`, so a missing object is
+`BlobError.is(e) && e.code === 'not_found'`; `exists` is that check as a boolean. Both carry
+`contentType` and `metadata`, which `list` does not: a page is keys, sizes, etags, timestamps and
+urls, so an app that needs metadata per object pays a `info()` for it. `cursor` is set only while
+more remains -- `undefined` is the last page -- and `limit` is clamped to R2's own 1000.
+
+Deleting a path that is not there succeeds. An array delete that partly fails throws
+`partial_delete` carrying the `failed` paths, so a retry can be aimed at those.
+
+### Copy and move
+
+```ts
+await bucket.copy('tmp/9f3c2a', 'avatars/7.png');
+await bucket.move('tmp/9f3c2a', 'avatars/7.png');
+```
+
+Both are server-side: the bytes never travel through your process, and `copy` returns the new
+object's record. `move` is a copy followed by a delete of the source, which is not atomic -- a
+delete that fails after the copy landed throws `move_left_a_copy`, and the destination is there, so
+the retry is the delete and not the whole move.
+
 ### Read-modify-write
 
 ```ts
@@ -94,7 +130,7 @@ await fetch(url, { method: 'PUT', headers, body });
 ```
 
 The counterpart of `signedReadUrl()`, for a one-off upload from a CLI or a server-to-server job. A
-browser upload wants [`uploadRoute()`](#direct-browser-uploads) instead: this signs a single PUT, so it has no
+browser upload wants [`uploadHandler()`](#direct-browser-uploads) instead: this signs a single PUT, so it has no
 multipart path for large files and no completion callback.
 
 - `headers` are sent with the PUT verbatim. They are pinned into the signature, so a client that
@@ -134,10 +170,25 @@ await bucket.abortMultipartUpload(open[0]);   // { path, uploadId }
 Only a file over the multipart threshold can leave one of those. A direct upload under the threshold
 leaves the other kind: the browser's PUT stores the object, so a tab that closes between the PUT and
 the completion call leaves a whole object your callback never accepted and your database has no row
-for. Those are ordinary objects, so `list()` sees them; each carries an `upstash-upload` metadata key
-holding the upload id, which is what tells one apart from a file you did accept. On a stable path
-(`avatars/${userId}.png`) the same abandoned upload has already replaced what was there, exactly as a
-presigned PUT anywhere else does -- a unique path per upload is the way to avoid that.
+for. Those are ordinary objects -- `list()` sees them, they are billed, and on a public bucket they
+are already readable. Nothing on the object marks them: the `upstash-upload` metadata key stays on
+accepted objects too, so it proves "this came from that upload", never "no callback took it".
+
+The state lives in your rows, so the sweep does too. Write a pending row in `onBeforeUpload`, flip it
+to ready as the last thing `onUploadComplete` does, and run a cron over rows still pending past a
+grace window: an indexed query that names the exact path, not a bucket scan. Confirm before deleting
+with `info(path)`, whose `metadata` is unstripped, and catch `not_found` rather than expecting
+`undefined`. Doing work after the flip breaks the premise the sweep rests on.
+
+`multipart: true` is the option for an app that will not run that cron. Parting every upload at any
+size means nothing is stored until the handler completes it, so an abandoned tab leaves an
+incomplete multipart upload that `abortStaleMultipartUploads()` reaps, and what is left over shrinks
+to the narrow case of a retried `end` after completion. The browser still makes the same three
+requests; the cost is two extra server-to-storage round trips, `createMultipart` inside `begin` and
+`completeMultipart` inside `end`, landing as latency.
+
+On a stable path (`avatars/${userId}.png`) an abandoned upload has already replaced what was there,
+exactly as a presigned PUT anywhere else does -- a unique path per upload is the way to avoid that.
 
 `del({ prefix })` refuses an empty prefix unless you say you mean it: `del({ prefix: '', all: true })`.
 
@@ -233,8 +284,14 @@ object and runs `onUploadComplete`. `percent` remains at 99 during that state.
 `onUploadComplete` delivery is at-least-once: a successful response can be lost and retried. Its
 `uploadId` is stable, so enforce it as a unique database key and atomically insert-or-return.
 If the callback throws, the handler attempts to delete the completed object before answering the
-error. As with every cross-service operation, abrupt process death cannot make object storage and
-your database transactional.
+error -- which is why a database blip must not escape it: bytes that uploaded fine are deleted, the
+browser retries, and the user is told the upload never landed. Catch your own storage errors and
+answer with a retryable `BlobError` instead of throwing. As with every cross-service operation,
+abrupt process death cannot make object storage and your database transactional.
+
+Two direct uploads to the same path race the way a presigned PUT anywhere does: the second
+overwrites the first, and the first upload's completion then fails its marker check with `not_found`
+even though its bytes landed. `uniquePath` is what avoids both.
 
 ### Named routes
 
@@ -388,6 +445,22 @@ console.log(upload?.response?.blob.versionedUrl, upload?.error?.message, upload?
 ```
 
 Configure `useServerUpload` directly; it is not part of `HandlerRoutes` or `uploadHooks`.
+
+## The S3 escape hatch
+
+`bucket.s3()` hands `@aws-sdk/client-s3` what it needs for anything this SDK does not wrap:
+
+```ts
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+
+const { endpoint, region, bucket: name, credentials } = bucket.s3();
+const s3 = new S3Client({ endpoint, region, credentials });
+await s3.send(new GetObjectCommand({ Bucket: name, Key: 'avatars/me.png' }));
+```
+
+`endpoint` and `credentials` are async providers rather than values. The account endpoint is only
+known from a credentials response, and the credentials are short-lived, so the aws-sdk re-reads them
+on `expiration` instead of holding one that goes stale.
 
 ## Errors and sizes
 
