@@ -80,6 +80,34 @@ Nothing has to be asked in advance -- `expiresAt` is the answer, per link.
 A public URL needs no request: `bucket.publicUrl(path)` computes it from the bucket token and returns
 `undefined` for a bucket declared private.
 
+### Signed uploads
+
+```ts
+const { url, headers, expiresAt } = await bucket.signedUploadUrl('u/7/report.pdf', {
+  contentType: 'application/pdf',
+  metadata: { owner: '7' },
+  size: 1_048_576,
+});
+
+// whoever holds the url, e.g. a CLI or another service
+await fetch(url, { method: 'PUT', headers, body });
+```
+
+The counterpart of `signedReadUrl()`, for a one-off upload from a CLI or a server-to-server job. A
+browser upload wants [`uploadRoute()`](#direct-browser-uploads) instead: this signs a single PUT, so it has no
+multipart path for large files and no completion callback.
+
+- `headers` are sent with the PUT verbatim. They are pinned into the signature, so a client that
+  drops one, changes one or adds one gets a 403 rather than a header of its own choosing: the
+  content type, the cache-control and the metadata your `onUploadComplete` reads back are yours,
+  not the holder's.
+- `size` pins `Content-Length`, so a link handed out for one file cannot be spent on a larger one.
+- `overwrite: false` sends `If-None-Match: *`, and an upload to a path that is already taken is
+  refused with a 412.
+- `expiresAt` is when the link really dies, under the same credential cap as a signed read. Writes
+  cannot borrow the long-lived read-signing credential, so the cap here is the object credential's
+  remaining life; asking for longer re-mints rather than returning a link that is already stale.
+
 ### Private buckets
 
 `new Bucket({ token, visibility: 'private' })` drops `url` and `versionedUrl` from every

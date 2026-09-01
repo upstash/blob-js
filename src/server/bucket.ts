@@ -95,6 +95,34 @@ export interface SignedReadUrl {
   expiresAt: Date;
 }
 
+export interface SignedUploadUrlOptions {
+  /**
+   * How long the link should live. If the current signing credential expires sooner, the SDK uses
+   * what is available; `expiresAt` always says when the returned link actually expires.
+   */
+  expiresIn?: Duration;
+  /** The `Content-Type` the upload must send, and what the object is stored as. */
+  contentType?: string;
+  /** The `Cache-Control` the object is stored with. @see CacheOption */
+  cache?: CacheOption;
+  metadata?: Record<string, string>;
+  /** Pin the body's exact length, so a url handed out for one file cannot upload another size. */
+  size?: Size;
+  /** `false` refuses the upload if something is already at the path. */
+  overwrite?: boolean;
+}
+
+export interface SignedUploadUrl {
+  url: string;
+  /**
+   * Sent verbatim with the PUT. They are part of the signature, so anything the caller changes,
+   * drops or adds to them is a 403 rather than a header the client got to choose.
+   */
+  headers: Record<string, string>;
+  /** When the link stops working. Never later than the credential that signed it. */
+  expiresAt: Date;
+}
+
 export interface ListMultipartOptions {
   prefix?: string;
 }
@@ -369,6 +397,28 @@ export class Bucket {
     if (options.downloadAs !== undefined) query['response-content-disposition'] = attachmentDisposition(options.downloadAs);
     if (options.contentType !== undefined) query['response-content-type'] = safeContentType(options.contentType);
     return this.r2.presignRead({ path, query, expiresIn });
+  }
+
+  /**
+   * A url someone else can PUT one object to: the counterpart of signedReadUrl, for a CLI or a
+   * server-to-server job. A browser upload wants uploadRoute() instead, which also handles
+   * multipart and the completion callback this cannot.
+   */
+  async signedUploadUrl(path: string, options: SignedUploadUrlOptions = {}): Promise<SignedUploadUrl> {
+    encodeKey(path);
+    const expiresIn = options.expiresIn === undefined ? undefined : Math.max(1, Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000));
+    // Resolved before the header is written, exactly as put() does it: visibility decides the
+    // cache-control, and the credentials that carry it are not peekable until first fetched.
+    await this.r2.credentials();
+    const headers: Record<string, string> = {
+      'content-type': safeContentType(options.contentType ?? 'application/octet-stream'),
+      'cache-control': cacheControl(options.cache ?? this.defaultCache, this.r2.visibility()),
+      ...metaHeaders(options.metadata),
+    };
+    if (options.size !== undefined) headers['content-length'] = String(parseSize(options.size, 'size'));
+    if (options.overwrite === false) headers['if-none-match'] = '*';
+    const { url, expiresAt } = await this.r2.presignWrite({ path, headers, expiresIn });
+    return { url, headers, expiresAt };
   }
 
   /* ---------------------------------------------------------------- write */
