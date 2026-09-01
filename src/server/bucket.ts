@@ -119,6 +119,11 @@ export interface UpdateJsonOptions {
   metadata?: Record<string, string>;
 }
 
+export interface UpdateTextOptions extends UpdateJsonOptions {
+  /** What the rewritten object is stored as. Defaults to the type it already had, else `text/plain`. */
+  contentType?: string;
+}
+
 /**
  * The name reaches storage as a query parameter and comes back as a header value, so a quote, a
  * semicolon or a CRLF in it must not be able to add a parameter or a second header. RFC 6266 4.1
@@ -479,24 +484,53 @@ export class Bucket {
 
   /** Read-modify-write over a JSON document; retried on 'conflict' up to 5 times. Existing metadata is kept unless options.metadata is given. */
   async updateJson<T = unknown>(path: string, fn: (prev: T | null) => T | Promise<T>, options: UpdateJsonOptions = {}): Promise<BlobObject> {
+    // An object that exists but is empty reads as null: there is no JSON document in it either way,
+    // so the callback is handed the same "nothing here yet" both times.
+    return this.readModifyWrite(path, (text) => (text.length ? (JSON.parse(text) as T) : null), JSON.stringify, () => 'application/json', fn, options);
+  }
+
+  /**
+   * Read-modify-write over a text object; retried on 'conflict' up to 5 times. `prev` is null only
+   * when nothing is stored at the path -- an existing empty object reads as ''. The object keeps the
+   * content type it was stored with unless `options.contentType` says otherwise.
+   */
+  async updateText(path: string, fn: (prev: string | null) => string | Promise<string>, options: UpdateTextOptions = {}): Promise<BlobObject> {
+    return this.readModifyWrite(path, (text) => text, (next) => next, (stored) => options.contentType ?? stored ?? 'text/plain', fn, options);
+  }
+
+  /**
+   * The compare-and-set loop both update calls run: read the object, apply the callback, and write
+   * it back conditionally -- If-None-Match when nothing was there, If-Match on the etag when
+   * something was -- so a write that raced another one is retried against what actually landed
+   * rather than overwriting it.
+   */
+  private async readModifyWrite<T>(
+    path: string,
+    decode: (text: string) => T | null,
+    encode: (next: T) => string,
+    typeFor: (stored: string | undefined) => string,
+    fn: (prev: T | null) => T | Promise<T>,
+    options: UpdateJsonOptions,
+  ): Promise<BlobObject> {
     let lastError: BlobError | undefined;
     for (let attempt = 0; attempt < 6; attempt++) {
       let prev: T | null = null;
       let etag: string | undefined;
       let metadata: Record<string, string> | undefined;
+      let stored: string | undefined;
       try {
         const res = await this.get(path);
-        const text = await new Response(res.body).text();
-        prev = text.length ? (JSON.parse(text) as T) : null;
+        prev = decode(await new Response(res.body).text());
         etag = res.etag;
         metadata = res.metadata;
+        stored = res.contentType;
       } catch (e) {
         if (!BlobError.is(e) || e.code !== 'not_found') throw e;
       }
       const next = await fn(prev);
       try {
-        return await this.put(path, JSON.stringify(next), {
-          contentType: 'application/json',
+        return await this.put(path, encode(next), {
+          contentType: typeFor(stored),
           cache: options.cache,
           metadata: options.metadata ?? metadata,
           ...(etag === undefined ? { overwrite: false } : { ifUnchanged: etag }),

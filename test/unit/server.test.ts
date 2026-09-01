@@ -360,6 +360,88 @@ describe('bucket guards', () => {
   });
 });
 
+describe('updateText', () => {
+  // put() sends a stream, so the body a call carries is read back rather than stringified.
+  const bodyText = (call: Call) => new Response(call.init.body as BodyInit).text();
+
+  // A stored object, and the PUT that comes back for it. `body` undefined is a path with nothing at it.
+  const scripted = (body: string | undefined, contentType = 'text/plain') => {
+    const puts: Call[] = [];
+    r2Handler = (call) => {
+      if (call.method === 'GET') {
+        return body === undefined
+          ? new Response('<Error><Code>NoSuchKey</Code></Error>', { status: 404 })
+          : new Response(body, { status: 200, headers: { etag: '"old"', 'content-type': contentType, 'content-length': String(body.length) } });
+      }
+      puts.push(call);
+      return new Response('', { status: 200, headers: { etag: '"new"' } });
+    };
+    return puts;
+  };
+
+  test('appends to what is there, conditional on the etag it read, keeping the stored type', async () => {
+    resetCredentialCaches();
+    const puts = scripted('one\n', 'text/markdown');
+    await bucket().updateText('log.md', (prev) => `${prev}two\n`);
+    expect(puts.length).toBe(1);
+    expect(await bodyText(puts[0]!)).toBe('one\ntwo\n');
+    expect(puts[0]!.headers.get('if-match')).toBe('"old"');
+    expect(puts[0]!.headers.get('content-type')).toBe('text/markdown');
+  });
+
+  test('a path with nothing at it hands the callback null and creates', async () => {
+    resetCredentialCaches();
+    const puts = scripted(undefined);
+    await bucket().updateText('log.txt', (prev) => {
+      expect(prev).toBeNull();
+      return 'first\n';
+    });
+    expect(puts[0]!.headers.get('if-none-match')).toBe('*');
+    expect(puts[0]!.headers.get('content-type')).toBe('text/plain');
+  });
+
+  test("an object that exists but is empty reads as '', not null", async () => {
+    resetCredentialCaches();
+    const puts = scripted('');
+    await bucket().updateText('log.txt', (prev) => {
+      expect(prev).toBe('');
+      return 'x';
+    });
+    expect(puts[0]!.headers.get('if-match')).toBe('"old"');
+  });
+
+  test('contentType overrides the type it was stored with', async () => {
+    resetCredentialCaches();
+    const puts = scripted('a', 'text/plain');
+    await bucket().updateText('a.csv', (prev) => `${prev},b`, { contentType: 'text/csv' });
+    expect(puts[0]!.headers.get('content-type')).toBe('text/csv');
+  });
+
+  test('a write that lost the race is applied again to what actually landed', async () => {
+    resetCredentialCaches();
+    let stored = 'one\n';
+    const seen: (string | null)[] = [];
+    r2Handler = async (call) => {
+      if (call.method === 'GET') {
+        return new Response(stored, { status: 200, headers: { etag: `"${stored.length}"`, 'content-type': 'text/plain', 'content-length': String(stored.length) } });
+      }
+      // The first write raced someone else's: storage refuses it and the object it read is gone.
+      if (seen.length === 1) {
+        stored = 'one\nother\n';
+        return new Response('<Error><Code>PreconditionFailed</Code></Error>', { status: 412 });
+      }
+      stored = await bodyText(call);
+      return new Response('', { status: 200, headers: { etag: '"new"' } });
+    };
+    await bucket().updateText('log.txt', (prev) => {
+      seen.push(prev);
+      return `${prev}mine\n`;
+    });
+    expect(seen).toEqual(['one\n', 'one\nother\n']);
+    expect(stored).toBe('one\nother\nmine\n');
+  });
+});
+
 describe('listMultipartUploads', () => {
   test('pages with markers decoded, so a key with an entity in it does not repeat forever', async () => {
     resetCredentialCaches();
