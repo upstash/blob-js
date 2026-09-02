@@ -13,12 +13,6 @@ export type { MultipartUpload };
 export interface BucketOptions {
   token: string;
   /**
-   * `'private'` drops `url` and `versionedUrl` from every BlobObject: nothing serves a private
-   * bucket over the public host, so a url there is a link that 404s. A visibility in the
-   * credentials response wins over this.
-   */
-  visibility?: 'public' | 'private';
-  /**
    * The `Cache-Control` written on every object this bucket stores. A per-call `cache` overrides it.
    * @see CacheOption
    */
@@ -196,7 +190,7 @@ export class Bucket {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
     this.defaultCache = options.cache;
-    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true, options.visibility);
+    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true);
     INTERNALS.set(this, this.r2);
   }
 
@@ -206,9 +200,14 @@ export class Bucket {
     return new Bucket({ ...options, token });
   }
 
-  /** The public object URL, computed locally from the bucket token. Undefined for a private bucket. */
-  publicUrl(path: string): string | undefined {
+  /**
+   * The public object URL. Undefined on a private bucket: nothing serves its objects over the public
+   * host, so use `signedReadUrl()` there. Whether the bucket is private comes from the backend, not
+   * the token, so the first call on a fresh bucket fetches credentials; after that it is local.
+   */
+  async publicUrl(path: string): Promise<string | undefined> {
     encodeKey(path);
+    await this.r2.credentials();
     return this.r2.publicUrl(path);
   }
 

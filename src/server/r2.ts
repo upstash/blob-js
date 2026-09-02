@@ -66,8 +66,6 @@ export class R2 {
     readonly signingSecret: string,
     readonly defaultCache: CacheOption | undefined,
     enableTelemetry = true,
-    /** What the caller declared; a `visibility` in the credentials response wins over it. */
-    private readonly declaredVisibility?: 'public' | 'private',
   ) {
     this.creds = credentialCacheFor(token, enableTelemetry);
     this.hostname = `${hashForDomain}.${DOMAIN_SUFFIX}`;
@@ -78,16 +76,17 @@ export class R2 {
   }
 
   /**
-   * What the credentials say, else what the caller declared, else public. Read after `credentials()`
-   * has resolved, so a bucket that never declared it still stores the right cache-control.
+   * What the credentials response says, else public. The bucket is the only one who knows: the
+   * token carries no visibility bit. Read after `credentials()` has resolved, which every request
+   * does before it writes a header or builds a BlobObject.
    */
   visibility(): 'public' | 'private' {
-    return this.creds.peek()?.visibility ?? this.declaredVisibility ?? 'public';
+    return this.creds.peek()?.visibility ?? 'public';
   }
 
   /** Undefined on a private bucket: nothing serves its objects over the public host. */
   publicUrl(path: string): string | undefined {
-    if ((this.creds.peek()?.visibility ?? this.declaredVisibility) === 'private') return undefined;
+    if (this.visibility() === 'private') return undefined;
     return `https://${this.hostname}/${encodeKey(path)}`;
   }
 

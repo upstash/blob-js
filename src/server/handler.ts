@@ -225,7 +225,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
   /**
    * Every route inherits it; a route may name its own. Omit it and the handler builds one from
    * `UPSTASH_BLOB_TOKEN`, once, the way `Bucket.fromEnv()` does -- so name a bucket when the token
-   * lives under another variable, when the bucket needs `cache` or `visibility`, or on Workers,
+   * lives under another variable, when the bucket needs `cache`, or on Workers,
    * where the token only exists on the request's `env`.
    */
   bucket?: Bucket;
