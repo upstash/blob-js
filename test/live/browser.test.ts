@@ -136,7 +136,9 @@ describe('upload()', () => {
   });
 
   test('many parts: pause, resume, cancel, and resume by fingerprint after a reload', async () => {
-    const size = 17_000_000;
+    // Five parts, one more than PARTS_IN_FLIGHT: pause then really holds a part back. With four,
+    // every part is already on the wire, pause has nothing to stop, and the upload finishes anyway.
+    const size = 21_000_000;
     const data = bytes(size, 5);
     const file = new File([data], 'movie.bin', { type: 'application/octet-stream', lastModified: 1_700_000_000_000 });
 
@@ -199,7 +201,7 @@ describe('upload()', () => {
     const blob = await third.done;
     expect(begins).toBe(beginsBefore); // resumed: no new begin, no new row
     expect(blob.size).toBe(size);
-    expect(blob.etag).toMatch(/-4"$/);
+    expect(blob.etag).toMatch(/-5"$/);
     expect(rows[blob.path]).toBe(size);
     expect(memory.has(rec2[0])).toBe(false);
     const back = new Uint8Array(await new Response((await priv.get(blob.path)).body).arrayBuffer());
