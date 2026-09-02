@@ -21,6 +21,19 @@ describe('public surface', () => {
     }
   });
 
+  test('fromEnv takes the options alone and reads the default variable', () => {
+    process.env.UPSTASH_BLOB_TOKEN = encodeToken('bucket', 'pw', 'bdeadbeef012');
+    try {
+      expect(Bucket.fromEnv({ cache: '1m' })).toBeInstanceOf(Bucket);
+      expect(Bucket.fromEnv({})).toBeInstanceOf(Bucket);
+      expect(Bucket.fromEnv()).toBeInstanceOf(Bucket);
+      // @ts-expect-error token is not one of fromEnv's options
+      void Bucket.fromEnv({ token: 'x' });
+    } finally {
+      delete process.env.UPSTASH_BLOB_TOKEN;
+    }
+  });
+
   test('nothing SPEC does not name', () => {
     // @ts-expect-error signal is not a put() option
     const _opts: PutOptions = { signal: new AbortController().signal };
