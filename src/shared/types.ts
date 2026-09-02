@@ -41,7 +41,7 @@ export type WireFile = UploadFile;
 /** What the constraints endpoint serves and `useUpload().constraints` exposes, sizes in bytes. */
 export interface ServedConstraints {
   contentTypes?: readonly string[];
-  maxBytes?: number;
+  maxSize?: number;
 }
 
 export interface WirePart {

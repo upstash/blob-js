@@ -31,7 +31,7 @@ export type StandardResult<T> = { readonly value: T; readonly issues?: undefined
 
 export interface UploadConstraints {
   contentTypes?: readonly string[];
-  maxBytes?: Size;
+  maxSize?: Size;
 }
 
 /** What the handler knows when a callback threw, as much of it as the request had reached. */
@@ -145,8 +145,8 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
 
     if (decided.constraints) {
       const narrowed = resolveConstraints(decided.constraints);
-      if (narrowed.maxBytes !== undefined && routeConstraints.maxBytes !== undefined && narrowed.maxBytes > routeConstraints.maxBytes) {
-        throw new TypeError(`onBeforeUpload widened maxBytes (${narrowed.maxBytes} > ${routeConstraints.maxBytes})`);
+      if (narrowed.maxSize !== undefined && routeConstraints.maxSize !== undefined && narrowed.maxSize > routeConstraints.maxSize) {
+        throw new TypeError(`onBeforeUpload widened maxSize (${narrowed.maxSize} > ${routeConstraints.maxSize})`);
       }
       if (narrowed.contentTypes && routeConstraints.contentTypes) {
         const wider = narrowed.contentTypes.filter((t) => !routeConstraints.contentTypes!.includes(t));
@@ -411,7 +411,7 @@ export async function answerError(e: unknown, request: Request, onError: ErrorMa
 export function constraintsEndpoint(routeConstraints: ResolvedConstraints): (request: Request) => Promise<Response> {
   const served: ServedConstraints = {};
   if (routeConstraints.contentTypes) served.contentTypes = routeConstraints.contentTypes;
-  if (routeConstraints.maxBytes !== undefined) served.maxBytes = routeConstraints.maxBytes;
+  if (routeConstraints.maxSize !== undefined) served.maxSize = routeConstraints.maxSize;
   const body = JSON.stringify({ constraints: served } satisfies WireConstraintsResponse);
   const etag = `"${hash(body)}"`;
   return async (request: Request): Promise<Response> => {
@@ -439,19 +439,19 @@ export async function validateInput(schema: StandardSchema<any, any> | undefined
 
 export interface ResolvedConstraints {
   contentTypes: string[] | undefined;
-  maxBytes: number | undefined;
+  maxSize: number | undefined;
 }
 
 export function resolveConstraints(constraints: UploadConstraints | undefined): ResolvedConstraints {
   return {
     contentTypes: constraints?.contentTypes === undefined ? undefined : expandContentTypes(constraints.contentTypes),
-    maxBytes: constraints?.maxBytes === undefined ? undefined : parseSize(constraints.maxBytes, 'maxBytes'),
+    maxSize: constraints?.maxSize === undefined ? undefined : parseSize(constraints.maxSize, 'maxSize'),
   };
 }
 
 export function enforce(constraints: ResolvedConstraints, file: UploadFile, head?: Uint8Array): void {
-  if (constraints.maxBytes !== undefined && file.size > constraints.maxBytes) {
-    throw new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(constraints.maxBytes)} limit` });
+  if (constraints.maxSize !== undefined && file.size > constraints.maxSize) {
+    throw new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(constraints.maxSize)} limit` });
   }
   if (constraints.contentTypes) checkContentType(file.type, head, constraints.contentTypes);
 }
@@ -490,8 +490,8 @@ function messageOf(e: unknown): string {
   return typeof m === 'string' && m ? m : 'request failed';
 }
 
-export function deriveRouteId(constraints: { contentTypes: string[] | undefined; maxBytes: number | undefined }, hasInput: boolean, route?: string): string {
-  return hash(JSON.stringify([route ?? null, constraints.contentTypes ?? null, constraints.maxBytes ?? null, hasInput]));
+export function deriveRouteId(constraints: { contentTypes: string[] | undefined; maxSize: number | undefined }, hasInput: boolean, route?: string): string {
+  return hash(JSON.stringify([route ?? null, constraints.contentTypes ?? null, constraints.maxSize ?? null, hasInput]));
 }
 
 /** FNV-1a. Not a security boundary: the token's MAC is. This only separates routes and versions a body. */

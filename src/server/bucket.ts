@@ -28,24 +28,24 @@ export interface BucketOptions {
 export interface PutOptions {
   contentType?: string;
   contentTypes?: readonly string[];
-  maxBytes?: Size;
+  maxSize?: Size;
   /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
   metadata?: Record<string, string>;
   /**
    * Declared length for a stream whose size is not otherwise known. Without it, `put()` buffers the
-   * stream (up to `maxBytes`) before uploading so it can determine the required content length.
+   * stream (up to `maxSize`) before uploading so it can determine the required content length.
    */
   size?: number;
   /** false: If-None-Match: * server-side, so a real 412 rather than a client-side race. */
-  overwrite?: boolean;
+  allowOverwrite?: boolean;
   /** An etag: If-Match, so the write fails with 'conflict' if the object changed. */
   ifUnchanged?: string;
   /**
    * Where the multipart path starts. The default is 16 MB: under it a body goes up as one PUT, over
    * it in parts, which is the only way past R2's ~5 GiB single-PUT cap and the only way a failed
    * chunk can be retried. A size moves the line (`'100mb'`), `true` always parts, `false` never
-   * does. `overwrite: false` and `ifUnchanged` are single-PUT only, so they turn it off.
+   * does. `allowOverwrite: false` and `ifUnchanged` are single-PUT only, so they turn it off.
    */
   multipart?: MultipartOption;
 }
@@ -103,7 +103,7 @@ export interface SignedUploadUrlOptions {
   /** Pin the body's exact length, so a url handed out for one file cannot upload another size. */
   size?: Size;
   /** `false` refuses the upload if something is already at the path. */
-  overwrite?: boolean;
+  allowOverwrite?: boolean;
 }
 
 export interface SignedUploadUrl {
@@ -216,19 +216,19 @@ export class Bucket {
   async put(path: string, body: PutBody, options: PutOptions = {}): Promise<CompletedBlob> {
     encodeKey(path);
     const allowed = options.contentTypes === undefined ? undefined : expandContentTypes(options.contentTypes);
-    const maxBytes = options.maxBytes === undefined ? undefined : parseSize(options.maxBytes, 'maxBytes');
+    const maxSize = options.maxSize === undefined ? undefined : parseSize(options.maxSize, 'maxSize');
 
     const resolved = resolveBody(body);
     let { stream, size } = resolved;
     const contentType = options.contentType ?? resolved.contentType ?? 'application/octet-stream';
 
     if (size === undefined && options.size !== undefined) size = parseSize(options.size, 'size');
-    if (maxBytes !== undefined && size !== undefined && size > maxBytes) {
-      throw new BlobError('too_large', { message: `the body is ${formatBytes(size)}, over the ${formatBytes(maxBytes)} limit` });
+    if (maxSize !== undefined && size !== undefined && size > maxSize) {
+      throw new BlobError('too_large', { message: `the body is ${formatBytes(size)}, over the ${formatBytes(maxSize)} limit` });
     }
     if (size === undefined) {
-      if (maxBytes === undefined) throw new BlobError('length_required');
-      const bytes = await readAll(stream, maxBytes);
+      if (maxSize === undefined) throw new BlobError('length_required');
+      const bytes = await readAll(stream, maxSize);
       size = bytes.byteLength;
       stream = new Blob([bytes as BlobPart]).stream() as ReadableStream<Uint8Array>;
     }
@@ -239,7 +239,7 @@ export class Bucket {
       stream = peeked.stream;
     }
 
-    if (maxBytes !== undefined) stream = limit(stream, maxBytes);
+    if (maxSize !== undefined) stream = limit(stream, maxSize);
     // A zero-length body goes out as bytes, so the peeked stream has to be released rather than left open.
     if (size === 0) await stream.cancel();
 
@@ -252,9 +252,9 @@ export class Bucket {
       ...metaHeaders(options.metadata),
     };
 
-    const conditional = options.overwrite === false || options.ifUnchanged !== undefined;
+    const conditional = options.allowOverwrite === false || options.ifUnchanged !== undefined;
     if (options.multipart === true && conditional) {
-      throw new BlobError('invalid_input', { message: 'multipart: overwrite:false and ifUnchanged are single-PUT only' });
+      throw new BlobError('invalid_input', { message: 'multipart: allowOverwrite: false and ifUnchanged are single-PUT only' });
     }
     // Asked before the conditional check, not after: a body over the single-PUT cap is a refusal
     // worth naming whatever else is set, and a conditional write cannot rescue it either.
@@ -264,7 +264,7 @@ export class Bucket {
     }
 
     const headers: Record<string, string> = { ...objectHeaders, 'content-length': String(size) };
-    if (options.overwrite === false) headers['if-none-match'] = '*';
+    if (options.allowOverwrite === false) headers['if-none-match'] = '*';
     if (options.ifUnchanged !== undefined) headers['if-match'] = options.ifUnchanged;
 
     let res: Response;
@@ -277,7 +277,7 @@ export class Bucket {
     }
     if (res.status === 412) {
       await res.body?.cancel();
-      if (options.overwrite === false) {
+      if (options.allowOverwrite === false) {
         const head = await this.r2.head(path);
         throw new BlobError('already_exists', { message: `${path} already exists`, etag: head?.etag, size: head?.size });
       }
@@ -423,7 +423,7 @@ export class Bucket {
       ...metaHeaders(options.metadata),
     };
     if (options.size !== undefined) headers['content-length'] = String(parseSize(options.size, 'size'));
-    if (options.overwrite === false) headers['if-none-match'] = '*';
+    if (options.allowOverwrite === false) headers['if-none-match'] = '*';
     const { url, expiresAt } = await this.r2.presignWrite({ path, headers, expiresIn });
     return { url, headers, expiresAt };
   }
@@ -560,7 +560,7 @@ export class Bucket {
           contentType: 'application/json',
           cache: options.cache,
           metadata: options.metadata ?? metadata,
-          ...(etag === undefined ? { overwrite: false } : { ifUnchanged: etag }),
+          ...(etag === undefined ? { allowOverwrite: false } : { ifUnchanged: etag }),
         });
       } catch (e) {
         if (!BlobError.is(e) || (e.code !== 'conflict' && e.code !== 'already_exists')) throw e;

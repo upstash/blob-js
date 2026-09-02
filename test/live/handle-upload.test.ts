@@ -21,7 +21,7 @@ let lastLargeCompleted: { multipartUploadId: string | undefined; name: string; d
 // `context` is written above the callbacks on purpose -- see the ordering rule in handler.ts.
 const chat = uploadHandler({
   bucket: pub,
-  constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: '20mb' },
+  constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxSize: '20mb' },
   context: (request) => {
     const id = request.headers.get('authorization')?.slice(7);
     if (!id) throw new BlobError('unauthorized');
@@ -58,16 +58,16 @@ const fileRoute = uploadRoute()({
   },
 });
 
-// `thumb` narrows the handler's maxBytes and inherits the bucket and everything else.
+// `thumb` narrows the handler's maxSize and inherits the bucket and everything else.
 const thumbRoute = uploadRoute()({
-  constraints: { maxBytes: '1mb' },
+  constraints: { maxSize: '1mb' },
   onBeforeUpload: ({ file }) => ({ path: p(`thumb/${file.name}`) }),
 });
 
 // Two routes at one endpoint, told apart by ?route=.
 const large = uploadHandler({
   bucket: priv,
-  constraints: { maxBytes: '5gb' },
+  constraints: { maxSize: '5gb' },
   routes: { file: fileRoute, thumb: thumbRoute },
 });
 
@@ -93,7 +93,7 @@ describe('GET', () => {
     expect(etag).toMatch(/^"/);
     expect((await chat.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }))).status).toBe(304);
     expect(await res.json()).toEqual({
-      constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxBytes: 20_000_000 },
+      constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxSize: 20_000_000 },
     });
     const img = uploadHandler({ bucket: pub, constraints: { contentTypes: ['image/*'] }, onBeforeUpload: () => ({ path: 'x' }) });
     const constraints = (await (await img.GET(new Request('https://x'))).json()).constraints;
@@ -104,8 +104,8 @@ describe('GET', () => {
 
   test('a named handler answers per route, and 404s a name it does not mount', async () => {
     const url = (route?: string) => new Request(`https://app.test/api/upload${route ? `?route=${route}` : ''}`);
-    expect((await (await large.GET(url('thumb'))).json()).constraints.maxBytes).toBe(1_000_000);
-    expect((await (await large.GET(url('file'))).json()).constraints.maxBytes).toBe(5_000_000_000);
+    expect((await (await large.GET(url('thumb'))).json()).constraints.maxSize).toBe(1_000_000);
+    expect((await (await large.GET(url('file'))).json()).constraints.maxSize).toBe(5_000_000_000);
     // Never the names it does mount, and never a 500: an unknown route is an ordinary 404.
     const missing = await large.GET(url('nope'));
     expect(missing.status).toBe(404);
@@ -252,7 +252,7 @@ describe('begin', () => {
     const path = p('rollback/receipt.png');
     const refuses = uploadHandler({
       bucket: pub,
-      constraints: { maxBytes: '1mb' },
+      constraints: { maxSize: '1mb' },
       onBeforeUpload: () => ({ path }),
       onUploadComplete: () => {
         throw new BlobError('forbidden', { message: 'the row this file belongs to is gone' });
@@ -338,7 +338,7 @@ describe('begin', () => {
 
   test('routes at one endpoint are told apart by name, in the constraints and in the token', async () => {
     const file = { name: 'shot.bin', type: '', size: 5_000_000 };
-    // thumb narrowed maxBytes to 1mb; file inherited the handler's 5gb. Same handler, same bucket.
+    // thumb narrowed maxSize to 1mb; file inherited the handler's 5gb. Same handler, same bucket.
     expect((await post(large, { phase: 'begin', file }, { route: 'thumb' })).status).toBe(413);
     const begin = (await (await toFile(large, { phase: 'begin', file })).json()) as WireBeginResponse;
     expect(begin.path).toContain('/large/');
@@ -348,11 +348,11 @@ describe('begin', () => {
   });
 
   test('a completion token is bound to its handler, not just to its bucket', async () => {
-    const one = uploadHandler({ bucket: pub, constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: p('routes/one') }) });
-    const two = uploadHandler({ bucket: pub, constraints: { maxBytes: '2mb' }, onBeforeUpload: () => ({ path: p('routes/two') }) });
+    const one = uploadHandler({ bucket: pub, constraints: { maxSize: '1mb' }, onBeforeUpload: () => ({ path: p('routes/one') }) });
+    const two = uploadHandler({ bucket: pub, constraints: { maxSize: '2mb' }, onBeforeUpload: () => ({ path: p('routes/two') }) });
     // Same bucket, same constraints, same (empty) route name: `endpoint` is the only thing separating
     // them, and it has to be enough.
-    const twin = uploadHandler({ bucket: pub, endpoint: '/api/twin', constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: p('routes/twin') }) });
+    const twin = uploadHandler({ bucket: pub, endpoint: '/api/twin', constraints: { maxSize: '1mb' }, onBeforeUpload: () => ({ path: p('routes/twin') }) });
     const begin = (await (await post(one, { phase: 'begin', file: { name: 'a.bin', type: '', size: 10 } })).json()) as WireBeginResponse;
     expect((await post(two, { phase: 'end', completionToken: begin.completionToken })).status).toBe(403);
     expect((await post(twin, { phase: 'end', completionToken: begin.completionToken })).status).toBe(403);
@@ -366,8 +366,8 @@ describe('begin', () => {
   test('onBeforeUpload may narrow constraints, never widen them', async () => {
     const narrow = uploadHandler({
       bucket: pub,
-      constraints: { maxBytes: '1mb', contentTypes: ['image/*'] },
-      onBeforeUpload: ({ file }) => ({ path: p('n'), constraints: file.name === 'wide' ? { maxBytes: '2mb' } : { maxBytes: '10kb', contentTypes: ['image/png'] } }),
+      constraints: { maxSize: '1mb', contentTypes: ['image/*'] },
+      onBeforeUpload: ({ file }) => ({ path: p('n'), constraints: file.name === 'wide' ? { maxSize: '2mb' } : { maxSize: '10kb', contentTypes: ['image/png'] } }),
     });
     let res = await post(narrow, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 20_000 } });
     expect(res.status).toBe(413);

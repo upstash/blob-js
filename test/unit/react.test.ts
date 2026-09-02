@@ -52,7 +52,7 @@ function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
 }
 
-const CONSTRAINTS = { contentTypes: ['image/png'], maxBytes: 1000 };
+const CONSTRAINTS = { contentTypes: ['image/png'], maxSize: 1000 };
 
 const END_BODY = {
   blob: { path: 'p', url: 'https://h/p', versionedUrl: 'https://h/p?v=x', size: 3, contentType: 'image/png', etag: '"x"', uploadedAt: new Date().toISOString() },
@@ -177,7 +177,7 @@ test('constraints land from the route GET, so a page can state the cap it enforc
   const seen: (number | undefined)[] = [];
   const hook = await render(() => {
     const result = useUpload(route);
-    seen.push(result.constraints?.maxBytes);
+    seen.push(result.constraints?.maxSize);
     return result;
   });
   // Undefined until the GET answers: nothing is guessed, so a page renders no number rather than a
@@ -185,7 +185,7 @@ test('constraints land from the route GET, so a page can state the cap it enforc
   expect(seen[0]).toBeUndefined();
   await flush();
   expect(hook.current.constraints).toEqual(CONSTRAINTS);
-  expect(hook.current.constraints?.maxBytes).toBe(1000);
+  expect(hook.current.constraints?.maxSize).toBe(1000);
 });
 
 test('the cached constraints expire, so a deploy that widens them reaches the picker', async () => {
@@ -297,7 +297,7 @@ test('concurrency 1 queues the second file until the first finishes', async () =
   expect(hook.current.uploads[0]!.status).toBe('done');
 });
 
-test('a file over maxBytes is an error record that never reaches the route', async () => {
+test('a file over maxSize is an error record that never reaches the route', async () => {
   const errors: any[] = [];
   const hook = await render(() => useUpload(route, { onError: (u) => errors.push(u) }));
   await flush();
@@ -874,7 +874,7 @@ test('a route with no contentTypes is not asked for the file head', async () => 
   restore.push(
     installRouter({
       [sizeOnly]: {
-        GET: async () => jsonResponse({ constraints: { maxBytes: 1000 } }),
+        GET: async () => jsonResponse({ constraints: { maxSize: 1000 } }),
         POST: async (request: Request) => {
           const body = (await request.json()) as any;
           bodies.push(body);
@@ -889,7 +889,7 @@ test('a route with no contentTypes is not asked for the file head', async () => 
   const hook = await render(() => useUpload(sizeOnly));
   // The constraints have to have landed, or the head is sent because nothing is known yet.
   await flush();
-  expect(hook.current.constraints).toEqual({ maxBytes: 1000 });
+  expect(hook.current.constraints).toEqual({ maxSize: 1000 });
   await act(async () => {
     hook.current.start({ file: png() });
   });

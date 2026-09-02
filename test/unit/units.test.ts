@@ -30,9 +30,9 @@ describe('parseSize', () => {
   });
 
   test('rejects junk and negatives, naming the option', () => {
-    expect(() => parseSize('big', 'maxBytes')).toThrow('maxBytes');
-    expect(() => parseSize('', 'maxBytes')).toThrow('maxBytes');
-    expect(() => parseSize(-1, 'maxBytes')).toThrow('maxBytes');
+    expect(() => parseSize('big', 'maxSize')).toThrow('maxSize');
+    expect(() => parseSize('', 'maxSize')).toThrow('maxSize');
+    expect(() => parseSize(-1, 'maxSize')).toThrow('maxSize');
     expect(() => parseSize(Number.NaN)).toThrow();
   });
 });

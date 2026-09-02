@@ -29,7 +29,7 @@ type RouteInputOf<TSchema> = TSchema extends StandardSchema<any, any> ? InferOut
 /** A route's constraints REPLACE the handler's per key; `null` clears a key the handler set. */
 export interface RouteConstraints {
   contentTypes?: readonly string[] | null;
-  maxBytes?: Size | null;
+  maxSize?: Size | null;
 }
 
 /**
@@ -461,6 +461,6 @@ function mergeConstraints(base: RouteConstraints | undefined, own: RouteConstrai
   const pick = <T>(fallback: T | null | undefined, value: T | null | undefined): T | undefined => (value === undefined ? (fallback ?? undefined) : (value ?? undefined));
   return {
     contentTypes: pick(base?.contentTypes, own?.contentTypes),
-    maxBytes: pick(base?.maxBytes, own?.maxBytes),
+    maxSize: pick(base?.maxSize, own?.maxSize),
   };
 }

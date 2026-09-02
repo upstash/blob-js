@@ -32,13 +32,13 @@ restore.push(
       POST: guard(async (req) => {
         const file = (await req.formData()).get('file');
         if (!(file instanceof File)) return Response.json({ error: 'file field required' }, { status: 400 });
-        const blob = await pub.put(p('avatar/42'), file, { contentTypes: ['image/png'], maxBytes: '2mb', cache: '1m' });
+        const blob = await pub.put(p('avatar/42'), file, { contentTypes: ['image/png'], maxSize: '2mb', cache: '1m' });
         return Response.json({ url: blob.versionedUrl });
       }),
     },
     '/api/avatar/raw': {
       POST: guard(async (req) => {
-        const blob = await pub.put(p('avatar/42'), req, { contentTypes: ['image/png'], maxBytes: '2mb' });
+        const blob = await pub.put(p('avatar/42'), req, { contentTypes: ['image/png'], maxSize: '2mb' });
         return Response.json({ url: blob.versionedUrl });
       }),
     },

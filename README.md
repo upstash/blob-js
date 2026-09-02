@@ -30,7 +30,7 @@ await bucket.updateJson<Settings>('u/7.json', (prev) => ({ ...(prev ?? {}), them
 - `get` and `info` throw `not_found` rather than returning `undefined`; `list` returns keys, sizes,
   etags and urls, without metadata. `cursor` is set only while more remains.
 - A body over 16 MB goes up as multipart; `{ multipart: '100mb' | true | false }` moves the line.
-  `overwrite: false` and `ifUnchanged` are single-PUT only.
+  `allowOverwrite: false` and `ifUnchanged` are single-PUT only.
 - `updateJson` is a compare-and-set loop (`If-Match`, or `If-None-Match: *` when nothing is there),
   retried on conflict up to five times.
 - `move` is a copy plus a delete: a failed delete throws `move_left_a_copy`, destination kept.
@@ -79,7 +79,7 @@ import 'server-only';
 import { BlobError, uniquePath, uploadHandler } from '@upstash/blob';
 
 export const uploads = uploadHandler({
-  constraints: { maxBytes: '20mb', contentTypes: ['image/*', 'application/pdf'] },
+  constraints: { maxSize: '20mb', contentTypes: ['image/*', 'application/pdf'] },
 
   onBeforeUpload: async ({ request, file }) => {
     const user = await getUser(request);

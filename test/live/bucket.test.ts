@@ -44,7 +44,7 @@ describe('put', () => {
 
   test('File carries type and size; sniff accepts matching bytes', async () => {
     const file = new File([PNG as BlobPart], 'x.png', { type: 'image/png' });
-    const blob = await pub.put(p('x.png'), file, { contentTypes: ['image/*'], maxBytes: '2mb' });
+    const blob = await pub.put(p('x.png'), file, { contentTypes: ['image/*'], maxSize: '2mb' });
     expect(blob.size).toBe(PNG.byteLength);
     expect((await pub.info(p('x.png'))).contentType).toBe('image/png');
   });
@@ -61,16 +61,16 @@ describe('put', () => {
     expect(await pub.exists(p('lie.png'))).toBe(false);
   });
 
-  test('maxBytes rejects up front and while streaming', async () => {
-    await expect(pub.put(p('big'), bytes(3000), { maxBytes: '2kb' })).rejects.toMatchObject({ code: 'too_large', status: 413 });
+  test('maxSize rejects up front and while streaming', async () => {
+    await expect(pub.put(p('big'), bytes(3000), { maxSize: '2kb' })).rejects.toMatchObject({ code: 'too_large', status: 413 });
     const lying = new Request('https://x/', { method: 'POST', body: bytes(3000), headers: { 'content-length': '1000', 'content-type': 'application/octet-stream' } });
-    await expect(pub.put(p('lying'), lying, { maxBytes: '2kb' })).rejects.toMatchObject({ code: 'too_large' });
+    await expect(pub.put(p('lying'), lying, { maxSize: '2kb' })).rejects.toMatchObject({ code: 'too_large' });
   });
 
   test('Request body streams with content-length; empty body and unknown length are errors', async () => {
     const body = bytes(70_000, 7);
     const req = new Request('https://x/', { method: 'POST', body, headers: { 'content-type': 'application/octet-stream' } });
-    const blob = await pub.put(p('req.bin'), req, { contentTypes: ['application/octet-stream'], maxBytes: '1mb' });
+    const blob = await pub.put(p('req.bin'), req, { contentTypes: ['application/octet-stream'], maxSize: '1mb' });
     expect(blob.size).toBe(70_000);
     const back = new Uint8Array(await new Response((await pub.get(p('req.bin'))).body).arrayBuffer());
     expect(back).toEqual(body);
@@ -80,19 +80,19 @@ describe('put', () => {
     await expect(pub.put(p('nolen'), stream)).rejects.toMatchObject({ code: 'length_required', status: 411 });
   });
 
-  test('unknown length buffers under maxBytes; explicit size streams', async () => {
+  test('unknown length buffers under maxSize; explicit size streams', async () => {
     const data = bytes(5000, 3);
     const chunked = new Request('https://x/', { method: 'POST', body: new Blob([data]).stream(), duplex: 'half' } as RequestInit);
     chunked.headers.delete('content-length');
-    const blob = await pub.put(p('chunked'), chunked, { maxBytes: '10kb' });
+    const blob = await pub.put(p('chunked'), chunked, { maxSize: '10kb' });
     expect(blob.size).toBe(5000);
     const sized = await pub.put(p('sized'), new Blob([data]).stream(), { size: 5000 });
     expect(sized.size).toBe(5000);
   });
 
-  test('overwrite:false and ifUnchanged', async () => {
+  test('allowOverwrite: false and ifUnchanged', async () => {
     const first = await pub.put(p('once'), 'one');
-    const err = await pub.put(p('once'), 'two', { overwrite: false }).catch((e) => e);
+    const err = await pub.put(p('once'), 'two', { allowOverwrite: false }).catch((e) => e);
     expect(BlobError.is(err)).toBe(true);
     expect(err.code).toBe('already_exists');
     expect(err.status).toBe(409);
@@ -173,9 +173,9 @@ describe('read', () => {
     expect(info.metadata.owner).toBe('u7');
   });
 
-  test('signedUploadUrl with overwrite:false refuses a path that is already taken', async () => {
+  test('signedUploadUrl with allowOverwrite: false refuses a path that is already taken', async () => {
     await priv.put(p('taken.txt'), 'first', { contentType: 'text/plain' });
-    const up = await priv.signedUploadUrl(p('taken.txt'), { contentType: 'text/plain', overwrite: false });
+    const up = await priv.signedUploadUrl(p('taken.txt'), { contentType: 'text/plain', allowOverwrite: false });
     const res = await fetch(up.url, { method: 'PUT', headers: up.headers, body: 'second' });
     expect(res.status).toBe(412);
     expect(await (await priv.get(p('taken.txt'))).body.getReader().read().then((r) => new TextDecoder().decode(r.value))).toBe('first');
@@ -206,9 +206,9 @@ describe('large put', () => {
     expect((await priv.info(p('multipart/big.bin'))).contentType).toBe('application/octet-stream');
 
     // A conditional write cannot be multipart, so it stays one PUT and still enforces the condition.
-    const once = await priv.put(p('multipart/cond.bin'), data, { overwrite: false });
+    const once = await priv.put(p('multipart/cond.bin'), data, { allowOverwrite: false });
     expect(once.etag).not.toMatch(/-\d+"$/);
-    await expect(priv.put(p('multipart/cond.bin'), data, { overwrite: false })).rejects.toMatchObject({ code: 'already_exists' });
+    await expect(priv.put(p('multipart/cond.bin'), data, { allowOverwrite: false })).rejects.toMatchObject({ code: 'already_exists' });
   }, 300_000);
 });
 

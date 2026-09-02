@@ -48,7 +48,7 @@ describe('status', () => {
 describe('message folds the hint in', () => {
   test('so e.message is the whole display text', () => {
     const e = new BlobError('length_required');
-    expect(e.hint).toBe('pass { size } or { maxBytes } so the length is known before the first byte');
+    expect(e.hint).toBe('pass { size } or { maxSize } so the length is known before the first byte');
     expect(e.message).toBe(`Length required (${e.hint})`);
   });
 
@@ -58,18 +58,18 @@ describe('message folds the hint in', () => {
   });
 
   test('a message that already carries the hint is not doubled', () => {
-    const e = new BlobError('length_required', { message: 'pass { size } or { maxBytes } so the length is known before the first byte' });
-    expect(e.message).toBe('Pass { size } or { maxBytes } so the length is known before the first byte');
+    const e = new BlobError('length_required', { message: 'pass { size } or { maxSize } so the length is known before the first byte' });
+    expect(e.message).toBe('Pass { size } or { maxSize } so the length is known before the first byte');
   });
 
   test('a bare string is the message', () => {
     expect(new BlobError('forbidden', 'not your thread').message).toBe('Not your thread');
   });
 
-  test('maxBytes rejections do not carry the platform body cap hint', () => {
-    const e = new BlobError('too_large', { message: 'body is 3000 bytes, over maxBytes (2000)' });
+  test('maxSize rejections do not carry the platform body cap hint', () => {
+    const e = new BlobError('too_large', { message: 'body is 3000 bytes, over maxSize (2000)' });
     expect(e.hint).toBeUndefined();
-    expect(e.message).toBe('Body is 3000 bytes, over maxBytes (2000)');
+    expect(e.message).toBe('Body is 3000 bytes, over maxSize (2000)');
   });
 });
 
@@ -84,7 +84,7 @@ describe('sentence case', () => {
 
   test('a caller message is raised too, and the hint it folds in is not', () => {
     expect(new BlobError('forbidden', 'not your thread').message).toBe('Not your thread');
-    expect(new BlobError('length_required').message).toBe('Length required (pass { size } or { maxBytes } so the length is known before the first byte)');
+    expect(new BlobError('length_required').message).toBe('Length required (pass { size } or { maxSize } so the length is known before the first byte)');
   });
 
   test('an identifier at the start keeps its case', () => {

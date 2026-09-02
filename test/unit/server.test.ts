@@ -465,7 +465,7 @@ describe('multipart put', () => {
   test('a conditional write stays a single PUT, and asking for both is refused', async () => {
     resetCredentialCaches();
     const script = scriptMultipart();
-    const blob = await bucket().put('big.bin', new Uint8Array(17_000_000), { overwrite: false });
+    const blob = await bucket().put('big.bin', new Uint8Array(17_000_000), { allowOverwrite: false });
     expect(script.parts).toEqual([]);
     expect(blob.etag).toBe('"single"');
     await expect(bucket().put('big.bin', 'x', { multipart: true, ifUnchanged: '"e"' })).rejects.toMatchObject({ code: 'invalid_input' });
@@ -512,26 +512,26 @@ describe('uploadHandler: the direct transport', () => {
     resetCredentialCaches();
     r2Handler = beginR2;
     const b = bucket();
-    const avatars = uploadHandler({ bucket: b, constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'avatars/1.png' }) });
-    const invoices = uploadHandler({ bucket: b, constraints: { maxBytes: '9mb' }, onBeforeUpload: () => ({ path: 'invoices/1.pdf' }) });
+    const avatars = uploadHandler({ bucket: b, constraints: { maxSize: '1mb' }, onBeforeUpload: () => ({ path: 'avatars/1.png' }) });
+    const invoices = uploadHandler({ bucket: b, constraints: { maxSize: '9mb' }, onBeforeUpload: () => ({ path: 'invoices/1.pdf' }) });
     // Same constraints, different endpoint: two handlers on one bucket do not share each other's tokens.
-    const twin = uploadHandler({ bucket: b, endpoint: '/api/twin', constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
+    const twin = uploadHandler({ bucket: b, endpoint: '/api/twin', constraints: { maxSize: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
 
     const started = await begin(avatars, { name: 'a.png', type: 'image/png', size: 10 });
     expect((await post(invoices, { phase: 'end', completionToken: started.completionToken })).status).toBe(403);
     expect((await post(twin, { phase: 'end', completionToken: started.completionToken })).status).toBe(403);
-    expect(deriveRouteId({ contentTypes: undefined, maxBytes: 1 }, false)).not.toBe(deriveRouteId({ contentTypes: undefined, maxBytes: 2 }, false));
-    expect(deriveRouteId({ contentTypes: ['image/png'], maxBytes: 1 }, false)).toBe(deriveRouteId({ contentTypes: ['image/png'], maxBytes: 1 }, false));
+    expect(deriveRouteId({ contentTypes: undefined, maxSize: 1 }, false)).not.toBe(deriveRouteId({ contentTypes: undefined, maxSize: 2 }, false));
+    expect(deriveRouteId({ contentTypes: ['image/png'], maxSize: 1 }, false)).toBe(deriveRouteId({ contentTypes: ['image/png'], maxSize: 1 }, false));
   });
 
   test('the constraints are revalidated, not cached forever', async () => {
     resetCredentialCaches();
-    const route = uploadHandler({ bucket: bucket(), constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
+    const route = uploadHandler({ bucket: bucket(), constraints: { maxSize: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
     const res = await route.GET(new Request('https://app.test/api/upload'));
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
     const etag = res.headers.get('etag')!;
     expect(etag).toMatch(/^"[a-z0-9]+"$/);
-    expect(await res.json()).toEqual({ constraints: { maxBytes: 1_000_000 } });
+    expect(await res.json()).toEqual({ constraints: { maxSize: 1_000_000 } });
     const again = await route.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }));
     expect(again.status).toBe(304);
   });
@@ -566,11 +566,11 @@ describe('uploadHandler: the direct transport', () => {
     resetCredentialCaches();
     r2Handler = beginR2;
     const b = bucket();
-    const under = uploadHandler({ bucket: b, constraints: { maxBytes: '5gb' }, onBeforeUpload: () => ({ path: 'a.bin' }) });
+    const under = uploadHandler({ bucket: b, constraints: { maxSize: '5gb' }, onBeforeUpload: () => ({ path: 'a.bin' }) });
     expect((await begin(under, { name: 'a.bin', type: '', size: 16_000_000 })).upload.multipart).toBe(false);
     expect((await begin(under, { name: 'a.bin', type: '', size: 16_000_001 })).upload.multipart).toBe(true);
 
-    const moved = uploadHandler({ bucket: b, constraints: { maxBytes: '5gb' }, multipart: '100mb', onBeforeUpload: () => ({ path: 'a.bin' }) });
+    const moved = uploadHandler({ bucket: b, constraints: { maxSize: '5gb' }, multipart: '100mb', onBeforeUpload: () => ({ path: 'a.bin' }) });
     expect((await begin(moved, { name: 'a.bin', type: '', size: 99_000_000 })).upload.multipart).toBe(false);
     expect((await begin(moved, { name: 'a.bin', type: '', size: 100_000_001 })).upload.multipart).toBe(true);
 
@@ -725,7 +725,7 @@ describe('uploadHandler: the direct transport', () => {
     const seen: unknown[] = [];
     const route = uploadHandler({
       bucket: bucket(),
-      constraints: { maxBytes: '5gb' },
+      constraints: { maxSize: '5gb' },
       onBeforeUpload: () => ({ path: 'big.bin', metadata: { rowId: '7' } }),
       onError: ({ error, path, metadata }) => {
         seen.push({ code: (error as BlobError).code, path, metadata });

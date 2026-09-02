@@ -62,11 +62,11 @@ const DEFAULT_MESSAGE: Record<BlobErrorCode, string> = {
 
 const DEFAULT_HINT: Partial<Record<BlobErrorCode, string>> = {
   signature_mismatch: 'a 403 from R2 usually means the body length or type differs from the signature',
-  length_required: 'pass { size } or { maxBytes } so the length is known before the first byte',
+  length_required: 'pass { size } or { maxSize } so the length is known before the first byte',
 };
 
 /**
- * For the 413 a proxied upload gets from the platform, never from maxBytes: the body never reached
+ * For the 413 a proxied upload gets from the platform, never from maxSize: the body never reached
  * the route, so the error carries no code of its own. Doc-sourced, not measured.
  */
 export const PLATFORM_BODY_CAP_HINT = 'Vercel caps a serverless request body at 4.5MB, AWS Lambda at 6MB, Cloudflare at 100MB on the free plan';
