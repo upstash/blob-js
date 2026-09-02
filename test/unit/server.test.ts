@@ -336,27 +336,38 @@ describe('bucket guards', () => {
     expect((await bucket().put('a.bin', 'x')).contentType).toBe('application/octet-stream');
   });
 
-  test('publicUrl is local, encoded, and absent for a private bucket', () => {
+  test('publicUrl is encoded, fetches credentials once, and is absent for a private bucket', async () => {
     resetCredentialCaches();
-    const pub = new Bucket({ token: TOKEN, visibility: 'public' });
-    expect(pub.publicUrl('reports/Q3 final.pdf')).toMatch(/\/reports\/Q3%20final\.pdf$/);
-    expect(new Bucket({ token: TOKEN, visibility: 'private' }).publicUrl('a.txt')).toBeUndefined();
-    expect(mints).toBe(0);
-  });
-
-  test('a private bucket has no public url', async () => {
-    resetCredentialCaches();
-    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
-    const blob = await new Bucket({ token: TOKEN, visibility: 'private' }).put('a.txt', 'x');
-    expect(blob.url).toBeUndefined();
-    expect(blob.versionedUrl).toBeUndefined();
-    expect(blob.path).toBe('a.txt');
+    const pub = new Bucket({ token: TOKEN });
+    expect(await pub.publicUrl('reports/Q3 final.pdf')).toMatch(/\/reports\/Q3%20final\.pdf$/);
+    expect(await pub.publicUrl('b.txt')).toMatch(/\/b\.txt$/);
+    expect(mints).toBe(1);
 
     resetCredentialCaches();
     mintResponse = () => Response.json(creds({ visibility: 'private' }));
-    // The credentials response wins over the option: the bucket knows what it is.
-    const declaredPublic = await new Bucket({ token: TOKEN, visibility: 'public' }).put('a.txt', 'x');
-    expect(declaredPublic.url).toBeUndefined();
+    expect(await new Bucket({ token: TOKEN }).publicUrl('a.txt')).toBeUndefined();
+  });
+
+  test('a private bucket has no public url: the backend says so, not the caller', async () => {
+    resetCredentialCaches();
+    mintResponse = () => Response.json(creds({ visibility: 'private' }));
+    let stored: string | null = null;
+    r2Handler = (req) => {
+      stored = req.headers.get('cache-control');
+      return new Response('', { status: 200, headers: { etag: '"e"' } });
+    };
+    const blob = await new Bucket({ token: TOKEN }).put('a.txt', 'x');
+    expect(blob.url).toBeUndefined();
+    expect(blob.versionedUrl).toBeUndefined();
+    expect(blob.path).toBe('a.txt');
+    // Objects only a signed request may read must not sit in shared caches.
+    expect(stored as string | null).toBe('private, max-age=3600');
+
+    // No visibility in the response, as before the backend shipped it: public.
+    resetCredentialCaches();
+    mintResponse = () => Response.json(creds());
+    const legacy = await new Bucket({ token: TOKEN }).put('a.txt', 'x');
+    expect(legacy.url).toMatch(/\/a\.txt$/);
   });
 });
 

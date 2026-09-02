@@ -48,10 +48,11 @@ await fetch(upload.url, { method: 'PUT', headers: upload.headers, body });
 
 Links are signed with the bucket's short-lived credential and cannot outlive it, so `expiresAt` is
 the answer per link (default read: 5 minutes, capped). `headers` on an upload URL are pinned into
-the signature. `bucket.publicUrl(path)` needs no request and is `undefined` on a private bucket.
+the signature. `bucket.publicUrl(path)` is `undefined` on a private bucket.
 
-`new Bucket({ token, visibility: 'private' })` drops `url` and `versionedUrl` everywhere; reads go
-through `signedReadUrl()`.
+Whether a bucket is private is decided in the console, not in code: the SDK learns it from the
+backend on the first request, and a private bucket has no `url` or `versionedUrl` on any
+BlobObject. Reads there go through `signedReadUrl()`.
 
 ### Incomplete uploads
 
@@ -114,7 +115,7 @@ const { start, upload, accept } = useUpload();
   the user reaches `onUploadComplete` and `onError` too, and how several routes share one auth check.
   With a single route, authorizing in `onBeforeUpload` and carrying an id in `metadata` is shorter.
 - No `bucket` reads `UPSTASH_BLOB_TOKEN`, like `Bucket.fromEnv()`. Pass `bucket:` when the token is
-  under another variable, the bucket needs `cache` or `visibility`, or you are on Workers, where the
+  under another variable, the bucket needs `cache`, or you are on Workers, where the
   token only exists on the request's `env`.
 - `GET` serves the constraints with an ETag and `max-age=60`, for `accept` and an early refusal. The
   server is authoritative.
