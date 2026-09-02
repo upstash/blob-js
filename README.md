@@ -50,8 +50,9 @@ Links are signed with the bucket's short-lived credential and cannot outlive it,
 the answer per link (default read: 5 minutes, capped). `headers` on an upload URL are pinned into
 the signature. `bucket.publicUrl(path)` needs no request and is `undefined` on a private bucket.
 
-`new Bucket({ token, visibility: 'private' })` drops `url` and `versionedUrl` everywhere; reads go
-through `signedReadUrl()`.
+`Bucket.fromEnv({ visibility: 'private' })`, or `new Bucket({ token, visibility: 'private' })`, drops
+`url` and `versionedUrl` everywhere; reads go through `signedReadUrl()`. `fromEnv` also takes the
+variable name first: `Bucket.fromEnv('MY_BUCKET_TOKEN', { visibility: 'private' })`.
 
 ### Incomplete uploads
 

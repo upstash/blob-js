@@ -173,6 +173,9 @@ function safeContentType(type: string): string {
 /** The variable `Bucket.fromEnv()` and an `uploadHandler` with no bucket read. */
 export const TOKEN_ENV = 'UPSTASH_BLOB_TOKEN';
 
+/** What `Bucket.fromEnv` accepts: the constructor options, minus the token it reads itself. */
+export type FromEnvOptions = Omit<BucketOptions, 'token'>;
+
 /** The token in the environment, or undefined -- including on Workers, where there is no process. */
 export function tokenFromEnv(name: string = TOKEN_ENV): string | undefined {
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
@@ -200,10 +203,16 @@ export class Bucket {
     INTERNALS.set(this, this.r2);
   }
 
-  static fromEnv(name = TOKEN_ENV, options: Omit<BucketOptions, 'token'> = {}): Bucket {
+  /** Reads `UPSTASH_BLOB_TOKEN`; the options are the constructor's, minus the token. */
+  static fromEnv(options?: FromEnvOptions): Bucket;
+  /** Reads the token from `name` instead of `UPSTASH_BLOB_TOKEN`. */
+  static fromEnv(name: string, options?: FromEnvOptions): Bucket;
+  static fromEnv(nameOrOptions: string | FromEnvOptions = TOKEN_ENV, options: FromEnvOptions = {}): Bucket {
+    const name = typeof nameOrOptions === 'string' ? nameOrOptions : TOKEN_ENV;
+    const opts = typeof nameOrOptions === 'string' ? options : nameOrOptions;
     const token = tokenFromEnv(name);
     if (!token) throw new TypeError(`Bucket.fromEnv: ${name} is not set (on Workers, pass it explicitly: new Bucket({ token: env.${name} }))`);
-    return new Bucket({ ...options, token });
+    return new Bucket({ ...opts, token });
   }
 
   /** The public object URL, computed locally from the bucket token. Undefined for a private bucket. */
