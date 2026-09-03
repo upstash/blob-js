@@ -32,7 +32,7 @@ await bucket.updateJson<Settings>('u/7.json', (prev) => ({ ...(prev ?? {}), them
 - A body over 16 MB goes up as multipart; `{ multipart: '100mb' | true | false }` moves the line.
   `allowOverwrite: false` and `ifUnchanged` are single-PUT only.
 - `updateJson` is a compare-and-set loop (`If-Match`, or `If-None-Match: *` when nothing is there),
-  retried on conflict with a short jittered pause, `maxAttempts` times (default 6).
+  retried on conflict with a short jittered pause, up to `maxAttempts` times (default 6).
 - `copy` and `move` take `{ contentType, cache, metadata }`; whatever is not given is carried over
   from the source. Storage has no rename, so `move` is a copy plus a delete: a failed delete throws
   `move_left_a_copy`, destination kept.

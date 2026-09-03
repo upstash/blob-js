@@ -535,7 +535,7 @@ export class Bucket {
       // REPLACE rewrites content-type, cache-control and metadata as one; storage cannot change one
       // and keep the rest, so the rest is read off the source and sent back as it was.
       const src = await this.r2.head(from);
-      if (!src) throw new BlobError('not_found', { message: `${from} was not found` });
+      if (!src) throw new BlobError('not_found', { message: `${from} not found` });
       headers['x-amz-metadata-directive'] = 'REPLACE';
       headers['content-type'] = options.contentType ?? src.contentType;
       headers['cache-control'] =
