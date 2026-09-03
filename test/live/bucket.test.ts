@@ -253,6 +253,20 @@ describe('write verbs', () => {
     expect(moved.path).toBe(p('moved.txt'));
     expect(await priv.exists(p('src.txt'))).toBe(false);
     await expect(priv.copy(p('missing'), p('x'))).rejects.toMatchObject({ code: 'not_found' });
+    await expect(priv.copy(p('missing'), p('x'), { cache: '1m' })).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  test('copy options: one given, the other two carried over from the source', async () => {
+    await priv.put(p('c/src.txt'), 'copyme', { contentType: 'text/plain', metadata: { origin: 'src' } });
+    await priv.copy(p('c/src.txt'), p('c/typed.md'), { contentType: 'text/markdown' });
+    const typed = await priv.info(p('c/typed.md'));
+    expect(typed.contentType).toBe('text/markdown');
+    expect(typed.metadata).toEqual({ origin: 'src' });
+    await priv.move(p('c/typed.md'), p('c/owned.md'), { metadata: { owner: 'u7' } });
+    const owned = await priv.info(p('c/owned.md'));
+    expect(owned.contentType).toBe('text/markdown');
+    expect(owned.metadata).toEqual({ owner: 'u7' });
+    expect(await priv.exists(p('c/typed.md'))).toBe(false);
   });
 
   test('del: one path, a list, a prefix; partial_delete carries failed', async () => {

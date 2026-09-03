@@ -22,7 +22,7 @@ await bucket.info('avatars/me.png');         // same record, no bytes
 await bucket.exists('avatars/me.png');       // false instead of a throw
 await bucket.list({ prefix: 'avatars/', limit: 100 });   // { blobs, cursor }
 await bucket.copy('tmp/9f3c', 'avatars/7.png');
-await bucket.move('tmp/9f3c', 'avatars/7.png');
+await bucket.move('tmp/9f3c', 'avatars/7.png', { contentType: 'image/png' });
 await bucket.del('a.png');                   // or ['a.png', 'b.png'], or { prefix: 'tmp/' }
 await bucket.updateJson<Settings>('u/7.json', (prev) => ({ ...(prev ?? {}), theme: 'dark' }));
 ```
@@ -32,8 +32,10 @@ await bucket.updateJson<Settings>('u/7.json', (prev) => ({ ...(prev ?? {}), them
 - A body over 16 MB goes up as multipart; `{ multipart: '100mb' | true | false }` moves the line.
   `allowOverwrite: false` and `ifUnchanged` are single-PUT only.
 - `updateJson` is a compare-and-set loop (`If-Match`, or `If-None-Match: *` when nothing is there),
-  retried on conflict up to five times.
-- `move` is a copy plus a delete: a failed delete throws `move_left_a_copy`, destination kept.
+  retried on conflict with a short jittered pause, `maxAttempts` times (default 6).
+- `copy` and `move` take `{ contentType, cache, metadata }`; whatever is not given is carried over
+  from the source. Storage has no rename, so `move` is a copy plus a delete: a failed delete throws
+  `move_left_a_copy`, destination kept.
 - `del({ prefix: '' })` needs `all: true`. A partial array delete throws `partial_delete`.
 - Metadata is printable ASCII; anything else is refused with `invalid_input`.
 - `cache` takes `'immutable'`, `'revalidate'`, `'no-store'`, a duration, or a verbatim header.

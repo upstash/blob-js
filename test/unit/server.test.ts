@@ -1059,3 +1059,86 @@ describe('uploadHandler: the direct transport', () => {
     expect(past.parts).toEqual([]);
   });
 });
+
+describe('copy and move', () => {
+  const copied = '<CopyObjectResult><ETag>"e"</ETag></CopyObjectResult>';
+  const srcHead = { 'content-length': '6', etag: '"e"', 'content-type': 'text/plain', 'cache-control': 'max-age=60', 'x-amz-meta-origin': 'src' };
+  const handler = (c: Call) => {
+    if (c.method === 'HEAD' && c.url.endsWith('/a.txt')) return new Response('', { status: 200, headers: srcHead });
+    if (c.method === 'HEAD') return new Response('', { status: 200, headers: { 'content-length': '6', etag: '"e"' } });
+    return new Response(c.method === 'PUT' ? copied : '', { status: 200 });
+  };
+
+  test('without options it is a plain COPY: the source is neither read nor described', async () => {
+    resetCredentialCaches();
+    r2Handler = handler;
+    await bucket().copy('a.txt', 'b.txt');
+    const put = r2Calls().find((c) => c.method === 'PUT')!;
+    expect(put.headers.get('x-amz-copy-source')).toBe('/bkt/a.txt');
+    expect(put.headers.has('x-amz-metadata-directive')).toBe(false);
+    expect(put.headers.has('content-type')).toBe(false);
+    expect(r2Calls().map((c) => c.method)).toEqual(['PUT', 'HEAD']);
+  });
+
+  test('one option switches to REPLACE and carries the other two over from the source', async () => {
+    resetCredentialCaches();
+    r2Handler = handler;
+    await bucket().copy('a.txt', 'b.txt', { contentType: 'text/markdown' });
+    const put = r2Calls().find((c) => c.method === 'PUT')!;
+    expect(put.headers.get('x-amz-metadata-directive')).toBe('REPLACE');
+    expect(put.headers.get('content-type')).toBe('text/markdown');
+    expect(put.headers.get('cache-control')).toBe('max-age=60');
+    expect(put.headers.get('x-amz-meta-origin')).toBe('src');
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'PUT', 'HEAD']);
+  });
+
+  test('metadata replaces the source metadata outright, cache is rendered like put', async () => {
+    resetCredentialCaches();
+    r2Handler = handler;
+    await bucket().copy('a.txt', 'b.txt', { metadata: { owner: 'u7' }, cache: 'no-store' });
+    const put = r2Calls().find((c) => c.method === 'PUT')!;
+    expect(put.headers.get('x-amz-meta-owner')).toBe('u7');
+    expect(put.headers.has('x-amz-meta-origin')).toBe(false);
+    expect(put.headers.get('content-type')).toBe('text/plain');
+    expect(put.headers.get('cache-control')).toContain('no-store');
+  });
+
+  test('a missing source is not_found before any copy is sent', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('', { status: 404 });
+    await expect(bucket().copy('a.txt', 'b.txt', { cache: '1m' })).rejects.toMatchObject({ code: 'not_found' });
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD']);
+  });
+
+  test('move passes the options through, then deletes the source', async () => {
+    resetCredentialCaches();
+    r2Handler = handler;
+    await bucket().move('a.txt', 'b.txt', { contentType: 'text/markdown' });
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'PUT', 'HEAD', 'DELETE']);
+    expect(r2Calls().find((c) => c.method === 'PUT')!.headers.get('content-type')).toBe('text/markdown');
+  });
+});
+
+describe('updateJson', () => {
+  test('maxAttempts bounds the loop and the final conflict names the count', async () => {
+    resetCredentialCaches();
+    r2Handler = (c) => {
+      if (c.method === 'GET') return new Response('{"a":1}', { status: 200, headers: { etag: '"e1"', 'content-type': 'application/json', 'content-length': '7' } });
+      return new Response('<Error><Code>PreconditionFailed</Code></Error>', { status: 412 });
+    };
+    const e = await bucket()
+      .updateJson('s.json', (p) => p, { maxAttempts: 2 })
+      .catch((x) => x);
+    expect(e.code).toBe('conflict');
+    expect(e.message).toContain('2 attempts');
+    expect(e.cause?.code).toBe('conflict');
+    expect(r2Calls().filter((c) => c.method === 'PUT').length).toBe(2);
+  });
+
+  test('maxAttempts must be a positive integer', async () => {
+    resetCredentialCaches();
+    await expect(bucket().updateJson('s.json', (p) => p, { maxAttempts: 0 })).rejects.toMatchObject({ code: 'invalid_input' });
+    await expect(bucket().updateJson('s.json', (p) => p, { maxAttempts: 1.5 })).rejects.toMatchObject({ code: 'invalid_input' });
+    expect(r2Calls().length).toBe(0);
+  });
+});

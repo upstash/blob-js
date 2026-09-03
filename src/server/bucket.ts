@@ -4,7 +4,7 @@ import { cacheControl, formatBytes, parseDuration, parseSize, type CacheOption, 
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
 import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
-import { errorFromBody, errorFromResponse, headFromHeaders, R2, type MultipartUpload } from './r2.ts';
+import { backoff, errorFromBody, errorFromResponse, headFromHeaders, R2, sleep, type MultipartUpload } from './r2.ts';
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
 
@@ -135,10 +135,26 @@ export interface S3Config {
 
 export type DeleteTarget = string | string[] | { prefix: string; all?: boolean };
 
+/**
+ * Without options the destination carries the source's content type, cache-control and metadata.
+ * Storage rewrites the three together or not at all, so when any one is given the other two are
+ * read off the source first and sent back unchanged.
+ */
+export interface CopyOptions {
+  /** What the destination is stored as. Default: the source's. */
+  contentType?: string;
+  /** The `Cache-Control` the destination is stored with. Default: the source's. @see CacheOption */
+  cache?: CacheOption;
+  /** Replaces the source's metadata outright rather than merging into it. Default: the source's. */
+  metadata?: Record<string, string>;
+}
+
 export interface UpdateJsonOptions {
   /** The `Cache-Control` the rewritten object is stored with. @see CacheOption */
   cache?: CacheOption;
   metadata?: Record<string, string>;
+  /** How many times to read, transform and write before giving up with 'conflict'. Default 6. */
+  maxAttempts?: number;
 }
 
 /**
@@ -512,9 +528,21 @@ export class Bucket {
 
   /* ---------------------------------------------------------- copy/move */
 
-  async copy(from: string, to: string): Promise<BlobObject> {
+  async copy(from: string, to: string, options: CopyOptions = {}): Promise<BlobObject> {
     const creds = await this.r2.credentials();
-    const res = await this.r2.fetch({ method: 'PUT', path: to, headers: { 'x-amz-copy-source': `/${creds.bucket}/${encodeKey(from)}` } });
+    const headers: Record<string, string> = { 'x-amz-copy-source': `/${creds.bucket}/${encodeKey(from)}` };
+    if (options.contentType !== undefined || options.cache !== undefined || options.metadata !== undefined) {
+      // REPLACE rewrites content-type, cache-control and metadata as one; storage cannot change one
+      // and keep the rest, so the rest is read off the source and sent back as it was.
+      const src = await this.r2.head(from);
+      if (!src) throw new BlobError('not_found', { message: `${from} was not found` });
+      headers['x-amz-metadata-directive'] = 'REPLACE';
+      headers['content-type'] = options.contentType ?? src.contentType;
+      headers['cache-control'] =
+        options.cache !== undefined ? cacheControl(options.cache, this.r2.visibility()) : (src.cacheControl ?? cacheControl(this.defaultCache, this.r2.visibility()));
+      Object.assign(headers, metaHeaders(options.metadata ?? src.metadata));
+    }
+    const res = await this.r2.fetch({ method: 'PUT', path: to, headers });
     const xml = await res.text();
     if (!res.ok) throw errorFromBody(res.status, xml);
     const code = tag(xml, 'Code');
@@ -524,8 +552,9 @@ export class Bucket {
     return this.r2.blobObject(to, head.size, head.etag, head.uploadedAt);
   }
 
-  async move(from: string, to: string): Promise<BlobObject> {
-    const blob = await this.copy(from, to);
+  /** A copy followed by a delete of the source: storage has no rename. Same options as `copy`. */
+  async move(from: string, to: string, options: CopyOptions = {}): Promise<BlobObject> {
+    const blob = await this.copy(from, to, options);
     try {
       await this.del(from);
     } catch (e) {
@@ -534,10 +563,17 @@ export class Bucket {
     return blob;
   }
 
-  /** Read-modify-write over a JSON document; retried on 'conflict' up to 5 times. Existing metadata is kept unless options.metadata is given. */
+  /**
+   * Read-modify-write over a JSON document: If-Match on the etag that was read, or If-None-Match: *
+   * when nothing was there. A write that lost the race is re-read and re-run after a short jittered
+   * pause, up to `maxAttempts` (default 6) times; then it throws 'conflict'. Existing metadata is
+   * kept unless options.metadata is given.
+   */
   async updateJson<T = unknown>(path: string, fn: (prev: T | null) => T | Promise<T>, options: UpdateJsonOptions = {}): Promise<BlobObject> {
+    const attempts = options.maxAttempts ?? 6;
+    if (!Number.isInteger(attempts) || attempts < 1) throw new BlobError('invalid_input', { message: 'maxAttempts must be a positive integer' });
     let lastError: BlobError | undefined;
-    for (let attempt = 0; attempt < 6; attempt++) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
       let prev: T | null = null;
       let etag: string | undefined;
       let metadata: Record<string, string> | undefined;
@@ -565,9 +601,10 @@ export class Bucket {
       } catch (e) {
         if (!BlobError.is(e) || (e.code !== 'conflict' && e.code !== 'already_exists')) throw e;
         lastError = e;
+        if (attempt < attempts) await sleep(backoff(attempt, null, 25));
       }
     }
-    throw new BlobError('conflict', { message: `${path} kept changing across 6 attempts`, cause: lastError });
+    throw new BlobError('conflict', { message: `${path} kept changing across ${attempts} attempt${attempts === 1 ? '' : 's'}`, cause: lastError });
   }
 
   /* ----------------------------------------------------------- escape hatch */

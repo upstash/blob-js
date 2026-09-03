@@ -19,6 +19,8 @@ export interface BlobHead {
   size: number;
   etag: string;
   contentType: string;
+  /** Verbatim from storage; absent when the object was stored without one. */
+  cacheControl?: string;
   metadata: Record<string, string>;
   uploadedAt: Date;
 }
@@ -321,16 +323,17 @@ function worthReminting(c: TempCredentials): boolean {
   return !c.signing && capOf(c) < c.lifetime - WORTH_REMINTING_S;
 }
 
-function sleep(ms: number): Promise<void> {
+export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function backoff(attempt: number, retryAfter: string | null): number {
+/** Full jitter, doubling from `base` ms per attempt and capped at 4 s; a Retry-After wins when given. */
+export function backoff(attempt: number, retryAfter: string | null, base = 200): number {
   if (retryAfter) {
     const secs = Number(retryAfter);
     if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 10_000);
   }
-  return Math.floor(Math.random() * Math.min(4_000, 200 * 2 ** attempt));
+  return Math.floor(Math.random() * Math.min(4_000, base * 2 ** attempt));
 }
 
 export function headFromHeaders(h: Headers): BlobHead {
@@ -343,6 +346,7 @@ export function headFromHeaders(h: Headers): BlobHead {
     size: Number(h.get('content-length') ?? 0),
     etag: h.get('etag') ?? '',
     contentType: h.get('content-type') ?? 'application/octet-stream',
+    cacheControl: h.get('cache-control') ?? undefined,
     metadata,
     uploadedAt: lm ? new Date(lm) : new Date(),
   };
