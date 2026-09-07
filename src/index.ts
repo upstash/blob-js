@@ -1,5 +1,6 @@
 export { Bucket } from './server/bucket.ts';
 export type {
+  FromEnvOptions,
   BucketOptions,
   PutOptions,
   ListOptions,

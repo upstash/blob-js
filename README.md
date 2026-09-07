@@ -39,6 +39,8 @@ await bucket.updateJson<Settings>('u/7.json', (prev) => ({ ...(prev ?? {}), them
 - `del({ prefix: '' })` needs `all: true`. A partial array delete throws `partial_delete`.
 - Metadata is printable ASCII; anything else is refused with `invalid_input`.
 - `cache` takes `'immutable'`, `'revalidate'`, `'no-store'`, a duration, or a verbatim header.
+- `Bucket.fromEnv()` reads `UPSTASH_BLOB_TOKEN`. It takes the constructor's options alone,
+  `fromEnv({ cache: 'immutable' })`, or a variable name first, `fromEnv('MEDIA_TOKEN', { cache })`.
 
 ### Signed URLs
 
