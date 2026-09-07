@@ -200,7 +200,7 @@ export class Bucket {
   /** Reads `UPSTASH_BLOB_TOKEN`; the options are the constructor's, minus the token. */
   static fromEnv(options?: FromEnvOptions): Bucket;
   /** Reads the token from `name` instead of `UPSTASH_BLOB_TOKEN`. */
-  static fromEnv(name: string, options?: FromEnvOptions): Bucket;
+  static fromEnv(name: string | undefined, options?: FromEnvOptions): Bucket;
   static fromEnv(nameOrOptions: string | FromEnvOptions = TOKEN_ENV, options: FromEnvOptions = {}): Bucket {
     const name = typeof nameOrOptions === 'string' ? nameOrOptions : TOKEN_ENV;
     const opts = typeof nameOrOptions === 'string' ? options : nameOrOptions;
@@ -599,4 +599,3 @@ export class Bucket {
     };
   }
 }
-

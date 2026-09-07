@@ -71,6 +71,24 @@ beforeEach(() => {
 const bucket = () => new Bucket({ token: TOKEN });
 const r2Calls = () => calls.filter((c) => c.url.startsWith(ENDPOINT));
 
+test('fromEnv forwards cache options with an omitted name or options alone', async () => {
+  const previous = process.env.UPSTASH_BLOB_TOKEN;
+  process.env.UPSTASH_BLOB_TOKEN = TOKEN;
+  try {
+    const buckets = [
+      Bucket.fromEnv(undefined, { cache: '1m' }),
+      Bucket.fromEnv({ cache: '1m' }),
+    ];
+    for (const b of buckets) {
+      const upload = await b.signedUploadUrl('file.txt');
+      expect(upload.headers['cache-control']).toBe('public, max-age=60');
+    }
+  } finally {
+    if (previous === undefined) delete process.env.UPSTASH_BLOB_TOKEN;
+    else process.env.UPSTASH_BLOB_TOKEN = previous;
+  }
+});
+
 describe('credential cache', () => {
   test('is keyed by token, so a per-request fromEnv() does not mint per request', async () => {
     resetCredentialCaches();

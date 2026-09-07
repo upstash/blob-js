@@ -27,6 +27,10 @@ describe('public surface', () => {
       expect(Bucket.fromEnv({ cache: '1m' })).toBeInstanceOf(Bucket);
       expect(Bucket.fromEnv({})).toBeInstanceOf(Bucket);
       expect(Bucket.fromEnv()).toBeInstanceOf(Bucket);
+      expect(Bucket.fromEnv(undefined, { cache: 'immutable' })).toBeInstanceOf(Bucket);
+      const fromOptionalName = (name: string | undefined) => Bucket.fromEnv(name, { cache: 'immutable' });
+      expect(fromOptionalName(undefined)).toBeInstanceOf(Bucket);
+      expect(fromOptionalName('UPSTASH_BLOB_TOKEN')).toBeInstanceOf(Bucket);
       // @ts-expect-error token is not one of fromEnv's options
       void Bucket.fromEnv({ token: 'x' });
     } finally {
