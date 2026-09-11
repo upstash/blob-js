@@ -32,7 +32,7 @@ const POST_avatar = route(async (req: Request) => {
   if (!(file instanceof File)) return Response.json({ error: 'file field required' }, { status: 400 });
   const blob = await pub.put(p(`avatar/${user.id}`), file, {
     contentTypes: ['image/png', 'image/jpeg', 'image/webp'],
-    maxBytes: '2mb',
+    maxSize: '2mb',
     cache: '1m',
     metadata: { uploadedBy: user.id },
   });
@@ -42,7 +42,7 @@ const POST_avatar = route(async (req: Request) => {
 
 const POST_avatarStreaming = route(async (req: Request) => {
   const user = requireUser(req);
-  const blob = await pub.put(p(`avatar/${user.id}`), req, { contentTypes: ['image/png', 'image/jpeg', 'image/webp'], maxBytes: '2mb' });
+  const blob = await pub.put(p(`avatar/${user.id}`), req, { contentTypes: ['image/png', 'image/jpeg', 'image/webp'], maxSize: '2mb' });
   return Response.json({ url: blob.versionedUrl });
 });
 

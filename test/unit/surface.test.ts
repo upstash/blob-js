@@ -11,13 +11,30 @@ describe('public surface', () => {
   test('fromEnv takes the constructor options too', () => {
     process.env.UPSTASH_BLOB_SURFACE = encodeToken('bucket', 'pw', 'bdeadbeef012');
     try {
-      const b = Bucket.fromEnv('UPSTASH_BLOB_SURFACE', { visibility: 'private', cache: '1m' });
+      const b = Bucket.fromEnv('UPSTASH_BLOB_SURFACE', { cache: '1m' });
       expect(b).toBeInstanceOf(Bucket);
       // The token in the options is ignored: fromEnv's whole job is to read it from the environment.
       // @ts-expect-error token is not one of fromEnv's options
       void Bucket.fromEnv('UPSTASH_BLOB_SURFACE', { token: 'x' });
     } finally {
       delete process.env.UPSTASH_BLOB_SURFACE;
+    }
+  });
+
+  test('fromEnv takes the options alone and reads the default variable', () => {
+    process.env.UPSTASH_BLOB_TOKEN = encodeToken('bucket', 'pw', 'bdeadbeef012');
+    try {
+      expect(Bucket.fromEnv({ cache: '1m' })).toBeInstanceOf(Bucket);
+      expect(Bucket.fromEnv({})).toBeInstanceOf(Bucket);
+      expect(Bucket.fromEnv()).toBeInstanceOf(Bucket);
+      expect(Bucket.fromEnv(undefined, { cache: 'immutable' })).toBeInstanceOf(Bucket);
+      const fromOptionalName = (name: string | undefined) => Bucket.fromEnv(name, { cache: 'immutable' });
+      expect(fromOptionalName(undefined)).toBeInstanceOf(Bucket);
+      expect(fromOptionalName('UPSTASH_BLOB_TOKEN')).toBeInstanceOf(Bucket);
+      // @ts-expect-error token is not one of fromEnv's options
+      void Bucket.fromEnv({ token: 'x' });
+    } finally {
+      delete process.env.UPSTASH_BLOB_TOKEN;
     }
   });
 

@@ -82,8 +82,8 @@ export function acceptOf(constraints: ServedConstraints | undefined): string {
 
 /** Size only. The server remains authoritative for type validation. */
 export function deny(file: File, constraints: ServedConstraints | undefined): BlobError | undefined {
-  if (constraints?.maxBytes !== undefined && file.size > constraints.maxBytes) {
-    return new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(constraints.maxBytes)} limit` });
+  if (constraints?.maxSize !== undefined && file.size > constraints.maxSize) {
+    return new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(constraints.maxSize)} limit` });
   }
   return undefined;
 }

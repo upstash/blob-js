@@ -19,6 +19,8 @@ export interface BlobHead {
   size: number;
   etag: string;
   contentType: string;
+  /** Verbatim from storage; absent when the object was stored without one. */
+  cacheControl?: string;
   metadata: Record<string, string>;
   uploadedAt: Date;
 }
@@ -66,8 +68,6 @@ export class R2 {
     readonly signingSecret: string,
     readonly defaultCache: CacheOption | undefined,
     enableTelemetry = true,
-    /** What the caller declared; a `visibility` in the credentials response wins over it. */
-    private readonly declaredVisibility?: 'public' | 'private',
   ) {
     this.creds = credentialCacheFor(token, enableTelemetry);
     this.hostname = `${hashForDomain}.${DOMAIN_SUFFIX}`;
@@ -78,16 +78,17 @@ export class R2 {
   }
 
   /**
-   * What the credentials say, else what the caller declared, else public. Read after `credentials()`
-   * has resolved, so a bucket that never declared it still stores the right cache-control.
+   * What the credentials response says, else public. The bucket is the only one who knows: the
+   * token carries no visibility bit. Read after `credentials()` has resolved, which every request
+   * does before it writes a header or builds a BlobObject.
    */
   visibility(): 'public' | 'private' {
-    return this.creds.peek()?.visibility ?? this.declaredVisibility ?? 'public';
+    return this.creds.peek()?.visibility ?? 'public';
   }
 
   /** Undefined on a private bucket: nothing serves its objects over the public host. */
   publicUrl(path: string): string | undefined {
-    if ((this.creds.peek()?.visibility ?? this.declaredVisibility) === 'private') return undefined;
+    if (this.visibility() === 'private') return undefined;
     return `https://${this.hostname}/${encodeKey(path)}`;
   }
 
@@ -322,16 +323,17 @@ function worthReminting(c: TempCredentials): boolean {
   return !c.signing && capOf(c) < c.lifetime - WORTH_REMINTING_S;
 }
 
-function sleep(ms: number): Promise<void> {
+export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function backoff(attempt: number, retryAfter: string | null): number {
+/** Full jitter, doubling from `base` ms per attempt and capped at 4 s; a Retry-After wins when given. */
+export function backoff(attempt: number, retryAfter: string | null, base = 200): number {
   if (retryAfter) {
     const secs = Number(retryAfter);
     if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 10_000);
   }
-  return Math.floor(Math.random() * Math.min(4_000, 200 * 2 ** attempt));
+  return Math.floor(Math.random() * Math.min(4_000, base * 2 ** attempt));
 }
 
 export function headFromHeaders(h: Headers): BlobHead {
@@ -344,6 +346,7 @@ export function headFromHeaders(h: Headers): BlobHead {
     size: Number(h.get('content-length') ?? 0),
     etag: h.get('etag') ?? '',
     contentType: h.get('content-type') ?? 'application/octet-stream',
+    cacheControl: h.get('cache-control') ?? undefined,
     metadata,
     uploadedAt: lm ? new Date(lm) : new Date(),
   };

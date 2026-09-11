@@ -88,7 +88,7 @@ export async function peek(stream: ReadableStream<Uint8Array>): Promise<{ head: 
   return { head: buffered.subarray(0, SNIFF_BYTES), stream: replay };
 }
 
-export async function readAll(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<Uint8Array> {
+export async function readAll(stream: ReadableStream<Uint8Array>, maxSize: number): Promise<Uint8Array> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let got = 0;
@@ -96,23 +96,23 @@ export async function readAll(stream: ReadableStream<Uint8Array>, maxBytes: numb
     const { value, done } = await reader.read();
     if (done) break;
     got += value.byteLength;
-    if (got > maxBytes) {
+    if (got > maxSize) {
       await reader.cancel();
-      throw new BlobError('too_large', { message: `body exceeds maxBytes (${maxBytes} bytes)` });
+      throw new BlobError('too_large', { message: `body exceeds maxSize (${maxSize} bytes)` });
     }
     chunks.push(value);
   }
   return concat(chunks);
 }
 
-/** Counts bytes through; over maxBytes the stream errors so the PUT never completes. */
-export function limit(stream: ReadableStream<Uint8Array>, maxBytes: number, onCount?: (n: number) => void): ReadableStream<Uint8Array> {
+/** Counts bytes through; over maxSize the stream errors so the PUT never completes. */
+export function limit(stream: ReadableStream<Uint8Array>, maxSize: number, onCount?: (n: number) => void): ReadableStream<Uint8Array> {
   let seen = 0;
   return stream.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, c) {
         seen += chunk.byteLength;
-        if (seen > maxBytes) throw new BlobError('too_large', { message: `body exceeds maxBytes (${maxBytes} bytes)` });
+        if (seen > maxSize) throw new BlobError('too_large', { message: `body exceeds maxSize (${maxSize} bytes)` });
         onCount?.(seen);
         c.enqueue(chunk);
       },

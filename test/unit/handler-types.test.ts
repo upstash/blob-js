@@ -26,7 +26,7 @@ interface Session {
 function _uploads(value: Bucket) {
   return uploadHandler({
     bucket: value,
-    constraints: { maxBytes: '20mb', contentTypes: ['image/png'] },
+    constraints: { maxSize: '20mb', contentTypes: ['image/png'] },
     context: (request) => Promise.resolve({ id: request.headers.get('x') ?? 'anon' }),
     onBeforeUpload: ({ ctx, route, file: picked }) => ({ path: `${route}/${ctx.id}/${picked.name}` }),
     onUploadComplete: ({ ctx, route, path, size, multipartUploadId }) => ({
@@ -38,7 +38,7 @@ function _uploads(value: Bucket) {
     }),
     routes: {
       attachment: {},
-      large: { constraints: { maxBytes: '2gb', contentTypes: null } },
+      large: { constraints: { maxSize: '2gb', contentTypes: null } },
       audit: { onUploadComplete: ({ ctx, uploadId }) => ({ owner: ctx.id, dedupe: uploadId }) },
       thread: uploadRoute<Session>()({
         input: z.object({ threadId: z.string() }),

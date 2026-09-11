@@ -71,6 +71,24 @@ beforeEach(() => {
 const bucket = () => new Bucket({ token: TOKEN });
 const r2Calls = () => calls.filter((c) => c.url.startsWith(ENDPOINT));
 
+test('fromEnv forwards cache options with an omitted name or options alone', async () => {
+  const previous = process.env.UPSTASH_BLOB_TOKEN;
+  process.env.UPSTASH_BLOB_TOKEN = TOKEN;
+  try {
+    const buckets = [
+      Bucket.fromEnv(undefined, { cache: '1m' }),
+      Bucket.fromEnv({ cache: '1m' }),
+    ];
+    for (const b of buckets) {
+      const upload = await b.signedUploadUrl('file.txt');
+      expect(upload.headers['cache-control']).toBe('public, max-age=60');
+    }
+  } finally {
+    if (previous === undefined) delete process.env.UPSTASH_BLOB_TOKEN;
+    else process.env.UPSTASH_BLOB_TOKEN = previous;
+  }
+});
+
 describe('credential cache', () => {
   test('is keyed by token, so a per-request fromEnv() does not mint per request', async () => {
     resetCredentialCaches();
@@ -336,27 +354,38 @@ describe('bucket guards', () => {
     expect((await bucket().put('a.bin', 'x')).contentType).toBe('application/octet-stream');
   });
 
-  test('publicUrl is local, encoded, and absent for a private bucket', () => {
+  test('publicUrl is encoded, fetches credentials once, and is absent for a private bucket', async () => {
     resetCredentialCaches();
-    const pub = new Bucket({ token: TOKEN, visibility: 'public' });
-    expect(pub.publicUrl('reports/Q3 final.pdf')).toMatch(/\/reports\/Q3%20final\.pdf$/);
-    expect(new Bucket({ token: TOKEN, visibility: 'private' }).publicUrl('a.txt')).toBeUndefined();
-    expect(mints).toBe(0);
-  });
-
-  test('a private bucket has no public url', async () => {
-    resetCredentialCaches();
-    r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
-    const blob = await new Bucket({ token: TOKEN, visibility: 'private' }).put('a.txt', 'x');
-    expect(blob.url).toBeUndefined();
-    expect(blob.versionedUrl).toBeUndefined();
-    expect(blob.path).toBe('a.txt');
+    const pub = new Bucket({ token: TOKEN });
+    expect(await pub.publicUrl('reports/Q3 final.pdf')).toMatch(/\/reports\/Q3%20final\.pdf$/);
+    expect(await pub.publicUrl('b.txt')).toMatch(/\/b\.txt$/);
+    expect(mints).toBe(1);
 
     resetCredentialCaches();
     mintResponse = () => Response.json(creds({ visibility: 'private' }));
-    // The credentials response wins over the option: the bucket knows what it is.
-    const declaredPublic = await new Bucket({ token: TOKEN, visibility: 'public' }).put('a.txt', 'x');
-    expect(declaredPublic.url).toBeUndefined();
+    expect(await new Bucket({ token: TOKEN }).publicUrl('a.txt')).toBeUndefined();
+  });
+
+  test('a private bucket has no public url: the backend says so, not the caller', async () => {
+    resetCredentialCaches();
+    mintResponse = () => Response.json(creds({ visibility: 'private' }));
+    let stored: string | null = null;
+    r2Handler = (req) => {
+      stored = req.headers.get('cache-control');
+      return new Response('', { status: 200, headers: { etag: '"e"' } });
+    };
+    const blob = await new Bucket({ token: TOKEN }).put('a.txt', 'x');
+    expect(blob.url).toBeUndefined();
+    expect(blob.versionedUrl).toBeUndefined();
+    expect(blob.path).toBe('a.txt');
+    // Objects only a signed request may read must not sit in shared caches.
+    expect(stored as string | null).toBe('private, max-age=3600');
+
+    // No visibility in the response, as before the backend shipped it: public.
+    resetCredentialCaches();
+    mintResponse = () => Response.json(creds());
+    const legacy = await new Bucket({ token: TOKEN }).put('a.txt', 'x');
+    expect(legacy.url).toMatch(/\/a\.txt$/);
   });
 });
 
@@ -454,7 +483,7 @@ describe('multipart put', () => {
   test('a conditional write stays a single PUT, and asking for both is refused', async () => {
     resetCredentialCaches();
     const script = scriptMultipart();
-    const blob = await bucket().put('big.bin', new Uint8Array(17_000_000), { overwrite: false });
+    const blob = await bucket().put('big.bin', new Uint8Array(17_000_000), { allowOverwrite: false });
     expect(script.parts).toEqual([]);
     expect(blob.etag).toBe('"single"');
     await expect(bucket().put('big.bin', 'x', { multipart: true, ifUnchanged: '"e"' })).rejects.toMatchObject({ code: 'invalid_input' });
@@ -501,26 +530,26 @@ describe('uploadHandler: the direct transport', () => {
     resetCredentialCaches();
     r2Handler = beginR2;
     const b = bucket();
-    const avatars = uploadHandler({ bucket: b, constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'avatars/1.png' }) });
-    const invoices = uploadHandler({ bucket: b, constraints: { maxBytes: '9mb' }, onBeforeUpload: () => ({ path: 'invoices/1.pdf' }) });
+    const avatars = uploadHandler({ bucket: b, constraints: { maxSize: '1mb' }, onBeforeUpload: () => ({ path: 'avatars/1.png' }) });
+    const invoices = uploadHandler({ bucket: b, constraints: { maxSize: '9mb' }, onBeforeUpload: () => ({ path: 'invoices/1.pdf' }) });
     // Same constraints, different endpoint: two handlers on one bucket do not share each other's tokens.
-    const twin = uploadHandler({ bucket: b, endpoint: '/api/twin', constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
+    const twin = uploadHandler({ bucket: b, endpoint: '/api/twin', constraints: { maxSize: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
 
     const started = await begin(avatars, { name: 'a.png', type: 'image/png', size: 10 });
     expect((await post(invoices, { phase: 'end', completionToken: started.completionToken })).status).toBe(403);
     expect((await post(twin, { phase: 'end', completionToken: started.completionToken })).status).toBe(403);
-    expect(deriveRouteId({ contentTypes: undefined, maxBytes: 1 }, false)).not.toBe(deriveRouteId({ contentTypes: undefined, maxBytes: 2 }, false));
-    expect(deriveRouteId({ contentTypes: ['image/png'], maxBytes: 1 }, false)).toBe(deriveRouteId({ contentTypes: ['image/png'], maxBytes: 1 }, false));
+    expect(deriveRouteId({ contentTypes: undefined, maxSize: 1 }, false)).not.toBe(deriveRouteId({ contentTypes: undefined, maxSize: 2 }, false));
+    expect(deriveRouteId({ contentTypes: ['image/png'], maxSize: 1 }, false)).toBe(deriveRouteId({ contentTypes: ['image/png'], maxSize: 1 }, false));
   });
 
   test('the constraints are revalidated, not cached forever', async () => {
     resetCredentialCaches();
-    const route = uploadHandler({ bucket: bucket(), constraints: { maxBytes: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
+    const route = uploadHandler({ bucket: bucket(), constraints: { maxSize: '1mb' }, onBeforeUpload: () => ({ path: 'x' }) });
     const res = await route.GET(new Request('https://app.test/api/upload'));
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
     const etag = res.headers.get('etag')!;
     expect(etag).toMatch(/^"[a-z0-9]+"$/);
-    expect(await res.json()).toEqual({ constraints: { maxBytes: 1_000_000 } });
+    expect(await res.json()).toEqual({ constraints: { maxSize: 1_000_000 } });
     const again = await route.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }));
     expect(again.status).toBe(304);
   });
@@ -555,11 +584,11 @@ describe('uploadHandler: the direct transport', () => {
     resetCredentialCaches();
     r2Handler = beginR2;
     const b = bucket();
-    const under = uploadHandler({ bucket: b, constraints: { maxBytes: '5gb' }, onBeforeUpload: () => ({ path: 'a.bin' }) });
+    const under = uploadHandler({ bucket: b, constraints: { maxSize: '5gb' }, onBeforeUpload: () => ({ path: 'a.bin' }) });
     expect((await begin(under, { name: 'a.bin', type: '', size: 16_000_000 })).upload.multipart).toBe(false);
     expect((await begin(under, { name: 'a.bin', type: '', size: 16_000_001 })).upload.multipart).toBe(true);
 
-    const moved = uploadHandler({ bucket: b, constraints: { maxBytes: '5gb' }, multipart: '100mb', onBeforeUpload: () => ({ path: 'a.bin' }) });
+    const moved = uploadHandler({ bucket: b, constraints: { maxSize: '5gb' }, multipart: '100mb', onBeforeUpload: () => ({ path: 'a.bin' }) });
     expect((await begin(moved, { name: 'a.bin', type: '', size: 99_000_000 })).upload.multipart).toBe(false);
     expect((await begin(moved, { name: 'a.bin', type: '', size: 100_000_001 })).upload.multipart).toBe(true);
 
@@ -714,7 +743,7 @@ describe('uploadHandler: the direct transport', () => {
     const seen: unknown[] = [];
     const route = uploadHandler({
       bucket: bucket(),
-      constraints: { maxBytes: '5gb' },
+      constraints: { maxSize: '5gb' },
       onBeforeUpload: () => ({ path: 'big.bin', metadata: { rowId: '7' } }),
       onError: ({ error, path, metadata }) => {
         seen.push({ code: (error as BlobError).code, path, metadata });
@@ -1046,5 +1075,88 @@ describe('uploadHandler: the direct transport', () => {
     expect(r2Calls().filter((c) => c.method === 'GET')).toEqual([]);
     const past = (await (await post(route, { phase: 'parts', completionToken: started.completionToken, from: 2 })).json()) as WirePartsResponse;
     expect(past.parts).toEqual([]);
+  });
+});
+
+describe('copy and move', () => {
+  const copied = '<CopyObjectResult><ETag>"e"</ETag></CopyObjectResult>';
+  const srcHead = { 'content-length': '6', etag: '"e"', 'content-type': 'text/plain', 'cache-control': 'max-age=60', 'x-amz-meta-origin': 'src' };
+  const handler = (c: Call) => {
+    if (c.method === 'HEAD' && c.url.endsWith('/a.txt')) return new Response('', { status: 200, headers: srcHead });
+    if (c.method === 'HEAD') return new Response('', { status: 200, headers: { 'content-length': '6', etag: '"e"' } });
+    return new Response(c.method === 'PUT' ? copied : '', { status: 200 });
+  };
+
+  test('without options it is a plain COPY: the source is neither read nor described', async () => {
+    resetCredentialCaches();
+    r2Handler = handler;
+    await bucket().copy('a.txt', 'b.txt');
+    const put = r2Calls().find((c) => c.method === 'PUT')!;
+    expect(put.headers.get('x-amz-copy-source')).toBe('/bkt/a.txt');
+    expect(put.headers.has('x-amz-metadata-directive')).toBe(false);
+    expect(put.headers.has('content-type')).toBe(false);
+    expect(r2Calls().map((c) => c.method)).toEqual(['PUT', 'HEAD']);
+  });
+
+  test('one option switches to REPLACE and carries the other two over from the source', async () => {
+    resetCredentialCaches();
+    r2Handler = handler;
+    await bucket().copy('a.txt', 'b.txt', { contentType: 'text/markdown' });
+    const put = r2Calls().find((c) => c.method === 'PUT')!;
+    expect(put.headers.get('x-amz-metadata-directive')).toBe('REPLACE');
+    expect(put.headers.get('content-type')).toBe('text/markdown');
+    expect(put.headers.get('cache-control')).toBe('max-age=60');
+    expect(put.headers.get('x-amz-meta-origin')).toBe('src');
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'PUT', 'HEAD']);
+  });
+
+  test('metadata replaces the source metadata outright, cache is rendered like put', async () => {
+    resetCredentialCaches();
+    r2Handler = handler;
+    await bucket().copy('a.txt', 'b.txt', { metadata: { owner: 'u7' }, cache: 'no-store' });
+    const put = r2Calls().find((c) => c.method === 'PUT')!;
+    expect(put.headers.get('x-amz-meta-owner')).toBe('u7');
+    expect(put.headers.has('x-amz-meta-origin')).toBe(false);
+    expect(put.headers.get('content-type')).toBe('text/plain');
+    expect(put.headers.get('cache-control')).toContain('no-store');
+  });
+
+  test('a missing source is not_found before any copy is sent', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('', { status: 404 });
+    await expect(bucket().copy('a.txt', 'b.txt', { cache: '1m' })).rejects.toMatchObject({ code: 'not_found' });
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD']);
+  });
+
+  test('move passes the options through, then deletes the source', async () => {
+    resetCredentialCaches();
+    r2Handler = handler;
+    await bucket().move('a.txt', 'b.txt', { contentType: 'text/markdown' });
+    expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'PUT', 'HEAD', 'DELETE']);
+    expect(r2Calls().find((c) => c.method === 'PUT')!.headers.get('content-type')).toBe('text/markdown');
+  });
+});
+
+describe('updateJson', () => {
+  test('maxAttempts bounds the loop and the final conflict names the count', async () => {
+    resetCredentialCaches();
+    r2Handler = (c) => {
+      if (c.method === 'GET') return new Response('{"a":1}', { status: 200, headers: { etag: '"e1"', 'content-type': 'application/json', 'content-length': '7' } });
+      return new Response('<Error><Code>PreconditionFailed</Code></Error>', { status: 412 });
+    };
+    const e = await bucket()
+      .updateJson('s.json', (p) => p, { maxAttempts: 2 })
+      .catch((x) => x);
+    expect(e.code).toBe('conflict');
+    expect(e.message).toContain('2 attempts');
+    expect(e.cause?.code).toBe('conflict');
+    expect(r2Calls().filter((c) => c.method === 'PUT').length).toBe(2);
+  });
+
+  test('maxAttempts must be a positive integer', async () => {
+    resetCredentialCaches();
+    await expect(bucket().updateJson('s.json', (p) => p, { maxAttempts: 0 })).rejects.toMatchObject({ code: 'invalid_input' });
+    await expect(bucket().updateJson('s.json', (p) => p, { maxAttempts: 1.5 })).rejects.toMatchObject({ code: 'invalid_input' });
+    expect(r2Calls().length).toBe(0);
   });
 });

@@ -4,7 +4,7 @@ import { cacheControl, formatBytes, parseDuration, parseSize, type CacheOption, 
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
 import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
-import { errorFromBody, errorFromResponse, headFromHeaders, R2, type MultipartUpload } from './r2.ts';
+import { backoff, errorFromBody, errorFromResponse, headFromHeaders, R2, sleep, type MultipartUpload } from './r2.ts';
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
 
@@ -12,12 +12,6 @@ export type { MultipartUpload };
 
 export interface BucketOptions {
   token: string;
-  /**
-   * `'private'` drops `url` and `versionedUrl` from every BlobObject: nothing serves a private
-   * bucket over the public host, so a url there is a link that 404s. A visibility in the
-   * credentials response wins over this.
-   */
-  visibility?: 'public' | 'private';
   /**
    * The `Cache-Control` written on every object this bucket stores. A per-call `cache` overrides it.
    * @see CacheOption
@@ -34,24 +28,24 @@ export interface BucketOptions {
 export interface PutOptions {
   contentType?: string;
   contentTypes?: readonly string[];
-  maxBytes?: Size;
+  maxSize?: Size;
   /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
   metadata?: Record<string, string>;
   /**
    * Declared length for a stream whose size is not otherwise known. Without it, `put()` buffers the
-   * stream (up to `maxBytes`) before uploading so it can determine the required content length.
+   * stream (up to `maxSize`) before uploading so it can determine the required content length.
    */
   size?: number;
   /** false: If-None-Match: * server-side, so a real 412 rather than a client-side race. */
-  overwrite?: boolean;
+  allowOverwrite?: boolean;
   /** An etag: If-Match, so the write fails with 'conflict' if the object changed. */
   ifUnchanged?: string;
   /**
    * Where the multipart path starts. The default is 16 MB: under it a body goes up as one PUT, over
    * it in parts, which is the only way past R2's ~5 GiB single-PUT cap and the only way a failed
    * chunk can be retried. A size moves the line (`'100mb'`), `true` always parts, `false` never
-   * does. `overwrite: false` and `ifUnchanged` are single-PUT only, so they turn it off.
+   * does. `allowOverwrite: false` and `ifUnchanged` are single-PUT only, so they turn it off.
    */
   multipart?: MultipartOption;
 }
@@ -109,7 +103,7 @@ export interface SignedUploadUrlOptions {
   /** Pin the body's exact length, so a url handed out for one file cannot upload another size. */
   size?: Size;
   /** `false` refuses the upload if something is already at the path. */
-  overwrite?: boolean;
+  allowOverwrite?: boolean;
 }
 
 export interface SignedUploadUrl {
@@ -141,10 +135,26 @@ export interface S3Config {
 
 export type DeleteTarget = string | string[] | { prefix: string; all?: boolean };
 
+/**
+ * Without options the destination carries the source's content type, cache-control and metadata.
+ * Storage rewrites the three together or not at all, so when any one is given the other two are
+ * read off the source first and sent back unchanged.
+ */
+export interface CopyOptions {
+  /** What the destination is stored as. Default: the source's. */
+  contentType?: string;
+  /** The `Cache-Control` the destination is stored with. Default: the source's. @see CacheOption */
+  cache?: CacheOption;
+  /** Replaces the source's metadata outright rather than merging into it. Default: the source's. */
+  metadata?: Record<string, string>;
+}
+
 export interface UpdateJsonOptions {
   /** The `Cache-Control` the rewritten object is stored with. @see CacheOption */
   cache?: CacheOption;
   metadata?: Record<string, string>;
+  /** How many times to read, transform and write before giving up with 'conflict'. Default 6. */
+  maxAttempts?: number;
 }
 
 /**
@@ -173,6 +183,9 @@ function safeContentType(type: string): string {
 /** The variable `Bucket.fromEnv()` and an `uploadHandler` with no bucket read. */
 export const TOKEN_ENV = 'UPSTASH_BLOB_TOKEN';
 
+/** What `Bucket.fromEnv` accepts: the constructor options, minus the token it reads itself. */
+export type FromEnvOptions = Omit<BucketOptions, 'token'>;
+
 /** The token in the environment, or undefined -- including on Workers, where there is no process. */
 export function tokenFromEnv(name: string = TOKEN_ENV): string | undefined {
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
@@ -196,19 +209,30 @@ export class Bucket {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
     this.defaultCache = options.cache;
-    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true, options.visibility);
+    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true);
     INTERNALS.set(this, this.r2);
   }
 
-  static fromEnv(name = TOKEN_ENV, options: Omit<BucketOptions, 'token'> = {}): Bucket {
+  /** Reads `UPSTASH_BLOB_TOKEN`; the options are the constructor's, minus the token. */
+  static fromEnv(options?: FromEnvOptions): Bucket;
+  /** Reads the token from `name` instead of `UPSTASH_BLOB_TOKEN`. */
+  static fromEnv(name: string | undefined, options?: FromEnvOptions): Bucket;
+  static fromEnv(nameOrOptions: string | FromEnvOptions = TOKEN_ENV, options: FromEnvOptions = {}): Bucket {
+    const name = typeof nameOrOptions === 'string' ? nameOrOptions : TOKEN_ENV;
+    const opts = typeof nameOrOptions === 'string' ? options : nameOrOptions;
     const token = tokenFromEnv(name);
     if (!token) throw new TypeError(`Bucket.fromEnv: ${name} is not set (on Workers, pass it explicitly: new Bucket({ token: env.${name} }))`);
-    return new Bucket({ ...options, token });
+    return new Bucket({ ...opts, token });
   }
 
-  /** The public object URL, computed locally from the bucket token. Undefined for a private bucket. */
-  publicUrl(path: string): string | undefined {
+  /**
+   * The public object URL. Undefined on a private bucket: nothing serves its objects over the public
+   * host, so use `signedReadUrl()` there. Whether the bucket is private comes from the backend, not
+   * the token, so the first call on a fresh bucket fetches credentials; after that it is local.
+   */
+  async publicUrl(path: string): Promise<string | undefined> {
     encodeKey(path);
+    await this.r2.credentials();
     return this.r2.publicUrl(path);
   }
 
@@ -217,19 +241,19 @@ export class Bucket {
   async put(path: string, body: PutBody, options: PutOptions = {}): Promise<CompletedBlob> {
     encodeKey(path);
     const allowed = options.contentTypes === undefined ? undefined : expandContentTypes(options.contentTypes);
-    const maxBytes = options.maxBytes === undefined ? undefined : parseSize(options.maxBytes, 'maxBytes');
+    const maxSize = options.maxSize === undefined ? undefined : parseSize(options.maxSize, 'maxSize');
 
     const resolved = resolveBody(body);
     let { stream, size } = resolved;
     const contentType = options.contentType ?? resolved.contentType ?? 'application/octet-stream';
 
     if (size === undefined && options.size !== undefined) size = parseSize(options.size, 'size');
-    if (maxBytes !== undefined && size !== undefined && size > maxBytes) {
-      throw new BlobError('too_large', { message: `the body is ${formatBytes(size)}, over the ${formatBytes(maxBytes)} limit` });
+    if (maxSize !== undefined && size !== undefined && size > maxSize) {
+      throw new BlobError('too_large', { message: `the body is ${formatBytes(size)}, over the ${formatBytes(maxSize)} limit` });
     }
     if (size === undefined) {
-      if (maxBytes === undefined) throw new BlobError('length_required');
-      const bytes = await readAll(stream, maxBytes);
+      if (maxSize === undefined) throw new BlobError('length_required');
+      const bytes = await readAll(stream, maxSize);
       size = bytes.byteLength;
       stream = new Blob([bytes as BlobPart]).stream() as ReadableStream<Uint8Array>;
     }
@@ -240,7 +264,7 @@ export class Bucket {
       stream = peeked.stream;
     }
 
-    if (maxBytes !== undefined) stream = limit(stream, maxBytes);
+    if (maxSize !== undefined) stream = limit(stream, maxSize);
     // A zero-length body goes out as bytes, so the peeked stream has to be released rather than left open.
     if (size === 0) await stream.cancel();
 
@@ -253,9 +277,9 @@ export class Bucket {
       ...metaHeaders(options.metadata),
     };
 
-    const conditional = options.overwrite === false || options.ifUnchanged !== undefined;
+    const conditional = options.allowOverwrite === false || options.ifUnchanged !== undefined;
     if (options.multipart === true && conditional) {
-      throw new BlobError('invalid_input', { message: 'multipart: overwrite:false and ifUnchanged are single-PUT only' });
+      throw new BlobError('invalid_input', { message: 'multipart: allowOverwrite: false and ifUnchanged are single-PUT only' });
     }
     // Asked before the conditional check, not after: a body over the single-PUT cap is a refusal
     // worth naming whatever else is set, and a conditional write cannot rescue it either.
@@ -265,7 +289,7 @@ export class Bucket {
     }
 
     const headers: Record<string, string> = { ...objectHeaders, 'content-length': String(size) };
-    if (options.overwrite === false) headers['if-none-match'] = '*';
+    if (options.allowOverwrite === false) headers['if-none-match'] = '*';
     if (options.ifUnchanged !== undefined) headers['if-match'] = options.ifUnchanged;
 
     let res: Response;
@@ -278,7 +302,7 @@ export class Bucket {
     }
     if (res.status === 412) {
       await res.body?.cancel();
-      if (options.overwrite === false) {
+      if (options.allowOverwrite === false) {
         const head = await this.r2.head(path);
         throw new BlobError('already_exists', { message: `${path} already exists`, etag: head?.etag, size: head?.size });
       }
@@ -424,7 +448,7 @@ export class Bucket {
       ...metaHeaders(options.metadata),
     };
     if (options.size !== undefined) headers['content-length'] = String(parseSize(options.size, 'size'));
-    if (options.overwrite === false) headers['if-none-match'] = '*';
+    if (options.allowOverwrite === false) headers['if-none-match'] = '*';
     const { url, expiresAt } = await this.r2.presignWrite({ path, headers, expiresIn });
     return { url, headers, expiresAt };
   }
@@ -513,9 +537,21 @@ export class Bucket {
 
   /* ---------------------------------------------------------- copy/move */
 
-  async copy(from: string, to: string): Promise<BlobObject> {
+  async copy(from: string, to: string, options: CopyOptions = {}): Promise<BlobObject> {
     const creds = await this.r2.credentials();
-    const res = await this.r2.fetch({ method: 'PUT', path: to, headers: { 'x-amz-copy-source': `/${creds.bucket}/${encodeKey(from)}` } });
+    const headers: Record<string, string> = { 'x-amz-copy-source': `/${creds.bucket}/${encodeKey(from)}` };
+    if (options.contentType !== undefined || options.cache !== undefined || options.metadata !== undefined) {
+      // REPLACE rewrites content-type, cache-control and metadata as one; storage cannot change one
+      // and keep the rest, so the rest is read off the source and sent back as it was.
+      const src = await this.r2.head(from);
+      if (!src) throw new BlobError('not_found', { message: `${from} not found` });
+      headers['x-amz-metadata-directive'] = 'REPLACE';
+      headers['content-type'] = options.contentType ?? src.contentType;
+      headers['cache-control'] =
+        options.cache !== undefined ? cacheControl(options.cache, this.r2.visibility()) : (src.cacheControl ?? cacheControl(this.defaultCache, this.r2.visibility()));
+      Object.assign(headers, metaHeaders(options.metadata ?? src.metadata));
+    }
+    const res = await this.r2.fetch({ method: 'PUT', path: to, headers });
     const xml = await res.text();
     if (!res.ok) throw errorFromBody(res.status, xml);
     const code = tag(xml, 'Code');
@@ -525,8 +561,9 @@ export class Bucket {
     return this.r2.blobObject(to, head.size, head.etag, head.uploadedAt);
   }
 
-  async move(from: string, to: string): Promise<BlobObject> {
-    const blob = await this.copy(from, to);
+  /** A copy followed by a delete of the source: storage has no rename. Same options as `copy`. */
+  async move(from: string, to: string, options: CopyOptions = {}): Promise<BlobObject> {
+    const blob = await this.copy(from, to, options);
     try {
       await this.del(from);
     } catch (e) {
@@ -535,10 +572,17 @@ export class Bucket {
     return blob;
   }
 
-  /** Read-modify-write over a JSON document; retried on 'conflict' up to 5 times. Existing metadata is kept unless options.metadata is given. */
+  /**
+   * Read-modify-write over a JSON document: If-Match on the etag that was read, or If-None-Match: *
+   * when nothing was there. A write that lost the race is re-read and re-run after a short jittered
+   * pause, up to `maxAttempts` (default 6) times; then it throws 'conflict'. Existing metadata is
+   * kept unless options.metadata is given.
+   */
   async updateJson<T = unknown>(path: string, fn: (prev: T | null) => T | Promise<T>, options: UpdateJsonOptions = {}): Promise<BlobObject> {
+    const attempts = options.maxAttempts ?? 6;
+    if (!Number.isInteger(attempts) || attempts < 1) throw new BlobError('invalid_input', { message: 'maxAttempts must be a positive integer' });
     let lastError: BlobError | undefined;
-    for (let attempt = 0; attempt < 6; attempt++) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
       let prev: T | null = null;
       let etag: string | undefined;
       let metadata: Record<string, string> | undefined;
@@ -561,14 +605,15 @@ export class Bucket {
           contentType: 'application/json',
           cache: options.cache,
           metadata: options.metadata ?? metadata,
-          ...(etag === undefined ? { overwrite: false } : { ifUnchanged: etag }),
+          ...(etag === undefined ? { allowOverwrite: false } : { ifUnchanged: etag }),
         });
       } catch (e) {
         if (!BlobError.is(e) || (e.code !== 'conflict' && e.code !== 'already_exists')) throw e;
         lastError = e;
+        if (attempt < attempts) await sleep(backoff(attempt, null, 25));
       }
     }
-    throw new BlobError('conflict', { message: `${path} kept changing across 6 attempts`, cause: lastError });
+    throw new BlobError('conflict', { message: `${path} kept changing across ${attempts} attempt${attempts === 1 ? '' : 's'}`, cause: lastError });
   }
 
   /* ----------------------------------------------------------- escape hatch */
@@ -591,4 +636,3 @@ export class Bucket {
     };
   }
 }
-

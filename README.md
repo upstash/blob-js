@@ -22,7 +22,7 @@ await bucket.info('avatars/me.png');         // same record, no bytes
 await bucket.exists('avatars/me.png');       // false instead of a throw
 await bucket.list({ prefix: 'avatars/', limit: 100 });   // { blobs, cursor }
 await bucket.copy('tmp/9f3c', 'avatars/7.png');
-await bucket.move('tmp/9f3c', 'avatars/7.png');
+await bucket.move('tmp/9f3c', 'avatars/7.png', { contentType: 'image/png' });
 await bucket.del('a.png');                   // or ['a.png', 'b.png'], or { prefix: 'tmp/' }
 await bucket.updateJson<Settings>('u/7.json', (prev) => ({ ...(prev ?? {}), theme: 'dark' }));
 ```
@@ -30,13 +30,17 @@ await bucket.updateJson<Settings>('u/7.json', (prev) => ({ ...(prev ?? {}), them
 - `get` and `info` throw `not_found` rather than returning `undefined`; `list` returns keys, sizes,
   etags and urls, without metadata. `cursor` is set only while more remains.
 - A body over 16 MB goes up as multipart; `{ multipart: '100mb' | true | false }` moves the line.
-  `overwrite: false` and `ifUnchanged` are single-PUT only.
+  `allowOverwrite: false` and `ifUnchanged` are single-PUT only.
 - `updateJson` is a compare-and-set loop (`If-Match`, or `If-None-Match: *` when nothing is there),
-  retried on conflict up to five times.
-- `move` is a copy plus a delete: a failed delete throws `move_left_a_copy`, destination kept.
+  retried on conflict with a short jittered pause, up to `maxAttempts` times (default 6).
+- `copy` and `move` take `{ contentType, cache, metadata }`; whatever is not given is carried over
+  from the source. Storage has no rename, so `move` is a copy plus a delete: a failed delete throws
+  `move_left_a_copy`, destination kept.
 - `del({ prefix: '' })` needs `all: true`. A partial array delete throws `partial_delete`.
 - Metadata is printable ASCII; anything else is refused with `invalid_input`.
 - `cache` takes `'immutable'`, `'revalidate'`, `'no-store'`, a duration, or a verbatim header.
+- `Bucket.fromEnv()` reads `UPSTASH_BLOB_TOKEN`. It takes the constructor's options alone,
+  `fromEnv({ cache: 'immutable' })`, or a variable name first, `fromEnv('MEDIA_TOKEN', { cache })`.
 
 ### Signed URLs
 
@@ -48,10 +52,11 @@ await fetch(upload.url, { method: 'PUT', headers: upload.headers, body });
 
 Links are signed with the bucket's short-lived credential and cannot outlive it, so `expiresAt` is
 the answer per link (default read: 5 minutes, capped). `headers` on an upload URL are pinned into
-the signature. `bucket.publicUrl(path)` needs no request and is `undefined` on a private bucket.
+the signature. `bucket.publicUrl(path)` is `undefined` on a private bucket.
 
-`new Bucket({ token, visibility: 'private' })` drops `url` and `versionedUrl` everywhere; reads go
-through `signedReadUrl()`.
+Whether a bucket is private is decided in the console, not in code: the SDK learns it from the
+backend on the first request, and a private bucket has no `url` or `versionedUrl` on any
+BlobObject. Reads there go through `signedReadUrl()`.
 
 ### Incomplete uploads
 
@@ -78,7 +83,7 @@ import 'server-only';
 import { BlobError, uniquePath, uploadHandler } from '@upstash/blob';
 
 export const uploads = uploadHandler({
-  constraints: { maxBytes: '20mb', contentTypes: ['image/*', 'application/pdf'] },
+  constraints: { maxSize: '20mb', contentTypes: ['image/*', 'application/pdf'] },
 
   onBeforeUpload: async ({ request, file }) => {
     const user = await getUser(request);
@@ -114,7 +119,7 @@ const { start, upload, accept } = useUpload();
   the user reaches `onUploadComplete` and `onError` too, and how several routes share one auth check.
   With a single route, authorizing in `onBeforeUpload` and carrying an id in `metadata` is shorter.
 - No `bucket` reads `UPSTASH_BLOB_TOKEN`, like `Bucket.fromEnv()`. Pass `bucket:` when the token is
-  under another variable, the bucket needs `cache` or `visibility`, or you are on Workers, where the
+  under another variable, the bucket needs `cache`, or you are on Workers, where the
   token only exists on the request's `env`.
 - `GET` serves the constraints with an ETag and `max-age=60`, for `accept` and an early refusal. The
   server is authoritative.
