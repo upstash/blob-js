@@ -171,9 +171,26 @@ Requests carry the SDK version, runtime, and platform. Set `UPSTASH_DISABLE_TELE
 
 ## AI agents
 
-The published package ships the Upstash Blob docs under `node_modules/@upstash/blob/docs/` as `.mdx`,
-matching the installed version. `docs/README.md` there is the index. A Claude Code / Cursor skill
-that points agents at them lives in [`skills/blob`](./skills/blob/SKILL.md).
+The published package includes the Upstash Blob documentation as `.mdx` files under
+`node_modules/@upstash/blob/docs/`. Start with `docs/README.md` there for the page index and exact
+source revision bundled with the release.
+
+The separate [Blob skill](https://github.com/upstash/blob-js/blob/main/skills/blob/SKILL.md) tells
+coding agents when and where to read those pages. Installing the SDK includes the documentation;
+install the skill separately, or add this instruction to your project's agent configuration:
+
+> Before writing @upstash/blob code, read node_modules/@upstash/blob/docs/README.md and the relevant bundled pages.
+
+### Maintaining the docs bundle
+
+`prepack` fetches the docs commit pinned in `scripts/docs-ref.txt`. Update that full commit SHA
+alongside SDK changes and check that the bundled examples match the SDK before releasing.
+`postpack` removes the generated `docs/` directory.
+
+For local testing, `BLOB_DOCS_REF` overrides the pin with a commit SHA, branch or tag, and
+`BLOB_DOCS_DIR` copies from a local docs checkout or its `blob/` directory. A local copy is marked
+unversioned in the index; remote bundles record the resolved commit even when a branch or tag
+is supplied. Leave both overrides unset for releases.
 
 ## License
 
