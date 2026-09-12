@@ -6,8 +6,12 @@
   "type": "module",
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "docs/**/*"
   ],
+  "directories": {
+    "doc": "./docs"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -62,7 +66,9 @@
     "check": "bun run typecheck && bun run lint && bun run build && attw --pack . && publint",
     "test:unit": "bun test test/unit --timeout 60000",
     "test:live": "bun test test/live --timeout 60000",
-    "check:pack": "attw --pack . && publint"
+    "check:pack": "attw --pack . && publint",
+    "prepack": "node scripts/fetch-docs.mjs",
+    "postpack": "rm -rf docs"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
