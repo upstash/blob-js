@@ -171,27 +171,13 @@ Requests carry the SDK version, runtime, and platform. Set `UPSTASH_DISABLE_TELE
 
 ## AI agents
 
-The published package includes documentation under `node_modules/@upstash/blob/docs/` and
-readable TypeScript source under `node_modules/@upstash/blob/src/`. Start with
-`docs/overall/quickstart.mdx`, then search the relevant pages and source files. Normal imports
-continue to use the compiled files in `dist/`.
-
-The separate [Blob skill](https://github.com/upstash/blob-js/blob/main/skills/blob/SKILL.md) tells
-coding agents when and where to read those pages. Installing the SDK includes the documentation;
-install the skill separately, or add this instruction to your project's agent configuration:
-
-> Before writing @upstash/blob code, read the relevant pages in node_modules/@upstash/blob/docs/ and check implementation details in node_modules/@upstash/blob/src/.
+Read bundled docs in `node_modules/@upstash/blob/docs/` and source in
+`node_modules/@upstash/blob/src/`. The [Blob agent skill](https://github.com/upstash/skills/tree/main/skills/upstash-blob-js) lives in `upstash/skills`.
 
 ### Maintaining the docs bundle
 
-`prepack` uses `giget gh:upstash/docs/blob docs --force-clean` to fetch the latest Blob docs
-when running `npm pack` or `npm publish`. The generated `docs/` directory stays gitignored and
-is replaced at the next pack. Build with `bun run build` before packing.
-
-Each published tarball keeps its documentation snapshot. Since the docs live in a separate
-repository, check examples against the SDK's types and source when preparing a release.
-CI checks the packed files and imports the installed tarball; releases publish the verified
-tarball without fetching the docs again.
+`prepack` fetches the latest Blob docs with giget when packing or publishing. The generated
+`docs/` folder is gitignored and replaced on each pack.
 
 ## License
 

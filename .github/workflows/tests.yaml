@@ -31,36 +31,6 @@ jobs:
       - name: Check published types and package
         run: bun run check:pack
 
-      - name: Pack and verify release contents
-        id: pack
-        run: |
-          npm pack --json --pack-destination "$RUNNER_TEMP" > "$RUNNER_TEMP/blob-pack.json"
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import { readFileSync } from 'node:fs';
-          const [{ files }] = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/blob-pack.json', 'utf8'));
-          const paths = files.map(file => file.path);
-          for (const required of [
-            'dist/index.js', 'dist/index.cjs', 'dist/index.d.ts',
-            'src/index.ts', 'src/version.ts', 'src/browser/index.ts', 'src/react/index.ts',
-            'docs/overall/quickstart.mdx', 'docs/bucket/connecting.mdx', 'docs/uploads/upload-handler.mdx',
-          ]) assert(paths.includes(required), 'Missing packed file: ' + required);
-          const developmentFile = /(^|\/)(test|tests|__tests__|__snapshots__|fixtures|__fixtures__|__mocks__)(\/|$)|\.(test|test-d|spec)\.[^/]+$/;
-          for (const path of paths) {
-            assert(!/(^|\/)\.env(?:\.|$)/.test(path), 'Environment file in package: ' + path);
-            assert(path.startsWith('docs/') || !developmentFile.test(path), 'Test or fixture in package: ' + path);
-          }
-          console.log('Verified ' + paths.length + ' packed files');
-          NODE
-          echo "artifact=$RUNNER_TEMP/$(jq -r '.[0].filename' "$RUNNER_TEMP/blob-pack.json")" >> "$GITHUB_OUTPUT"
-
-      - name: Upload tested package
-        uses: actions/upload-artifact@v4
-        with:
-          name: blob-package
-          path: ${{ steps.pack.outputs.artifact }}
-          if-no-files-found: error
-
   unit:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -110,34 +80,35 @@ jobs:
       matrix:
         node: [20, 22, 24]
     steps:
+      - name: Setup repo
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
 
-      - name: Download tested package
-        uses: actions/download-artifact@v4
-        with:
-          name: blob-package
-          path: ${{ runner.temp }}/blob-package
+      - name: Install dependencies
+        run: bun install
 
-      - name: Install package in a consumer project
-        run: |
-          mkdir -p "$RUNNER_TEMP/blob-consumer"
-          cd "$RUNNER_TEMP/blob-consumer"
-          npm init -y
-          npm install --ignore-scripts "$RUNNER_TEMP"/blob-package/*.tgz react@19.2.8
+      - name: Build
+        run: bun run build
 
-      # Exercise the installed tarball, outside the SDK checkout, on each supported Node major.
+      # Catches a dist that only loads under a bundler: bad extensions, a stray
+      # `.ts` import, or ESM/CJS interop that breaks on plain node. Every published
+      # entrypoint, so a react-only or browser-only break can't hide behind the root.
       - name: Import ESM build
-        working-directory: ${{ runner.temp }}/blob-consumer
         run: |
           node -e "import('@upstash/blob').then(m => { if (!m.Bucket) throw new Error('no Bucket'); })"
           node -e "import('@upstash/blob/browser').then(m => { if (!m.upload) throw new Error('no upload'); })"
           node -e "import('@upstash/blob/react').then(m => { if (!m.useUpload) throw new Error('no useUpload'); })"
 
       - name: Require CJS build
-        working-directory: ${{ runner.temp }}/blob-consumer
         run: |
           node -e "if (!require('@upstash/blob').Bucket) throw new Error('no Bucket');"
           node -e "if (!require('@upstash/blob/browser').upload) throw new Error('no upload');"

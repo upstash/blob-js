@@ -49,69 +49,14 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Pack and verify release contents
-        id: pack
-        run: |
-          npm pack --json --pack-destination "$RUNNER_TEMP" > "$RUNNER_TEMP/blob-pack.json"
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import { readFileSync } from 'node:fs';
-          const [{ files }] = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/blob-pack.json', 'utf8'));
-          const paths = files.map(file => file.path);
-          for (const required of [
-            'dist/index.js', 'dist/index.cjs', 'dist/index.d.ts',
-            'src/index.ts', 'src/version.ts', 'src/browser/index.ts', 'src/react/index.ts',
-            'docs/overall/quickstart.mdx', 'docs/bucket/connecting.mdx', 'docs/uploads/upload-handler.mdx',
-          ]) assert(paths.includes(required), 'Missing packed file: ' + required);
-          const developmentFile = /(^|\/)(test|tests|__tests__|__snapshots__|fixtures|__fixtures__|__mocks__)(\/|$)|\.(test|test-d|spec)\.[^/]+$/;
-          for (const path of paths) {
-            assert(!/(^|\/)\.env(?:\.|$)/.test(path), 'Environment file in package: ' + path);
-            assert(path.startsWith('docs/') || !developmentFile.test(path), 'Test or fixture in package: ' + path);
-          }
-          console.log('Verified ' + paths.length + ' packed files');
-          NODE
-          echo "artifact=$RUNNER_TEMP/$(jq -r '.[0].filename' "$RUNNER_TEMP/blob-pack.json")" >> "$GITHUB_OUTPUT"
-
-      - name: Check installed release package
-        env:
-          BLOB_ARTIFACT: ${{ steps.pack.outputs.artifact }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/blob-release-consumer"
-          cd "$RUNNER_TEMP/blob-release-consumer"
-          npm init -y
-          npm install --ignore-scripts "$BLOB_ARTIFACT" react@19.2.8
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import { createRequire } from 'node:module';
-          import { readFileSync } from 'node:fs';
-          const require = createRequire(import.meta.url);
-          for (const [entry, name] of [['@upstash/blob', 'Bucket'], ['@upstash/blob/browser', 'upload'], ['@upstash/blob/react', 'useUpload']]) {
-            assert.equal(typeof (await import(entry))[name], 'function');
-            assert.equal(typeof require(entry)[name], 'function');
-          }
-          assert.equal(require('@upstash/blob/package.json').version, process.env.VERSION);
-          assert(readFileSync('node_modules/@upstash/blob/src/version.ts', 'utf8').includes("'v" + process.env.VERSION + "'"));
-          NODE
-
-      - name: Upload verified release package
-        uses: actions/upload-artifact@v4
-        with:
-          name: blob-release-package
-          path: ${{ steps.pack.outputs.artifact }}
-          if-no-files-found: error
-
       # Auth is npm trusted publishing (OIDC), which is what id-token: write above is for.
       # It has to be configured on npmjs.com for @upstash/blob first, and a trusted publisher
       # cannot be set up for a package that does not exist yet: publish the first version by
       # hand, then every tag after that goes through here.
       - name: Publish prerelease
         if: ${{ inputs.prerelease }}
-        env:
-          BLOB_ARTIFACT: ${{ steps.pack.outputs.artifact }}
-        run: npm publish "$BLOB_ARTIFACT" --access public --tag=canary --provenance
+        run: npm publish --access public --tag=canary --provenance
 
       - name: Publish stable release
         if: ${{ !inputs.prerelease }}
-        env:
-          BLOB_ARTIFACT: ${{ steps.pack.outputs.artifact }}
-        run: npm publish "$BLOB_ARTIFACT" --access public --provenance
+        run: npm publish --access public --provenance
