@@ -102,6 +102,29 @@ function handler(extra: Record<string, unknown> = {}) {
 }
 
 describe('dispatch', () => {
+  test('text upload completion uses stored metadata instead of a gzip representation', async () => {
+    let completed = false;
+    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.txt' }), onUploadComplete: () => { completed = true; } });
+    const begin = await began(uploads, undefined, { name: 'a.txt', type: 'text/plain', size: 4 });
+    r2Handler = (call) => scriptedR2(call.headers.get('accept-encoding') === 'identity'
+      ? { 'content-length': '4', etag: '"e"', 'content-type': 'text/plain' }
+      : { 'content-encoding': 'gzip', etag: 'W/"e"', 'content-type': 'text/plain' })(call);
+    const response = await post(uploads, undefined, { phase: 'end', completionToken: begin.completionToken, parts: [{ n: 1, etag: '"e"' }] });
+    expect(response.status).toBe(200);
+    expect(completed).toBe(true);
+    expect(r2Calls().some((call) => call.method === 'DELETE')).toBe(false);
+  });
+
+  test('a missing object length fails completion without deleting the uploaded object', async () => {
+    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.txt' }) });
+    const begin = await began(uploads, undefined, { name: 'a.txt', type: 'text/plain', size: 4 });
+    r2Handler = scriptedR2({ etag: '"e"', 'content-type': 'text/plain' });
+    const response = await post(uploads, undefined, { phase: 'end', completionToken: begin.completionToken, parts: [{ n: 1, etag: '"e"' }] });
+    expect(response.status).toBe(500);
+    expect((await response.json()).code).toBe('request_failed');
+    expect(r2Calls().some((call) => call.method === 'DELETE')).toBe(false);
+  });
+
   test('the query names the route, for GET and for POST', async () => {
     const uploads = handler();
     const res = await uploads.GET(new Request(url('large')));
