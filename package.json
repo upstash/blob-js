@@ -73,7 +73,7 @@
     "test:unit": "bun test test/unit --timeout 60000",
     "test:live": "bun test test/live --timeout 60000",
     "check:pack": "attw --pack . && publint",
-    "prepack": "giget gh:upstash/docs/blob docs --force-clean 1>&2"
+    "prepack": "giget gh:upstash/docs/blob#d106c1f000d1b4f0acfb39c77e2180c281ed41e8 docs --force-clean 1>&2"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
