@@ -172,8 +172,13 @@ Requests carry the SDK version, runtime, and platform. Set `UPSTASH_DISABLE_TELE
 ## AI agents
 
 Read bundled docs in `node_modules/@upstash/blob/docs/` and source in
-`node_modules/@upstash/blob/src/`. For SDK guidance in your coding agent, install the
-[Blob agent skill](https://github.com/upstash/skills/tree/main/skills/upstash-blob-js).
+`node_modules/@upstash/blob/src/`. For SDK guidance in your coding agent, install the Blob agent skill:
+
+```bash
+pnpx skills add upstash/skills --skill upstash-blob-js
+```
+
+See [installation instructions](https://upstash.com/docs/agent-resources/skills#installation) for agent-specific options.
 
 ### Maintaining the docs bundle
 
