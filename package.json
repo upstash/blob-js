@@ -7,7 +7,13 @@
   "sideEffects": false,
   "files": [
     "dist",
-    "docs/**/*"
+    "src",
+    "docs",
+    "!src/**/*.test.*",
+    "!src/**/*.test-d.*",
+    "!src/**/*.spec.*",
+    "!src/**/__tests__/**",
+    "!src/**/__snapshots__/**"
   ],
   "directories": {
     "doc": "./docs"
@@ -67,8 +73,7 @@
     "test:unit": "bun test test/unit --timeout 60000",
     "test:live": "bun test test/live --timeout 60000",
     "check:pack": "attw --pack . && publint",
-    "prepack": "node scripts/fetch-docs.mjs",
-    "postpack": "rm -rf docs"
+    "prepack": "giget gh:upstash/docs/blob docs --force-clean 1>&2"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
@@ -78,6 +83,7 @@
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
     "eslint": "10.9.0",
+    "giget": "3.3.1",
     "publint": "0.3.24",
     "react": "19.2.8",
     "react-dom": "19.2.8",

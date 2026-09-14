@@ -171,26 +171,27 @@ Requests carry the SDK version, runtime, and platform. Set `UPSTASH_DISABLE_TELE
 
 ## AI agents
 
-The published package includes the Upstash Blob documentation as `.mdx` files under
-`node_modules/@upstash/blob/docs/`. Start with `docs/README.md` there for the page index and exact
-source revision bundled with the release.
+The published package includes documentation under `node_modules/@upstash/blob/docs/` and
+readable TypeScript source under `node_modules/@upstash/blob/src/`. Start with
+`docs/overall/quickstart.mdx`, then search the relevant pages and source files. Normal imports
+continue to use the compiled files in `dist/`.
 
 The separate [Blob skill](https://github.com/upstash/blob-js/blob/main/skills/blob/SKILL.md) tells
 coding agents when and where to read those pages. Installing the SDK includes the documentation;
 install the skill separately, or add this instruction to your project's agent configuration:
 
-> Before writing @upstash/blob code, read node_modules/@upstash/blob/docs/README.md and the relevant bundled pages.
+> Before writing @upstash/blob code, read the relevant pages in node_modules/@upstash/blob/docs/ and check implementation details in node_modules/@upstash/blob/src/.
 
 ### Maintaining the docs bundle
 
-`prepack` fetches the docs commit pinned in `scripts/docs-ref.txt`. Update that full commit SHA
-alongside SDK changes and check that the bundled examples match the SDK before releasing.
-`postpack` removes the generated `docs/` directory.
+`prepack` uses `giget gh:upstash/docs/blob docs --force-clean` to fetch the latest Blob docs
+when running `npm pack` or `npm publish`. The generated `docs/` directory stays gitignored and
+is replaced at the next pack. Build with `bun run build` before packing.
 
-For local testing, `BLOB_DOCS_REF` overrides the pin with a commit SHA, branch or tag, and
-`BLOB_DOCS_DIR` copies from a local docs checkout or its `blob/` directory. A local copy is marked
-unversioned in the index; remote bundles record the resolved commit even when a branch or tag
-is supplied. Leave both overrides unset for releases.
+Each published tarball keeps its documentation snapshot. Since the docs live in a separate
+repository, check examples against the SDK's types and source when preparing a release.
+CI checks the packed files and imports the installed tarball; releases publish the verified
+tarball without fetching the docs again.
 
 ## License
 
