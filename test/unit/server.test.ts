@@ -3,6 +3,7 @@ import { Bucket, BlobError, uploadRoute, uploadHandler } from '../../src/index.t
 import { r2Of } from '../../src/server/bucket.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { deriveRouteId } from '../../src/server/handle-upload.ts';
+import { headFromHeaders } from '../../src/server/r2.ts';
 import { encodeToken } from '../../src/server/token.ts';
 import type { WireBeginResponse, WirePartsResponse } from '../../src/shared/types.ts';
 
@@ -65,7 +66,7 @@ beforeEach(() => {
   calls = [];
   mints = 0;
   mintResponse = () => Response.json(creds());
-  r2Handler = () => new Response('', { status: 200 });
+  r2Handler = () => new Response('', { status: 200, headers: { 'content-length': '0' } });
 });
 
 const bucket = () => new Bucket({ token: TOKEN });
@@ -87,6 +88,53 @@ test('fromEnv forwards cache options with an omitted name or options alone', asy
     if (previous === undefined) delete process.env.UPSTASH_BLOB_TOKEN;
     else process.env.UPSTASH_BLOB_TOKEN = previous;
   }
+});
+
+describe('object read metadata', () => {
+  test('info and get retain stored size and strong ETag when storage can negotiate gzip', async () => {
+    r2Handler = (call) => new Response(call.method === 'HEAD' ? null : 'hello', {
+      headers: call.headers.get('accept-encoding') === 'identity'
+        ? { 'content-length': '5', etag: '"original"', 'content-type': 'text/plain' }
+        : { 'content-encoding': 'gzip', etag: 'W/"original"', 'content-type': 'text/plain' },
+    });
+    const info = await bucket().info('a.txt');
+    expect(info.size).toBe(5);
+    expect(info.etag).toBe('"original"');
+    const download = await bucket().get('a.txt');
+    expect(download.size).toBe(5);
+    expect(download.etag).toBe('"original"');
+    expect(await new Response(download.body).text()).toBe('hello');
+  });
+
+  test('updateJson uses the original ETag for its conditional write', async () => {
+    r2Handler = (call) => {
+      if (call.method === 'GET') return new Response('{"count":1}', {
+        headers: call.headers.get('accept-encoding') === 'identity'
+          ? { 'content-length': '11', etag: '"original"' }
+          : { 'content-encoding': 'gzip', etag: 'W/"original"' },
+      });
+      return call.headers.get('if-match') === '"original"'
+        ? new Response(null, { headers: { etag: '"updated"' } })
+        : new Response(null, { status: 412 });
+    };
+    expect((await bucket().updateJson<{ count: number }>('a.json', (value) => ({ count: value!.count + 1 }), { maxAttempts: 1 })).etag).toBe('"updated"');
+    expect(r2Calls().filter((call) => call.method === 'PUT')).toHaveLength(1);
+  });
+
+  test('unknown or invalid object lengths are errors, while an explicit zero is valid', () => {
+    for (const value of [null, '', '-1', '1.5', 'NaN', 'Infinity', '9007199254740992']) {
+      const headers = new Headers(value === null ? {} : { 'content-length': value });
+      expect(() => headFromHeaders(headers)).toThrow('Content-Length');
+    }
+    expect(headFromHeaders(new Headers({ 'content-length': '0' })).size).toBe(0);
+  });
+
+  test('get cancels its unread body when object metadata is invalid', async () => {
+    let cancelled = false;
+    r2Handler = () => new Response(new ReadableStream({ cancel() { cancelled = true; } }), { headers: { etag: '"original"' } });
+    await expect(bucket().get('a.txt')).rejects.toMatchObject({ code: 'request_failed' });
+    expect(cancelled).toBe(true);
+  });
 });
 
 describe('credential cache', () => {

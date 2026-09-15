@@ -387,9 +387,14 @@ export class Bucket {
   async get(path: string): Promise<BlobDownload> {
     const res = await this.r2.fetch({ method: 'GET', path });
     if (!res.ok) throw await errorFromResponse(res);
-    const head = headFromHeaders(res.headers);
-    const blob = this.r2.blobObject(path, head.size, head.etag, head.uploadedAt);
-    return { ...blob, contentType: head.contentType, metadata: head.metadata, body: res.body ?? new Blob([]).stream() };
+    try {
+      const head = headFromHeaders(res.headers);
+      const blob = this.r2.blobObject(path, head.size, head.etag, head.uploadedAt);
+      return { ...blob, contentType: head.contentType, metadata: head.metadata, body: res.body ?? new Blob([]).stream() };
+    } catch (error) {
+      await res.body?.cancel().catch(() => {});
+      throw error;
+    }
   }
 
   async info(path: string): Promise<BlobInfo> {
