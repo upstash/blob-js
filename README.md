@@ -169,6 +169,22 @@ if (BlobError.is(e) && e.code === 'too_large') showError(e.message);
 Requests carry the SDK version, runtime, and platform. Set `UPSTASH_DISABLE_TELEMETRY` or pass
 `enableTelemetry: false`.
 
+## AI agents
+
+Read bundled docs in `node_modules/@upstash/blob/docs/` and source in
+`node_modules/@upstash/blob/src/`. For SDK guidance in your coding agent, install the Blob agent skill:
+
+```bash
+pnpx skills add upstash/skills --skill upstash-blob-js
+```
+
+See [installation instructions](https://upstash.com/docs/agent-resources/skills#installation) for agent-specific options.
+
+### Maintaining the docs bundle
+
+`prepack` fetches the latest Blob docs with giget when packing or publishing. The generated
+`docs/` folder is gitignored and replaced on each pack.
+
 ## License
 
 [MIT](./LICENSE)
