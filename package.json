@@ -69,7 +69,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint src test",
     "test": "bun test --timeout 60000",
-    "check": "bun run typecheck && bun run lint && bun run build && attw --pack . && publint",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run build && attw --pack . && publint",
     "test:unit": "bun test test/unit --timeout 60000",
     "test:live": "bun test test/live --timeout 60000",
     "check:pack": "attw --pack . && publint",
@@ -118,5 +118,6 @@
     "react": {
       "optional": true
     }
-  }
+  },
+  "packageManager": "pnpm@10.33.0"
 }
