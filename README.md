@@ -168,7 +168,12 @@ on expiry.
 Everything throws a `BlobError` with a `code` from a closed list, a `status`, and a printable
 `message`. Use `BlobError.is(e)`, not `instanceof`: an ESM and a CJS copy are two classes. A route
 answers with `e.toJSON()` and the browser rebuilds it, so `error.code` in a hook is the code the
-server raised. `formatBytes` is exported from all three entrypoints; sizes are decimal.
+server raised. `formatBytes` is exported from all three entrypoints and displays decimal byte units.
+
+Size options always count bytes, never bits. Decimal units (`KB`, `MB`, `GB`, `TB`) use powers of
+1,000; explicit binary units (`KiB`, `MiB`, `GiB`, `TiB`) use powers of 1,024. Unit names ignore
+case. For a 32 MiB file limit, use `constraints: { maxSize: '32MiB' }` or `maxSize: 33_554_432`.
+`'32mb'` remains 32,000,000 bytes; it is not large enough for a 32 MiB file.
 
 ```ts
 if (BlobError.is(e) && e.code === 'too_large') showError(e.message);

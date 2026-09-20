@@ -24,9 +24,19 @@ describe('parseSize', () => {
     expect(parseSize(10.9)).toBe(10);
   });
 
-  test('binary units are not part of the user-facing vocabulary', () => {
-    expect(() => parseSize('5mib')).toThrow('unknown unit');
-    expect(() => parseSize('5 KiB')).toThrow('unknown unit');
+  test('explicit binary units count bytes with fractions, spacing and case', () => {
+    expect(parseSize('5 KiB')).toBe(5 * 1024);
+    expect(parseSize('32MiB')).toBe(33_554_432);
+    expect(parseSize('32mib')).toBe(33_554_432);
+    expect(parseSize(' 1.5 GiB ')).toBe(1_610_612_736);
+    expect(parseSize('1TiB')).toBe(1_099_511_627_776);
+    expect(parseSize('32MB')).toBe(32_000_000);
+    expect(parseSize('32mb')).toBe(32_000_000);
+  });
+
+  test('rejects bit units rather than treating them as bytes', () => {
+    expect(() => parseSize('32mbit')).toThrow('unknown unit');
+    expect(() => parseSize('32Mbps')).toThrow('unknown unit');
   });
 
   test('rejects junk and negatives, naming the option', () => {

@@ -465,3 +465,20 @@ describe('direct routes', () => {
     expect((await bad.json()).code).toBe('invalid_input');
   });
 });
+
+// The file boundary that failed in Agent Bench: 32 MiB is larger than 32 decimal MB.
+test('a 32MiB upload limit accepts the exact file size and rejects one byte over', async () => {
+  const uploads = uploadHandler({
+    bucket: bucket(),
+    constraints: { maxSize: '32MiB' },
+    onBeforeUpload: () => ({ path: 'large/file.bin' }),
+  });
+  expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ constraints: { maxSize: 33_554_432 } });
+  const begin = await post(uploads, undefined, { phase: 'begin', file: { name: 'file.bin', type: 'application/octet-stream', size: 33_554_432 } });
+  expect(begin.status).toBe(200);
+  expect((await begin.json()).upload.multipart).toBe(true);
+  calls = [];
+  const oversized = await post(uploads, undefined, { phase: 'begin', file: { name: 'file.bin', type: 'application/octet-stream', size: 33_554_433 } });
+  expect(oversized.status).toBe(413);
+  expect(r2Calls()).toHaveLength(0);
+});

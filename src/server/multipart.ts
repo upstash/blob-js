@@ -2,7 +2,7 @@ import { BlobError } from '../shared/errors.ts';
 import { formatBytes, parseSize, type Size } from '../shared/units.ts';
 
 /**
- * Decimal, like every user-facing size. One line for both halves of the SDK: `bucket.put()` and a
+ * The default threshold is decimal. One line for both halves of the SDK: `bucket.put()` and a
  * direct browser upload each send a body under this as a single PUT and split anything over it.
  *
  * Parts are three round trips and one more per chunk where a PUT is one, and an upload begun and
