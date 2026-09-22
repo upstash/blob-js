@@ -30,11 +30,13 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
+      # No `cache: pnpm` here on purpose. This job holds the npm publish token, and a
+      # restored Actions cache is exactly what the May 2026 TanStack compromise used to
+      # get malicious code into a release build. A fresh install costs seconds.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
           registry-url: https://registry.npmjs.org
 
       - name: Set version
