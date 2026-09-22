@@ -17,6 +17,12 @@ importers:
       '@happy-dom/global-registrator':
         specifier: 20.11.6
         version: 20.11.6
+      '@smithy/core':
+        specifier: 3.33.3
+        version: 3.33.3
+      '@smithy/signature-v4':
+        specifier: 5.7.3
+        version: 5.7.3
       '@types/bun':
         specifier: 1.4.0
         version: 1.4.0
