@@ -180,6 +180,19 @@ pnpx skills add upstash/skills --skill upstash-blob-js
 
 See [installation instructions](https://upstash.com/docs/agent-resources/skills#installation) for agent-specific options.
 
+### Development
+
+Use pnpm 10.33.0 for dependency management and Bun for the test runner, matching the
+other SDKs. Dependencies have a seven-day minimum release age.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm run test:unit
+```
+
+`pnpm run test:live` runs against a real bucket and requires Blob credentials.
+
 ### Maintaining the docs bundle
 
 `prepack` fetches the latest Blob docs with giget when packing or publishing. The generated

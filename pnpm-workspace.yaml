@@ -1,0 +1,7 @@
+# Wait seven days before installing newly published dependencies.
+minimumReleaseAge: 10080
+blockExoticSubdeps: true
+
+# tsup requires esbuild's native binary.
+allowBuilds:
+  esbuild: true

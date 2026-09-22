@@ -69,7 +69,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint src test",
     "test": "bun test --timeout 60000",
-    "check": "bun run typecheck && bun run lint && bun run build && attw --pack . && publint",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run build && attw --pack . && publint",
     "test:unit": "bun test test/unit --timeout 60000",
     "test:live": "bun test test/live --timeout 60000",
     "check:pack": "attw --pack . && publint",
@@ -79,6 +79,8 @@
     "@arethetypeswrong/cli": "0.18.5",
     "@aws-sdk/client-s3": "3.1116.0",
     "@happy-dom/global-registrator": "20.11.6",
+    "@smithy/core": "3.33.3",
+    "@smithy/signature-v4": "5.7.3",
     "@types/bun": "1.4.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
@@ -118,5 +120,6 @@
     "react": {
       "optional": true
     }
-  }
+  },
+  "packageManager": "pnpm@10.33.0"
 }
