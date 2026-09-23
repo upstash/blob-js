@@ -23,34 +23,22 @@ function splitExtension(name: string): [stem: string, extension: string] {
   return m && m.index > 0 ? [name.slice(0, m.index), m[0]] : [name, ''];
 }
 
-function pathValue(value: unknown): string {
-  const text = String(value);
-  if (/[/\\\p{Cc}]/u.test(text) || text === '.' || text === '..') {
-    throw new TypeError('uniquePath interpolations may not contain slashes, backslashes, control characters, or be "." or ".."');
-  }
-  return text;
-}
-
 /**
- * Adds a random suffix to the final filename, before its extension. Preserves case, spaces,
- * punctuation, Unicode and length in both literals and interpolations; it does not slugify.
- * For example, uniquePath`users/${'Alice_123'}/${'Q3 Report.pdf'}` produces
- * `users/Alice_123/Q3 Report-<random>.pdf`.
+ * Adds a random suffix to the final filename, before its extension, so uploads never overwrite
+ * each other. Everything else is kept exactly as given: case, spaces, punctuation, Unicode, slashes
+ * and length. Call it with a string or as a template tag:
  *
- * Put directory separators in the literal chunks. Interpolations containing slashes,
- * backslashes, control characters, or exactly "." or ".." throw TypeError. The assembled path
- * also rejects backslashes, control characters and "." or ".." segments. An empty final
- * filename uses "file". Store the returned path and use it unchanged for later reads/deletes.
+ *   uniquePath(`${prefix}users/${userId}/${file.name}`)
+ *   uniquePath`users/${userId}/${file.name}`
+ *
+ * Both produce `users/Alice_123/Q3 Report-<random>.pdf`. An empty final filename uses "file".
+ * Paths are not validated here; every request refuses "." and ".." segments and percent-encodes
+ * the rest (see encodeKey). Store the returned path and use it unchanged for later reads/deletes.
  */
-export function uniquePath(strings: TemplateStringsArray, ...values: unknown[]): string {
-  let path = '';
-  for (let i = 0; i < strings.length; i++) {
-    path += strings[i] ?? '';
-    if (i < values.length) path += pathValue(values[i]);
-  }
-  if (/[\\\p{Cc}]/u.test(path) || path.split('/').some((segment) => segment === '.' || segment === '..')) {
-    throw new TypeError('uniquePath may not contain backslashes, control characters, or "." or ".." segments');
-  }
+export function uniquePath(path: string): string;
+export function uniquePath(strings: TemplateStringsArray, ...values: unknown[]): string;
+export function uniquePath(input: string | TemplateStringsArray, ...values: unknown[]): string {
+  const path = typeof input === 'string' ? input : String.raw({ raw: input }, ...values);
   const basenameAt = path.lastIndexOf('/') + 1;
   const [stem, extension] = splitExtension(path.slice(basenameAt));
   return `${path.slice(0, basenameAt)}${stem || 'file'}-${randomSuffix()}${extension}`;

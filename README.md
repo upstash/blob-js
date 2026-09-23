@@ -103,15 +103,13 @@ export const uploads = uploadHandler({
 export const { GET, POST } = uploads;
 ```
 
-`uniquePath` adds an eight-character random suffix to the final filename while preserving the
-owner ID and filename characters: `Alice_123/Q3 Report.pdf` becomes
-`Alice_123/Q3 Report-<random>.pdf`. It does not lowercase, normalize Unicode, trim or truncate
-values. Directory separators belong in the template's literal chunks; interpolated separators,
-control characters and `.` or `..` throw `TypeError`. Store the returned path and authorize reads
-and deletes using the stored owner and exact path.
-
-This replaces the earlier slugging behavior. Values such as `../report.pdf` now throw instead
-of silently becoming a basename. Existing stored paths remain valid; keep using their saved keys.
+`uniquePath` adds an eight-character random suffix to the final filename and keeps everything
+else as given: `Alice_123/Q3 Report.pdf` becomes `Alice_123/Q3 Report-<random>.pdf`. It does not
+lowercase, normalize Unicode, trim or truncate values, and it accepts slashes anywhere, so a
+prefix works either way: ``uniquePath`${prefix}${user.id}/${file.name}` `` or
+``uniquePath(`${prefix}${user.id}/${file.name}`)``. Paths with `.` or `..` segments are refused
+when used. Store the returned path and authorize reads and deletes using the stored owner and
+exact path.
 
 ```tsx
 'use client';

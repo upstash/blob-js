@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { uniquePath } from '../../src/server/unique-path.ts';
+import { encodeKey } from '../../src/server/keys.ts';
 
 const B58 = '[1-9A-HJ-NP-Za-km-z]';
 const SUFFIX = `${B58}{8}`;
@@ -22,20 +23,26 @@ describe('uniquePath', () => {
     expect(uniquePath`chat/${'42'}/${'q3-report.pdf'}`).toMatch(new RegExp(`^chat/42/q3-report-${SUFFIX}\\.pdf$`));
   });
 
-  test('rejects directory separators, traversal and controls in values instead of rewriting them', () => {
-    for (const value of ['../admin/x.png', 'b/c', 'a\\b.png', '.', '..', 'a\nb.png', 'a\rb.png', 'a\tb.png', 'a\0b.png', 'a\u007fb.png', 'a\u0085b.png']) {
-      expect(() => uniquePath`chat/${value}`).toThrow(TypeError);
-    }
-    expect(() => uniquePath`${'../admin/x.png'}`).toThrow('uniquePath interpolations');
+  test('accepts a plain string', () => {
+    expect(uniquePath('chat/42/q3-report.pdf')).toMatch(new RegExp(`^chat/42/q3-report-${SUFFIX}\\.pdf$`));
   });
 
-  test('validates assembled segments before adding the suffix', () => {
-    expect(() => uniquePath`safe/.${''}./file.png`).toThrow(TypeError);
-    expect(() => uniquePath`safe/.${''}/file.png`).toThrow(TypeError);
-    expect(() => uniquePath`safe/.${''}.`).toThrow(TypeError);
-    expect(() => uniquePath`../${'file.png'}`).toThrow(TypeError);
-    expect(() => uniquePath`safe\\${'file.png'}`).toThrow(TypeError);
-    expect(() => uniquePath`safe/\n${'file.png'}`).toThrow(TypeError);
+  test('a prefix with a trailing slash can be interpolated', () => {
+    const prefix = 'agent-bench/run-1/';
+    expect(stripSuffix(uniquePath`${prefix}${'alice'}/${'a.png'}`)).toBe('agent-bench/run-1/alice/a.png');
+    expect(stripSuffix(uniquePath(`${prefix}alice/a.png`))).toBe('agent-bench/run-1/alice/a.png');
+  });
+
+  test('does not rewrite or reject slashes in values; the suffix goes on the final segment', () => {
+    expect(stripSuffix(uniquePath`chat/${'b/c.png'}`)).toBe('chat/b/c.png');
+    expect(uniquePath`chat/${'b/c.png'}`).toMatch(new RegExp(`^chat/b/c-${SUFFIX}\\.png$`));
+  });
+
+  test('traversal is refused where the key is used, not here', () => {
+    for (const path of [uniquePath`uploads/${'..'}/${'x.png'}`, uniquePath('a/./b.png'), uniquePath('../x.png')]) {
+      expect(() => encodeKey(path)).toThrow(TypeError);
+    }
+    expect(encodeKey(uniquePath`${'a\\b'}/${'c\nd.png'}`)).not.toMatch(/[\\\n]/);
   });
 
   test('preserves unicode, punctuation, emoji and format characters', () => {
