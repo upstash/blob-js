@@ -250,18 +250,28 @@ describe('signedReadUrl', () => {
   test("the agent's refusal arrives as a BlobError carrying its reason", async () => {
     resetCredentialCaches();
     const refuse = (status: number, error: string) => () => Response.json({ error }, { status });
+    // The owner's notice stays on cause: an upload route sends e.message to its end users.
     presignResponse = refuse(403, 'presign is not enabled for this bucket');
-    await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ code: 'forbidden', status: 403, message: 'Presign is not enabled for this bucket' });
-    presignResponse = refuse(401, 'bucket suspended');
-    await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ code: 'unauthorized', message: 'Bucket suspended' });
+    const denied = await bucket()
+      .signedReadUrl('a')
+      .catch((x) => x);
+    expect(denied).toMatchObject({ code: 'forbidden', status: 403, cause: 'presign is not enabled for this bucket' });
+    presignResponse = refuse(401, 'Suspended for a failed payment. Add a payment method.');
+    const suspended = await bucket()
+      .signedReadUrl('a')
+      .catch((x) => x);
+    expect(suspended).toMatchObject({ code: 'unauthorized', cause: 'Suspended for a failed payment. Add a payment method.' });
+    expect(JSON.stringify(suspended.toJSON())).not.toContain('payment');
     presignResponse = refuse(400, 'key must not contain empty, "." or ".." segments');
     const e = await bucket()
       .signedReadUrl('a')
       .catch((x) => x);
     expect(e.code).toBe('invalid_input');
     expect(e.message).toContain('empty, "." or ".." segments');
+    presignResponse = refuse(413, 'body too large');
+    await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ code: 'invalid_input' });
     // Refusals are answers, not outages: none was asked twice.
-    expect(presigns.length).toBe(3);
+    expect(presigns.length).toBe(4);
   });
 
   test('a 429 or a 5xx is asked again, three times at most', async () => {
@@ -312,7 +322,7 @@ describe('signedUploadUrl', () => {
   test('a read-only bucket is refused by the agent up front', async () => {
     resetCredentialCaches();
     presignResponse = () => Response.json({ error: 'bucket is read-only' }, { status: 403 });
-    await expect(bucket().signedUploadUrl('a')).rejects.toMatchObject({ code: 'forbidden', message: 'Bucket is read-only' });
+    await expect(bucket().signedUploadUrl('a')).rejects.toMatchObject({ code: 'forbidden', cause: 'bucket is read-only' });
   });
 });
 

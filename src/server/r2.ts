@@ -298,10 +298,12 @@ export class R2 {
 async function presignedFrom(res: Response): Promise<Presigned> {
   const body = (await res.json().catch(() => undefined)) as { url?: unknown; expiresAt?: unknown; error?: unknown } | undefined;
   const reason = typeof body?.error === 'string' ? body.error : undefined;
-  if (res.status === 400) throw new BlobError('invalid_input', { message: `the signing service refused the request: ${reason ?? 'bad request'}` });
-  // The agent names a suspended bucket in the 401, and a read-only one or one without presigning in the 403.
-  if (res.status === 401) throw new BlobError('unauthorized', { message: reason ?? 'the bucket token was rejected' });
-  if (res.status === 403) throw new BlobError('forbidden', { message: reason ?? 'the signing service refused this bucket' });
+  // 413 is a request body over the agent's cap, which only oversized metadata reaches.
+  if (res.status === 400 || res.status === 413) throw new BlobError('invalid_input', { message: `the signing service refused the request: ${reason ?? 'body too large'}` });
+  // A 401 or 403 reason is the bucket owner's billing notice (suspended, read-only), and an upload
+  // route hands e.message to its end users, so it rides on cause, which toJSON() never sends.
+  if (res.status === 401) throw new BlobError('unauthorized', { message: 'the bucket token was rejected', cause: reason });
+  if (res.status === 403) throw new BlobError('forbidden', { message: 'Upstash refused to sign a url for this bucket', cause: reason });
   if (res.status === 429) throw new BlobError('rate_limited', { message: 'presign requests are rate limited' });
   if (!res.ok) throw new BlobError('request_failed', { message: `presign request failed with ${res.status}${reason ? `: ${reason}` : ''}`, status: 502 });
 

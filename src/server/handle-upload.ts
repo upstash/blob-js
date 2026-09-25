@@ -198,8 +198,12 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       parts = await presignParts(payload, 1);
     } catch (e) {
       // The browser never gets the token it would cancel with, so a multipart nobody can sign parts
-      // for is aborted here rather than left as billed storage nothing lists.
-      if (uploadId !== undefined) await r2.abortMultipart(decided.path, uploadId).catch(() => {});
+      // for is aborted here rather than left billed until something sweeps it.
+      if (uploadId !== undefined) {
+        await r2.abortMultipart(decided.path, uploadId).catch((abortError) => {
+          console.error(`[upstash-blob] upload ${JSON.stringify(decided.path)} could not be signed and its multipart could not be aborted`, abortError);
+        });
+      }
       throw e;
     }
     return { completionToken, path: decided.path, upload: { partSize, multipart, parts } };

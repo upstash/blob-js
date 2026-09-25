@@ -118,8 +118,8 @@ function sentenceCase(message: string): string {
 }
 
 // e.message never carries a credential, a token, or an internal path. Every message assembled
-// here comes from a code, a caller-supplied string, an HTTP status, or the reason the agent gave
-// for refusing to sign.
+// here comes from a code, a caller-supplied string, an HTTP status, or the agent's reason for
+// refusing a malformed signing request.
 export class BlobError extends Error {
   readonly code: BlobErrorCode;
   readonly status: number;

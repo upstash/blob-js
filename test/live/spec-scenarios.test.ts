@@ -100,8 +100,7 @@ describe('4. files', () => {
       const id = new URL(req.url).searchParams.get('id')!;
       const row = rows.get(id);
       if (!row || row.owner !== user.id || row.status !== 'ready') return Response.json({ error: 'not found' }, { status: 404 });
-      // No expiresIn: 15m was answered with a link that quietly died with the credential, and the
-      // cap moves, so the default asks for the shorter of five minutes and what it can actually sign.
+      // No expiresIn: the default five minutes is plenty for a click-through.
       const { url } = await priv.signedReadUrl(row.path, { downloadAs: row.name });
       return Response.json({ url });
     });
