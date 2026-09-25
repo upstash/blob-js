@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { HttpRequest } from '@smithy/core/protocols';
 import { Hash } from '@smithy/core/serde';
 import { SignatureV4 } from '@smithy/signature-v4';
-import { amzDate, presign, sha256Hex, signHeaders, uriEncode } from '../../src/server/sigv4.ts';
+import { amzDate, sha256Hex, signHeaders, uriEncode } from '../../src/server/sigv4.ts';
 
 const R2_HOST = 'acct.r2.cloudflarestorage.com';
 
@@ -32,136 +32,6 @@ function oracle(sessionToken?: string) {
     applyChecksum: false,
   });
 }
-
-describe('presign', () => {
-  // AWS S3 docs, "Authenticating Requests: Using Query Parameters (AWS Signature Version 4)",
-  // example GET. The secret in this vector is the slash variant: wJalrXUtnFEMI/K7MDENG/bPx...,
-  // not the plus variant used elsewhere in AWS examples. Swapping them changes the signature.
-  test('matches the AWS documentation vector', async () => {
-    const url = await presign(
-      {
-        accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
-        secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
-        region: 'us-east-1',
-        service: 's3',
-      },
-      {
-        method: 'GET',
-        url: 'https://examplebucket.s3.amazonaws.com/test.txt',
-        expiresIn: 86400,
-        date: new Date('2013-05-24T00:00:00Z'),
-      },
-    );
-
-    const query = url.slice(url.indexOf('?') + 1);
-    expect(url.slice(0, url.indexOf('?'))).toBe('https://examplebucket.s3.amazonaws.com/test.txt');
-    expect(query).toContain('X-Amz-Algorithm=AWS4-HMAC-SHA256');
-    expect(query).toContain('X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request');
-    expect(query).toContain('X-Amz-Date=20130524T000000Z');
-    expect(query).toContain('X-Amz-Expires=86400');
-    expect(query).toContain('X-Amz-SignedHeaders=host');
-    expect(query).toContain('X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404');
-    expect(query).not.toContain('X-Amz-Security-Token');
-  });
-
-  test('matches the @smithy/signature-v4 oracle', async () => {
-    const path = '/bucket-id/some%20key/x.png';
-    const url = `https://${R2_HOST}${path}?uploadId=abc%2Fdef&partNumber=3`;
-
-    const expected = await oracle(CREDS.sessionToken).presign(
-      new HttpRequest({
-        method: 'PUT',
-        protocol: 'https:',
-        hostname: R2_HOST,
-        path,
-        query: { uploadId: 'abc/def', partNumber: '3' },
-        headers: { host: R2_HOST, 'content-length': '12' },
-        // Any body the oracle cannot hash makes its payload hash UNSIGNED-PAYLOAD, which is what
-        // presign() always signs. A sha256 header would be hoisted into the query instead.
-        body: { unhashable: true },
-      }),
-      { signingDate: DATE, expiresIn: 900 },
-    );
-
-    const actual = new URL(
-      await presign(CREDS, {
-        method: 'PUT',
-        url,
-        expiresIn: 900,
-        date: DATE,
-        signedHeaders: { 'content-length': '12' },
-      }),
-    );
-
-    expect(actual.searchParams.get('X-Amz-Signature')).toBe(expected.query?.['X-Amz-Signature'] as string);
-    expect(actual.searchParams.get('X-Amz-SignedHeaders')).toBe('content-length;host');
-    expect(actual.searchParams.get('X-Amz-Security-Token')).toBe(CREDS.sessionToken);
-    expect(actual.pathname).toBe(path);
-  });
-
-  test('a response-content-disposition rides inside the signature', async () => {
-    const path = '/bucket-id/report.pdf';
-    const disposition = `attachment; filename="Report Q3.pdf"; filename*=UTF-8''Report%20Q3.pdf`;
-
-    const expected = await oracle(CREDS.sessionToken).presign(
-      new HttpRequest({
-        method: 'GET',
-        protocol: 'https:',
-        hostname: R2_HOST,
-        path,
-        query: { 'response-content-disposition': disposition, 'response-content-type': 'application/pdf' },
-        headers: { host: R2_HOST },
-        body: { unhashable: true },
-      }),
-      { signingDate: DATE, expiresIn: 300 },
-    );
-
-    const url = new URL(`https://${R2_HOST}${path}`);
-    url.searchParams.set('response-content-disposition', disposition);
-    url.searchParams.set('response-content-type', 'application/pdf');
-    const actual = new URL(await presign(CREDS, { method: 'GET', url: url.href, expiresIn: 300, date: DATE }));
-
-    expect(actual.searchParams.get('response-content-disposition')).toBe(disposition);
-    // Signed, not merely appended: storage refuses a link whose disposition was edited afterwards.
-    expect(actual.searchParams.get('X-Amz-Signature')).toBe(expected.query?.['X-Amz-Signature'] as string);
-  });
-
-  test('omits the session token when the credentials carry none', async () => {
-    const url = await presign(
-      { accessKeyId: CREDS.accessKeyId, secretAccessKey: CREDS.secretAccessKey, region: 'auto' },
-      { method: 'GET', url: `https://${R2_HOST}/b/k`, expiresIn: 60, date: DATE },
-    );
-    expect(url).not.toContain('X-Amz-Security-Token');
-  });
-
-  test('sorts the canonical query by encoded key then value', async () => {
-    const url = await presign(CREDS, {
-      method: 'GET',
-      url: `https://${R2_HOST}/b/k?z=1&a=2&b=2&b=1`,
-      expiresIn: 60,
-      date: DATE,
-    });
-
-    const query = url.slice(url.indexOf('?') + 1);
-    const pairs = query.split('&');
-    // Uppercase sorts before lowercase, so every X-Amz-* param precedes the caller's. Repeated
-    // keys break the tie on the encoded value, and the signature is appended after the canonical
-    // string rather than sorted into it.
-    expect(pairs.slice(0, -1)).toEqual([
-      'X-Amz-Algorithm=AWS4-HMAC-SHA256',
-      'X-Amz-Credential=AKIAEXAMPLE%2F20260824%2Fauto%2Fs3%2Faws4_request',
-      'X-Amz-Date=20260824T123456Z',
-      'X-Amz-Expires=60',
-      'X-Amz-Security-Token=tok%2Fen%2B123',
-      'X-Amz-SignedHeaders=host',
-      'a=2',
-      'b=1',
-      'b=2',
-      'z=1',
-    ]);
-    expect(pairs.at(-1)).toBe(`X-Amz-Signature=${new URL(url).searchParams.get('X-Amz-Signature')}`);
-  });
-});
 
 describe('signHeaders', () => {
   test('matches the @smithy/signature-v4 oracle', async () => {

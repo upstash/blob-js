@@ -17,13 +17,6 @@ export interface SignInput {
   date?: Date;
 }
 
-export interface PresignInput extends SignInput {
-  /** Seconds the URL stays valid, per X-Amz-Expires. */
-  expiresIn: number;
-  /** Header names (lowercase) that the requester must send with these exact values. */
-  signedHeaders?: Record<string, string>;
-}
-
 const enc = new TextEncoder();
 const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 
@@ -119,28 +112,4 @@ export async function signHeaders(creds: SigningCredentials, input: SignInput): 
   headers.authorization = `AWS4-HMAC-SHA256 Credential=${creds.accessKeyId}/${scope}, SignedHeaders=${signed}, Signature=${sig}`;
   delete headers.host;
   return headers;
-}
-
-/** Query-authenticated URL. `signedHeaders` are pinned into the signature and must be sent verbatim. */
-export async function presign(creds: SigningCredentials, input: PresignInput): Promise<string> {
-  const service = creds.service ?? 's3';
-  const url = new URL(input.url);
-  const { amz, day } = amzDate(input.date ?? new Date());
-  const scope = `${day}/${creds.region}/${service}/aws4_request`;
-
-  const headers: Record<string, string> = { host: url.host };
-  for (const [k, v] of Object.entries(input.signedHeaders ?? {})) headers[k.toLowerCase()] = v;
-  const { canonical, signed } = canonicalHeaders(headers);
-
-  url.searchParams.set('X-Amz-Algorithm', 'AWS4-HMAC-SHA256');
-  url.searchParams.set('X-Amz-Credential', `${creds.accessKeyId}/${scope}`);
-  url.searchParams.set('X-Amz-Date', amz);
-  url.searchParams.set('X-Amz-Expires', String(input.expiresIn));
-  url.searchParams.set('X-Amz-SignedHeaders', signed);
-  if (creds.sessionToken) url.searchParams.set('X-Amz-Security-Token', creds.sessionToken);
-
-  const query = canonicalQuery(url.searchParams);
-  const canonicalRequest = [input.method.toUpperCase(), canonicalPath(url), query, canonical, signed, UNSIGNED_PAYLOAD].join('\n');
-  const sig = await signature(creds, amz, day, service, canonicalRequest);
-  return `${url.origin}${url.pathname}?${query}&X-Amz-Signature=${sig}`;
 }

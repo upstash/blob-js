@@ -12,6 +12,16 @@ export function encodeKey(path: string): string {
   return segments.map((s) => uriEncode(s)).join('/');
 }
 
+// The agent signs no key with an empty segment ("dir/", "a//b") or a control character. Refused here
+// as well, so an upload fails before it has created a multipart upload the refusal would strand.
+export function presignableKey(path: string): void {
+  encodeKey(path);
+  if (/[\x00-\x1f\x7f]/.test(path)) throw new BlobError('invalid_input', { message: 'a signed url cannot name a path with control characters' });
+  if (path.split('/').includes('')) {
+    throw new BlobError('invalid_input', { message: `a signed url cannot name a path with an empty segment: ${path}`, hint: 'drop the leading, trailing or doubled "/"' });
+  }
+}
+
 export function decodeEntities(s: string): string {
   return s
     .replace(/&lt;/g, '<')

@@ -2,9 +2,9 @@ import { BlobError } from '../shared/errors.ts';
 import type { BlobObject, CompletedBlob } from '../shared/types.ts';
 import { cacheControl, formatBytes, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
-import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
+import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, presignableKey, tag } from './keys.ts';
 import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
-import { backoff, errorFromBody, errorFromResponse, headFromHeaders, R2, sleep, type MultipartUpload } from './r2.ts';
+import { backoff, errorFromBody, errorFromResponse, headFromHeaders, MAX_PRESIGN_SECONDS, R2, sleep, type MultipartUpload } from './r2.ts';
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
 
@@ -73,8 +73,9 @@ export interface BlobDownload extends BlobInfo {
 
 export interface SignedReadUrlOptions {
   /**
-   * How long the link should live. If the current signing credential expires sooner, the SDK uses
-   * what is available; `expiresAt` always says when the returned link actually expires.
+   * How long the link should live, at most 10 minutes: a longer ask gets 10. `expiresAt` says when
+   * the returned link actually expires.
+   * @default '5m'
    */
   expiresIn?: Duration;
   /** Save the response as this filename instead of displaying it inline. */
@@ -85,14 +86,15 @@ export interface SignedReadUrlOptions {
 
 export interface SignedReadUrl {
   url: string;
-  /** When the link stops working. Never later than the credential that signed it. */
+  /** When the link stops working. */
   expiresAt: Date;
 }
 
 export interface SignedUploadUrlOptions {
   /**
-   * How long the link should live. If the current signing credential expires sooner, the SDK uses
-   * what is available; `expiresAt` always says when the returned link actually expires.
+   * How long the link should live, at most 10 minutes: a longer ask gets 10. `expiresAt` says when
+   * the returned link actually expires.
+   * @default '10m'
    */
   expiresIn?: Duration;
   /** The `Content-Type` the upload must send, and what the object is stored as. */
@@ -113,7 +115,7 @@ export interface SignedUploadUrl {
    * drops or adds to them is a 403 rather than a header the client got to choose.
    */
   headers: Record<string, string>;
-  /** When the link stops working. Never later than the credential that signed it. */
+  /** When the link stops working. */
   expiresAt: Date;
 }
 
@@ -179,6 +181,9 @@ function safeContentType(type: string): string {
   }
   return type;
 }
+
+// What a read link is signed for when the caller does not say.
+const DEFAULT_READ_SECONDS = 300;
 
 /** The variable `Bucket.fromEnv()` and an `uploadHandler` with no bucket read. */
 export const TOKEN_ENV = 'UPSTASH_BLOB_TOKEN';
@@ -424,11 +429,11 @@ export class Bucket {
 
   /** The link and when it dies, so a caller can cache it until then rather than guess. */
   async signedReadUrl(path: string, options: SignedReadUrlOptions = {}): Promise<SignedReadUrl> {
-    const expiresIn = options.expiresIn === undefined ? undefined : Math.max(1, Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000));
+    const expiresIn = options.expiresIn === undefined ? DEFAULT_READ_SECONDS : Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000);
     const query: Record<string, string> = {};
     if (options.downloadAs !== undefined) query['response-content-disposition'] = attachmentDisposition(options.downloadAs);
     if (options.contentType !== undefined) query['response-content-type'] = safeContentType(options.contentType);
-    return this.r2.presignRead({ path, query, expiresIn });
+    return this.r2.presign({ method: 'GET', path, query, expiresIn });
   }
 
   /**
@@ -437,8 +442,8 @@ export class Bucket {
    * multipart and the completion callback this cannot.
    */
   async signedUploadUrl(path: string, options: SignedUploadUrlOptions = {}): Promise<SignedUploadUrl> {
-    encodeKey(path);
-    const expiresIn = options.expiresIn === undefined ? undefined : Math.max(1, Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000));
+    presignableKey(path);
+    const expiresIn = options.expiresIn === undefined ? MAX_PRESIGN_SECONDS : Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000);
     // Resolved before the header is written, exactly as put() does it: visibility decides the
     // cache-control, and the credentials that carry it are not peekable until first fetched.
     await this.r2.credentials();
@@ -449,7 +454,7 @@ export class Bucket {
     };
     if (options.size !== undefined) headers['content-length'] = String(parseSize(options.size, 'size'));
     if (options.allowOverwrite === false) headers['if-none-match'] = '*';
-    const { url, expiresAt } = await this.r2.presignWrite({ path, headers, expiresIn });
+    const { url, expiresAt } = await this.r2.presign({ method: 'PUT', path, headers, expiresIn });
     return { url, headers, expiresAt };
   }
 

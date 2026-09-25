@@ -50,9 +50,10 @@ const upload = await bucket.signedUploadUrl('u/7/report.pdf', { contentType: 'ap
 await fetch(upload.url, { method: 'PUT', headers: upload.headers, body });
 ```
 
-Links are signed with the bucket's short-lived credential and cannot outlive it, so `expiresAt` is
-the answer per link (default read: 5 minutes, capped). `headers` on an upload URL are pinned into
-the signature. `bucket.publicUrl(path)` is `undefined` on a private bucket.
+Upstash signs each link for one request on one object, and it lives at most 10 minutes (default
+read: 5 minutes, upload: 10; a longer `expiresIn` gets 10). `headers` on an upload URL are pinned
+into the signature. A path with an empty segment (`dir/`, `a//b`) cannot be signed.
+`bucket.publicUrl(path)` is `undefined` on a private bucket.
 
 Whether a bucket is private is decided in the console, not in code: the SDK learns it from the
 backend on the first request, and a private bucket has no `url` or `versionedUrl` on any
@@ -151,7 +152,8 @@ const s3 = new S3Client({ endpoint, region, credentials });
 ```
 
 `endpoint` and `credentials` are async providers, so the aws-sdk re-reads the short-lived credential
-on expiry.
+on expiry. Do not presign with it: the URL would carry the credential, and with it every object in
+the bucket until it expires. Use `signedReadUrl()` and `signedUploadUrl()`.
 
 ## Errors
 

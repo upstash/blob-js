@@ -30,9 +30,9 @@ export interface InternalTask extends UploadTask {
 
 const PARTS_IN_FLIGHT = 4;
 const ROUTE_ATTEMPTS = 3;
-// A part url is signed with the bucket's temporary credential and dies with it, well under ten
-// minutes out, which a 5 MiB part on a slow link outruns. A 403 on a url older than this is the
-// clock however often it happens; only a url minted moments ago and refused again is the body.
+// A part url lives ten minutes, which a 5 MiB part on a slow link outruns. A 403 on a url older
+// than this is the clock however often it happens; only a url minted moments ago and refused again
+// is the body.
 const PRESIGN_STALE_MS = 60_000;
 // How many batches one part may wait through before the route is simply not signing it.
 const MAX_URL_BATCHES = 4;

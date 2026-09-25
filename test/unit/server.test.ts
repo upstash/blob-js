@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { Bucket, BlobError, uploadRoute, uploadHandler } from '../../src/index.ts';
-import { r2Of } from '../../src/server/bucket.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { deriveRouteId } from '../../src/server/handle-upload.ts';
 import { encodeToken } from '../../src/server/token.ts';
@@ -20,11 +19,37 @@ interface Call {
   init: RequestInit;
 }
 
+interface PresignBody {
+  method: string;
+  key: string;
+  expiresIn: number;
+  headers?: Record<string, string>;
+  query?: Record<string, string>;
+  partNumber?: number;
+  uploadId?: string;
+}
+
 const realFetch = globalThis.fetch;
 let calls: Call[] = [];
 let mints = 0;
 let mintResponse: () => Response;
 let r2Handler: (call: Call) => Response | Promise<Response>;
+let presigns: PresignBody[] = [];
+let presignResponse: (body: PresignBody) => Response;
+
+// Stands in for the agent: a url that says what it was asked to sign, so a test can read it back.
+function agentPresign(body: PresignBody): Response {
+  const url = new URL(`${ENDPOINT}/bucket-id/${body.key.split('/').map(encodeURIComponent).join('/')}`);
+  for (const [k, v] of Object.entries(body.query ?? {})) url.searchParams.set(k, v);
+  if (body.partNumber !== undefined) {
+    url.searchParams.set('partNumber', String(body.partNumber));
+    url.searchParams.set('uploadId', body.uploadId!);
+  }
+  url.searchParams.set('X-Amz-Expires', String(body.expiresIn));
+  url.searchParams.set('X-Amz-SignedHeaders', ['host', ...Object.keys(body.headers ?? {})].sort().join(';'));
+  url.searchParams.set('X-Amz-Signature', Bun.hash(JSON.stringify(body)).toString(16));
+  return Response.json({ url: url.href, expiresAt: Math.floor(Date.now() / 1000) + body.expiresIn });
+}
 
 function creds(extra: Record<string, unknown> = {}, ttl = 600): Record<string, unknown> {
   return {
@@ -47,6 +72,11 @@ const mockFetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
     mints++;
     return mintResponse();
   }
+  if (url.includes('/v1/presign')) {
+    const body = JSON.parse(String(init.body)) as PresignBody;
+    presigns.push(body);
+    return presignResponse(body);
+  }
   if (url.startsWith(ENDPOINT)) return r2Handler(call);
   return realFetch(input as RequestInfo, init);
 }) as typeof fetch;
@@ -66,6 +96,8 @@ beforeEach(() => {
   mints = 0;
   mintResponse = () => Response.json(creds());
   r2Handler = () => new Response('', { status: 200 });
+  presigns = [];
+  presignResponse = agentPresign;
 });
 
 const bucket = () => new Bucket({ token: TOKEN });
@@ -178,68 +210,97 @@ describe('r2 retries', () => {
 });
 
 describe('signedReadUrl', () => {
-  test('answers a url and transparently uses the credential cap', async () => {
+  test('the agent signs it: five minutes by default, ten at most, and no credential minted', async () => {
     resetCredentialCaches();
     const b = bucket();
-    const read = await b.signedReadUrl('secret.txt', { expiresIn: '2m' });
+    const read = await b.signedReadUrl('dir/secret.txt', { expiresIn: '2m' });
+    expect(presigns[0]).toEqual({ method: 'GET', key: 'dir/secret.txt', expiresIn: 120 });
+    expect(read.url).toBe(new URL(read.url).href);
     expect(read.url).toContain('X-Amz-Expires=120');
     expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + 110_000);
     expect(read.expiresAt.getTime()).toBeLessThan(Date.now() + 130_000);
-    const cap = await r2Of(b).readCap();
-    expect(cap).toBeGreaterThanOrEqual(595);
-    expect(cap).toBeLessThanOrEqual(600);
-    expect(mints).toBe(1);
+    // The agent refuses anything longer, so a longer ask gets the longest there is.
+    await b.signedReadUrl('a', { expiresIn: '1h' });
+    expect(presigns[1]!.expiresIn).toBe(600);
+    await b.signedReadUrl('a');
+    expect(presigns[2]!.expiresIn).toBe(300);
+    // Nothing is signed here, so nothing needs the temporary credential.
+    expect(mints).toBe(0);
 
-    const capped = await b.signedReadUrl('secret.txt', { expiresIn: '1h' });
-    expect(Number(new URL(capped.url).searchParams.get('X-Amz-Expires'))).toBeGreaterThanOrEqual(cap - 2);
-    // No expiresIn is the shorter of five minutes and the cap, so it never throws.
-    expect((await b.signedReadUrl('secret.txt')).url).toContain('X-Amz-Expires=300');
+    const request = calls.find((c) => c.url.includes('/v1/presign'))!;
+    expect(request.url).toBe('https://blob.upstash.io/v1/presign');
+    expect(request.method).toBe('POST');
+    expect(request.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
+    expect(request.headers.get('content-type')).toBe('application/json');
+    expect(request.init.signal).toBeInstanceOf(AbortSignal);
   });
 
-  test('an aged credential is re-minted before signing, but not once per call', async () => {
+  test('a path the agent cannot sign is refused before it is asked', async () => {
     resetCredentialCaches();
-    // A credential the agent handed over with most of its life already spent.
-    let expiresAt = Math.floor(Date.now() / 1000) + 600;
-    mintResponse = () => Response.json({ ...creds(), expiresAt, lifetime: undefined });
-    const b = bucket();
-    await b.exists('a');
-    expect(mints).toBe(1);
-    // Pretend the clock moved: the cached credential now has 100 s left of the 600 it was minted with.
-    const cache = (await import('../../src/server/credentials.ts')).credentialCacheFor(TOKEN, true);
-    const held = cache.peek()!;
-    held.expiresAt = Math.floor(Date.now() / 1000) + 100;
-    const asked = await b.signedReadUrl('a', { expiresIn: 200 });
-    expect(mints).toBe(2);
-    expect(Number(new URL(asked.url).searchParams.get('X-Amz-Expires'))).toBe(200);
-    // The agent answered with the same credential, so asking again straight away would only spend
-    // the mint budget: it does not.
-    expiresAt = Math.floor(Date.now() / 1000) + 100;
-    cache.peek()!.expiresAt = expiresAt;
-    cache.peek()!.lifetime = 600;
-    await b.signedReadUrl('a', { expiresIn: 200 });
-    await b.signedReadUrl('a', { expiresIn: 200 });
-    expect(mints).toBe(3);
+    for (const path of ['dir/', '/a', 'a//b', 'a\nb']) {
+      await expect(bucket().signedReadUrl(path)).rejects.toMatchObject({ code: 'invalid_input' });
+    }
+    await expect(bucket().signedReadUrl('a/../b')).rejects.toThrow(TypeError);
+    expect(presigns).toEqual([]);
   });
 
-  test('a signing credential in the mint response raises the cap and removes the re-mint', async () => {
+  test("the agent's refusal arrives as a BlobError carrying its reason", async () => {
     resetCredentialCaches();
-    mintResponse = () =>
-      Response.json(creds({ signing: { accessKeyId: 'AKIASIGNING', secretAccessKey: 'ss', expiresAt: Math.floor(Date.now() / 1000) + 86_400 } }));
-    const b = bucket();
-    const read = await b.signedReadUrl('secret.txt', { expiresIn: '1h' });
-    expect(read.url).toContain('X-Amz-Credential=AKIASIGNING');
-    expect(read.url).toContain('X-Amz-Expires=3600');
-    expect(mints).toBe(1);
-    // A signing credential is not the object credential: writes keep using the short-lived one.
-    await b.exists('a');
-    expect(r2Calls()[0]!.headers.get('authorization')).toContain('AKIAOBJECT');
+    const refuse = (status: number, error: string) => () => Response.json({ error }, { status });
+    presignResponse = refuse(403, 'presign is not enabled for this bucket');
+    await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ code: 'forbidden', status: 403, message: 'Presign is not enabled for this bucket' });
+    presignResponse = refuse(401, 'bucket suspended');
+    await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ code: 'unauthorized', message: 'Bucket suspended' });
+    presignResponse = refuse(400, 'key must not contain empty, "." or ".." segments');
+    const e = await bucket()
+      .signedReadUrl('a')
+      .catch((x) => x);
+    expect(e.code).toBe('invalid_input');
+    expect(e.message).toContain('empty, "." or ".." segments');
+    // Refusals are answers, not outages: none was asked twice.
+    expect(presigns.length).toBe(3);
   });
 
-  test('a malformed signing block is ignored rather than trusted', async () => {
+  test('a 429 or a 5xx is asked again, three times at most', async () => {
     resetCredentialCaches();
-    mintResponse = () => Response.json(creds({ signing: { accessKeyId: 'AKIABAD' } }));
-    const read = await bucket().signedReadUrl('secret.txt', { expiresIn: '2m' });
-    expect(read.url).toContain('X-Amz-Credential=AKIAOBJECT');
+    const answers = [new Response('', { status: 429, headers: { 'retry-after': '0' } }), Response.json({ error: 'server misconfigured' }, { status: 500 })];
+    presignResponse = (body) => answers.shift() ?? agentPresign(body);
+    await bucket().signedReadUrl('a');
+    expect(presigns.length).toBe(3);
+
+    presigns = [];
+    presignResponse = () => Response.json({ error: 'server misconfigured' }, { status: 500 });
+    await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ code: 'request_failed', status: 502, message: expect.stringContaining('server misconfigured') });
+    expect(presigns.length).toBe(3);
+  });
+
+  test('a url that is not R2 over https is refused rather than handed on', async () => {
+    resetCredentialCaches();
+    for (const url of ['http://acc.r2.cloudflarestorage.com/b/a', 'https://evil.example/b/a', 'not a url', undefined]) {
+      presignResponse = () => Response.json({ url, expiresAt: Math.floor(Date.now() / 1000) + 60 });
+      await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ code: 'request_failed' });
+    }
+    presignResponse = () => Response.json({ url: `${ENDPOINT}/b/a?X-Amz-Signature=x` });
+    await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ code: 'request_failed' });
+  });
+});
+
+describe('signedUploadUrl', () => {
+  test('the agent signs one PUT with every pinned header, for ten minutes by default', async () => {
+    resetCredentialCaches();
+    const up = await bucket().signedUploadUrl('in/report.pdf', { contentType: 'application/pdf', cache: '1m', metadata: { rowId: '7' }, size: 12, allowOverwrite: false });
+    const headers = { 'content-type': 'application/pdf', 'cache-control': 'public, max-age=60', 'x-amz-meta-rowid': '7', 'content-length': '12', 'if-none-match': '*' };
+    expect(up.headers).toEqual(headers);
+    expect(presigns).toEqual([{ method: 'PUT', key: 'in/report.pdf', expiresIn: 600, headers }]);
+    expect(up.expiresAt.getTime()).toBeGreaterThan(Date.now() + 590_000);
+    await bucket().signedUploadUrl('a', { expiresIn: '2h' });
+    expect(presigns[1]!.expiresIn).toBe(600);
+  });
+
+  test('a read-only bucket is refused by the agent up front', async () => {
+    resetCredentialCaches();
+    presignResponse = () => Response.json({ error: 'bucket is read-only' }, { status: 403 });
+    await expect(bucket().signedUploadUrl('a')).rejects.toMatchObject({ code: 'forbidden', message: 'Bucket is read-only' });
   });
 });
 
@@ -288,14 +349,11 @@ describe('signedReadUrl download', () => {
     expect(e.code).toBe('invalid_input');
   });
 
-  test('the disposition is inside the signature, not appended to it', async () => {
+  test('the disposition is sent to be signed, and the url comes back untouched', async () => {
     resetCredentialCaches();
-    const b = bucket();
-    const plain = new URL((await b.signedReadUrl('a.txt', { expiresIn: 60 })).url);
-    const named = new URL((await b.signedReadUrl('a.txt', { expiresIn: 60, downloadAs: 'x.txt' })).url);
-    expect(named.searchParams.get('X-Amz-Signature')).not.toBe(plain.searchParams.get('X-Amz-Signature'));
-    // Sorted into the canonical query with everything else, before the signature is appended.
-    expect(named.search.indexOf('response-content-disposition')).toBeLessThan(named.search.indexOf('X-Amz-Signature'));
+    const signed = await bucket().signedReadUrl('a.txt', { expiresIn: 60, downloadAs: 'x.txt', contentType: 'text/plain' });
+    expect(presigns[0]!.query).toEqual({ 'response-content-disposition': `attachment; filename="x.txt"; filename*=UTF-8''x.txt`, 'response-content-type': 'text/plain' });
+    expect(signed.url).toBe(((await agentPresign(presigns[0]!).json()) as { url: string }).url);
   });
 });
 
@@ -574,8 +632,7 @@ describe('uploadHandler: the direct transport', () => {
     expect(sent['cache-control']).toBe('public, max-age=3600');
     expect(sent['x-amz-meta-rowid']).toBe('7');
     expect(sent['x-amz-meta-upstash-upload']).toMatch(/^[0-9a-f-]{36}$/);
-    const signed = url.searchParams.get('X-Amz-SignedHeaders')!.split(';');
-    for (const name of ['content-length', ...Object.keys(sent)]) expect(signed).toContain(name);
+    expect(presigns).toEqual([{ method: 'PUT', key: 'small.png', expiresIn: 600, headers: { ...sent, 'content-length': '10' } }]);
     // Nothing reached R2: no multipart to create, and none to sweep up if the tab closes.
     expect(r2Calls().filter((c) => c.method === 'POST')).toEqual([]);
   });
@@ -599,6 +656,7 @@ describe('uploadHandler: the direct transport', () => {
     expect(new URL(parted.upload.parts[0]!.url).searchParams.get('uploadId')).toBe('mp-1');
     // A part url signs content-length and nothing else: the rest was pinned at create.
     expect(parted.upload.parts[0]!.headers).toBeUndefined();
+    expect(presigns.at(-1)).toEqual({ method: 'PUT', key: 'a.bin', expiresIn: 600, headers: { 'content-length': '10' }, partNumber: 1, uploadId: 'mp-1' });
 
     // A route replaces the handler's, like every other inherited option.
     const mixed = uploadHandler({
@@ -610,6 +668,34 @@ describe('uploadHandler: the direct transport', () => {
     const named = (name: string) => ({ POST: (r: Request) => mixed.POST(new Request(`https://app.test/api/upload?route=${name}`, r)) });
     expect((await begin(named('small'), { name: 'a.bin', type: '', size: 10 })).upload.multipart).toBe(false);
     expect((await begin(named('big'), { name: 'a.bin', type: '', size: 10 })).upload.multipart).toBe(true);
+  });
+
+  test('a batch is signed a url per part, the last part its own length', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), multipart: true, constraints: { maxSize: '1gb' }, onBeforeUpload: () => ({ path: 'big.bin' }) });
+    const size = 17 * 5 * 1024 * 1024 + 3;
+    const started = await begin(route, { name: 'big.bin', type: '', size });
+    expect(started.upload.parts.map((p) => p.n)).toEqual([...Array(16).keys()].map((i) => i + 1));
+    expect(presigns.map((b) => b.partNumber)).toEqual(started.upload.parts.map((p) => p.n));
+    presigns = [];
+    const rest = (await (await post(route, { phase: 'parts', completionToken: started.completionToken, from: 17 })).json()) as WirePartsResponse;
+    expect(rest.parts.map((p) => p.n)).toEqual([17, 18]);
+    expect(presigns.map((b) => [b.partNumber, b.headers!['content-length']])).toEqual([
+      [17, String(5 * 1024 * 1024)],
+      [18, '3'],
+    ]);
+  });
+
+  test('a path no url can be signed for is refused before a multipart exists', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), multipart: true, onBeforeUpload: () => ({ path: 'dir//a.bin' }) });
+    const res = await post(route, { phase: 'begin', file: { name: 'a.bin', type: '', size: 10 } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('invalid_input');
+    expect(r2Calls()).toEqual([]);
+    expect(presigns).toEqual([]);
   });
 
   test('an empty file is refused before anything is created', async () => {
