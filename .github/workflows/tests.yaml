@@ -68,8 +68,8 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     env:
-      UPSTASH_BLOB_PUBLIC_TOKEN: ${{ secrets.UPSTASH_BLOB_PUBLIC_TOKEN }}
-      UPSTASH_BLOB_PRIVATE_TOKEN: ${{ secrets.UPSTASH_BLOB_PRIVATE_TOKEN }}
+      UPSTASH_BLOB_PUBLIC_TOKEN: ${{ secrets.UPSTASH_BLOB_PRESIGN_PUBLIC_TOKEN }}
+      UPSTASH_BLOB_PRIVATE_TOKEN: ${{ secrets.UPSTASH_BLOB_PRESIGN_PRIVATE_TOKEN }}
     steps:
       - name: Setup repo
         uses: actions/checkout@v4
