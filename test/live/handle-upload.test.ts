@@ -152,7 +152,7 @@ describe('begin', () => {
     const res = await post(chat, { phase: 'begin', file: { name: 'Holiday Pic.PNG', type: 'image/png', size: body.byteLength }, input: { threadId: tid } });
     expect(res.status).toBe(200);
     const begin = (await res.json()) as WireBeginResponse;
-    expect(begin.path).toMatch(new RegExp(`^${p('chat')}/u1/${tid}/holiday-pic-[1-9A-HJ-NP-Za-km-z]{8}\\.png$`));
+    expect(begin.path).toMatch(new RegExp(`^${p('chat')}/u1/${tid}/Holiday Pic-[1-9A-HJ-NP-Za-km-z]{8}\\.PNG$`));
     // Under the threshold: one part covering the whole file, and no multipart behind it.
     expect(begin.upload.multipart).toBe(false);
     expect(begin.upload.partSize).toBe(body.byteLength);

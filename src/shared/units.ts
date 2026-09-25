@@ -1,5 +1,5 @@
-// Sizes are decimal ('2mb' = 2,000,000), matching how storage is billed. The only binary math in
-// the SDK is multipart part sizing, because R2's part floor is 5 MiB.
+// Sizes always count bytes. Decimal units match storage billing ('2MB' = 2,000,000);
+// explicit binary units match file limits ('2MiB' = 2,097,152). Unit names ignore case.
 export type Size = string | number;
 export type Duration = string | number;
 
@@ -9,6 +9,10 @@ const SIZE_UNITS: Record<string, number> = {
   mb: 1e6,
   gb: 1e9,
   tb: 1e12,
+  kib: 1024,
+  mib: 1024 ** 2,
+  gib: 1024 ** 3,
+  tib: 1024 ** 4,
 };
 
 export function parseSize(input: Size, what = 'size'): number {
@@ -17,15 +21,15 @@ export function parseSize(input: Size, what = 'size'): number {
     return Math.floor(input);
   }
   const m = /^\s*(\d+(?:\.\d+)?)\s*([a-z]*)\s*$/i.exec(input);
-  if (!m) throw new TypeError(`${what}: cannot parse "${input}" (try '2mb', '500kb', '5gb')`);
+  if (!m) throw new TypeError(`${what}: cannot parse "${input}" (try '2MB', '32MiB', '500KB')`);
   const unit = (m[2] || 'b').toLowerCase();
   const mult = SIZE_UNITS[unit];
-  if (mult === undefined) throw new TypeError(`${what}: unknown unit "${m[2]}" in "${input}" (b, kb, mb, gb, tb)`);
+  if (mult === undefined) throw new TypeError(`${what}: unknown unit "${m[2]}" in "${input}" (b, kb, mb, gb, tb, kib, mib, gib, tib)`);
   return Math.floor(Number(m[1]) * mult);
 }
 
 /**
- * Decimal, the same way parseSize reads them, so a limit written '2mb' is refused as "2 MB". An
+ * Always formats decimal byte units, including values parsed from binary units. An
  * exact multiple of the unit prints whole and anything else keeps a decimal, because rounding both
  * sides independently produced refusals reading "1MB, over the 1MB limit"; past 10 of a unit the
  * decimal is noise and is dropped.
@@ -41,6 +45,18 @@ export function formatBytes(bytes: number): string {
     unit++;
   }
   return `${Number.isInteger(n) ? n : n.toFixed(n < 10 ? 1 : 0)} ${units[unit]}`;
+}
+
+/**
+ * The "X, over the Y limit" half of a size refusal. A limit in binary units is rarely a whole
+ * decimal unit, so both sides can round to the same amount ("34 MB, over the 34 MB limit", or
+ * "2 MB, over the 2.0 MB limit"); then exact byte counts are shown instead.
+ */
+export function overLimit(size: number, limit: number): string {
+  const [s, l] = [formatBytes(size), formatBytes(limit)];
+  // toFixed(1) is the only way two texts can name one amount: "2 MB" and "2.0 MB".
+  if (s.replace('.0 ', ' ') !== l.replace('.0 ', ' ')) return `${s}, over the ${l} limit`;
+  return `${size.toLocaleString('en-US')} bytes, over the ${limit.toLocaleString('en-US')} byte limit`;
 }
 
 const DURATION_UNITS: Record<string, number> = {

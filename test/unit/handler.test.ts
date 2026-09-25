@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import * as z from 'zod';
-import { BlobError, Bucket, uploadRoute, uploadHandler } from '../../src/index.ts';
+import { BlobError, Bucket, uniquePath, uploadRoute, uploadHandler } from '../../src/index.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { encodeToken } from '../../src/server/token.ts';
 import type { WireBeginResponse } from '../../src/shared/types.ts';
@@ -102,6 +102,29 @@ function handler(extra: Record<string, unknown> = {}) {
 }
 
 describe('dispatch', () => {
+  test('text upload completion uses stored metadata instead of a gzip representation', async () => {
+    let completed = false;
+    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.txt' }), onUploadComplete: () => { completed = true; } });
+    const begin = await began(uploads, undefined, { name: 'a.txt', type: 'text/plain', size: 4 });
+    r2Handler = (call) => scriptedR2(call.headers.get('accept-encoding') === 'identity'
+      ? { 'content-length': '4', etag: '"e"', 'content-type': 'text/plain' }
+      : { 'content-encoding': 'gzip', etag: 'W/"e"', 'content-type': 'text/plain' })(call);
+    const response = await post(uploads, undefined, { phase: 'end', completionToken: begin.completionToken, parts: [{ n: 1, etag: '"e"' }] });
+    expect(response.status).toBe(200);
+    expect(completed).toBe(true);
+    expect(r2Calls().some((call) => call.method === 'DELETE')).toBe(false);
+  });
+
+  test('a missing object length fails completion without deleting the uploaded object', async () => {
+    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.txt' }) });
+    const begin = await began(uploads, undefined, { name: 'a.txt', type: 'text/plain', size: 4 });
+    r2Handler = scriptedR2({ etag: '"e"', 'content-type': 'text/plain' });
+    const response = await post(uploads, undefined, { phase: 'end', completionToken: begin.completionToken, parts: [{ n: 1, etag: '"e"' }] });
+    expect(response.status).toBe(500);
+    expect((await response.json()).code).toBe('request_failed');
+    expect(r2Calls().some((call) => call.method === 'DELETE')).toBe(false);
+  });
+
   test('the query names the route, for GET and for POST', async () => {
     const uploads = handler();
     const res = await uploads.GET(new Request(url('large')));
@@ -441,4 +464,31 @@ describe('direct routes', () => {
     expect(bad.status).toBe(400);
     expect((await bad.json()).code).toBe('invalid_input');
   });
+});
+
+// The file boundary that failed in Agent Bench: 32 MiB is larger than 32 decimal MB.
+test('a 32MiB upload limit accepts the exact file size and rejects one byte over', async () => {
+  const uploads = uploadHandler({
+    bucket: bucket(),
+    constraints: { maxSize: '32MiB' },
+    onBeforeUpload: () => ({ path: 'large/file.bin' }),
+  });
+  expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ constraints: { maxSize: 33_554_432 } });
+  const begin = await post(uploads, undefined, { phase: 'begin', file: { name: 'file.bin', type: 'application/octet-stream', size: 33_554_432 } });
+  expect(begin.status).toBe(200);
+  expect((await begin.json()).upload.multipart).toBe(true);
+  calls = [];
+  const oversized = await post(uploads, undefined, { phase: 'begin', file: { name: 'file.bin', type: 'application/octet-stream', size: 33_554_433 } });
+  expect(oversized.status).toBe(413);
+  expect(r2Calls()).toHaveLength(0);
+});
+
+// uniquePath keeps the browser's filename, so a traversing name is the client's bad input, not a 500.
+test('a filename that climbs out of the route prefix is refused as invalid input', async () => {
+  const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: ({ file }) => ({ path: uniquePath`u1/${file.name}` }) });
+  calls = [];
+  const res = await post(uploads, undefined, { phase: 'begin', file: { name: '../x.png', type: 'image/png', size: 4 } });
+  expect(res.status).toBe(400);
+  expect((await res.json()).code).toBe('invalid_input');
+  expect(r2Calls()).toHaveLength(0);
 });

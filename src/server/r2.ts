@@ -153,6 +153,9 @@ export class R2 {
       { accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, sessionToken: c.sessionToken, region: c.region },
       { method: init.method, url, headers: init.headers },
     );
+    // Fetch otherwise negotiates compression, which can omit Content-Length and weaken ETags.
+    // Object reads need the stored representation for size checks and conditional writes.
+    if (init.method.toUpperCase() === 'GET' || init.method.toUpperCase() === 'HEAD') headers['accept-encoding'] = 'identity';
     const body = init.body ?? undefined;
     const extra: RequestInit & { duplex?: 'half' } = {};
     if (body instanceof ReadableStream) extra.duplex = 'half';
@@ -337,13 +340,18 @@ export function backoff(attempt: number, retryAfter: string | null, base = 200):
 }
 
 export function headFromHeaders(h: Headers): BlobHead {
+  const length = h.get('content-length');
+  const size = length !== null && /^\d+$/.test(length) ? Number(length) : NaN;
+  if (!Number.isSafeInteger(size)) {
+    throw new BlobError('request_failed', { message: 'storage returned a missing or invalid Content-Length' });
+  }
   const metadata: Record<string, string> = {};
   h.forEach((v, k) => {
     if (k.startsWith('x-amz-meta-')) metadata[k.slice(11)] = v;
   });
   const lm = h.get('last-modified');
   return {
-    size: Number(h.get('content-length') ?? 0),
+    size,
     etag: h.get('etag') ?? '',
     contentType: h.get('content-type') ?? 'application/octet-stream',
     cacheControl: h.get('cache-control') ?? undefined,

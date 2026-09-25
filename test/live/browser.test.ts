@@ -99,7 +99,7 @@ describe('upload()', () => {
     const seen: string[] = [];
     task.subscribe(() => seen.push(task.snapshot().status));
     const blob = await task.done;
-    expect(blob.path).toMatch(new RegExp(`^${root}chat/u7/${tid}/pic-one-[1-9A-HJ-NP-Za-km-z]{8}\\.png$`));
+    expect(blob.path).toMatch(new RegExp(`^${root}chat/u7/${tid}/Pic One-[1-9A-HJ-NP-Za-km-z]{8}\\.png$`));
     expect(blob.size).toBe(2000);
     expect((blob.data as { rowId: string }).rowId).toBe(blob.path);
     expect(rows[blob.path]).toBe('ready');
