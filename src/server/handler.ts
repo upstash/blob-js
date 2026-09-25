@@ -137,9 +137,12 @@ interface PlainRouteBase<TCtx, TInput> {
   onBeforeUpload?: (args: BeforeArgs<TCtx, TInput>) => BeforeResult<undefined> | Promise<BeforeResult<undefined>>;
   /**
    * Replaces the handler's. What it returns is `upload.blob.data` in the browser, typed.
-   * Runs only after the route verified its signed completion token (forged, expired or another
-   * route's is a 403) and that the stored object has the declared size. Throw to refuse: the object
-   * is deleted. Delivery is at-least-once, so write idempotently on `uploadId`.
+   * Runs only after the route verified its signed completion token and that the stored object has
+   * the declared size. A forged or expired token is a 403, as is one from another route of this
+   * handler or from a handler with a different `endpoint`. Throw to refuse: the object is deleted,
+   * unless it cannot be identified as this upload's (a retried multipart 'end', or a newer upload
+   * replaced it), in which case it is kept and logged. It may run more than once, or never if the
+   * browser stops before 'end', so write idempotently on `uploadId`.
    * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
    */
   onUploadComplete?: (args: CompleteBase<TCtx, undefined> & DirectCompleteExtras) => unknown;
@@ -186,9 +189,12 @@ export interface UploadRouteOptions<TCtx, TSchema extends StandardSchema<any, an
   onBeforeUpload?: (args: BeforeArgs<TCtx, RouteInputOf<TSchema>>) => BeforeResult<TState> | Promise<BeforeResult<TState>>;
   /**
    * What it returns is `upload.blob.data` in the browser, typed.
-   * Runs only after the route verified its signed completion token (forged, expired or another
-   * route's is a 403) and that the stored object has the declared size. Throw to refuse: the object
-   * is deleted. Delivery is at-least-once, so write idempotently on `uploadId`.
+   * Runs only after the route verified its signed completion token and that the stored object has
+   * the declared size. A forged or expired token is a 403, as is one from another route of this
+   * handler or from a handler with a different `endpoint`. Throw to refuse: the object is deleted,
+   * unless it cannot be identified as this upload's (a retried multipart 'end', or a newer upload
+   * replaced it), in which case it is kept and logged. It may run more than once, or never if the
+   * browser stops before 'end', so write idempotently on `uploadId`.
    * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
    */
   onUploadComplete?: (args: CompleteBase<TCtx, TState> & DirectCompleteExtras) => TData | Promise<TData>;
@@ -283,9 +289,12 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
   /**
    * The default. A route with its own onUploadComplete replaces it, and answers the browser with its
    * own return instead of this one.
-   * Runs only after the route verified its signed completion token (forged, expired or another
-   * route's is a 403) and that the stored object has the declared size. Throw to refuse: the object
-   * is deleted. Delivery is at-least-once, so write idempotently on `uploadId`.
+   * Runs only after the route verified its signed completion token and that the stored object has
+   * the declared size. A forged or expired token is a 403, as is one from another route of this
+   * handler or from a handler with a different `endpoint`. Throw to refuse: the object is deleted,
+   * unless it cannot be identified as this upload's (a retried multipart 'end', or a newer upload
+   * replaced it), in which case it is kept and logged. It may run more than once, or never if the
+   * browser stops before 'end', so write idempotently on `uploadId`.
    */
   onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, undefined> & DirectCompleteExtras) => TData | Promise<TData>;
   /**

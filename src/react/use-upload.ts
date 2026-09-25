@@ -139,6 +139,7 @@ function refusedEntry(file: File, error: BlobError): ListEntry<AnyRecord> {
  * `route` is required: the handler's URL (`'/api/upload'`) or a route name. Here `blob.data` is
  * `unknown`. For typed data bind the hook: `const { useUpload } = uploadHooks<typeof uploads>()`.
  * For a handler without `routes` the bound hook takes no URL: `useUpload()`, `useUpload({ onDone })`.
+ * It posts to `uploadHooks({ endpoint })`, default `'/api/upload'`.
  * @see node_modules/@upstash/blob/docs/uploads/upload-client.mdx
  */
 export function useUpload<R extends AnyUploadRoute = UploadRoute<undefined, unknown>>(route: RoutePath<R>, options?: UseUploadOptions<R>): UseUploadResult<R>;

@@ -969,6 +969,56 @@ describe('uploadHandler: the direct transport', () => {
     expect(seen).toEqual(['a.png']);
   });
 
+  test('the onUploadComplete caveat: a refusal on a retried multipart end keeps the object and logs', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    let runs = 0;
+    const route = uploadHandler({
+      bucket: bucket(),
+      multipart: true,
+      onBeforeUpload: () => ({ path: 'a.png' }),
+      onUploadComplete: () => {
+        if (++runs > 1) throw new BlobError('forbidden', { message: 'refused on the retry' });
+      },
+    });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    let completes = 0;
+    r2Handler = (call) => {
+      const created = initiated(call);
+      if (created) return created;
+      if (call.method === 'POST' && ++completes > 1) return new Response('<Error><Code>NoSuchUpload</Code></Error>', { status: 404 });
+      if (call.method === 'POST') return new Response('<CompleteMultipartUploadResult><ETag>"e"</ETag></CompleteMultipartUploadResult>', { status: 200 });
+      if (call.method === 'HEAD') return new Response('', { status: 200, headers: { 'content-length': '10', etag: '"e"', 'content-type': 'image/png' } });
+      return new Response('', { status: 204 });
+    };
+    const end = { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] };
+    expect((await post(route, end)).status).toBe(200);
+    calls = [];
+    const logged = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await post(route, end)).status).toBe(403);
+      expect(logged).toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+    // It ran twice, and the refusal on the retry could not tell the object was this upload's.
+    expect(runs).toBe(2);
+    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'HEAD']);
+  });
+
+  test("the onUploadComplete caveat: another route's token is a 403 only when the route ids differ", async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const b = bucket();
+    const make = (endpoint?: string) => uploadHandler({ bucket: b, endpoint, multipart: true, onBeforeUpload: () => ({ path: 'a.png' }) });
+    const started = await begin(make(), { name: 'a.png', type: 'image/png', size: 10 });
+    const end = { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] };
+    r2Handler = fullR2();
+    // Same bucket, no endpoint, same constraints: the second handler derives the same id and accepts it.
+    expect((await post(make(), end)).status).toBe(200);
+    expect((await post(make('/api/other'), end)).status).toBe(403);
+  });
+
   /** A single PUT stores the object itself, so 'end' only reads it back. */
   const storedR2 =
     (head: Record<string, string> = { 'content-length': '10', etag: '"stored"', 'content-type': 'image/png' }) =>
