@@ -342,7 +342,7 @@ export function backoff(attempt: number, retryAfter: string | null, base = 200):
 export function headFromHeaders(h: Headers): BlobHead {
   const length = h.get('content-length');
   const size = length !== null && /^\d+$/.test(length) ? Number(length) : NaN;
-  if (!Number.isSafeInteger(size) || size < 0) {
+  if (!Number.isSafeInteger(size)) {
     throw new BlobError('request_failed', { message: 'storage returned a missing or invalid Content-Length' });
   }
   const metadata: Record<string, string> = {};

@@ -54,7 +54,8 @@ export function formatBytes(bytes: number): string {
  */
 export function overLimit(size: number, limit: number): string {
   const [s, l] = [formatBytes(size), formatBytes(limit)];
-  if (parseSize(s) !== parseSize(l)) return `${s}, over the ${l} limit`;
+  // toFixed(1) is the only way two texts can name one amount: "2 MB" and "2.0 MB".
+  if (s.replace('.0 ', ' ') !== l.replace('.0 ', ' ')) return `${s}, over the ${l} limit`;
   return `${size.toLocaleString('en-US')} bytes, over the ${limit.toLocaleString('en-US')} byte limit`;
 }
 

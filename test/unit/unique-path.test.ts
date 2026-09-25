@@ -43,6 +43,8 @@ describe('uniquePath', () => {
     for (const make of [() => uniquePath`uploads/${'..'}/${'x.png'}`, () => uniquePath('a/./b.png'), () => uniquePath`u1/${'../x.png'}`]) {
       expect(make).toThrow(expect.objectContaining({ code: 'invalid_input' }));
     }
+    // An invalid escape leaves the cooked chunk undefined; it must not print as "undefined".
+    expect(uniquePath`up\users/${'a.png'}`).toMatch(new RegExp(`^a-${SUFFIX}\\.png$`));
     expect(uniquePath('a/..')).toMatch(new RegExp(`^a/\\.\\.-${SUFFIX}$`));
     expect(encodeKey(uniquePath`${'a\\b'}/${'c\nd.png'}`)).not.toMatch(/[\\\n]/);
   });

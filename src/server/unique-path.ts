@@ -43,7 +43,7 @@ function splitExtension(name: string): [stem: string, extension: string] {
 export function uniquePath(path: string): string;
 export function uniquePath(strings: TemplateStringsArray, ...values: unknown[]): string;
 export function uniquePath(input: string | TemplateStringsArray, ...values: unknown[]): string {
-  const path = typeof input === 'string' ? input : String.raw({ raw: input }, ...values);
+  const path = typeof input === 'string' ? input : String.raw({ raw: input.map((s) => s ?? '') }, ...values);
   const basenameAt = path.lastIndexOf('/') + 1;
   const [stem, extension] = splitExtension(path.slice(basenameAt));
   const unique = `${path.slice(0, basenameAt)}${stem || 'file'}-${randomSuffix()}${extension}`;

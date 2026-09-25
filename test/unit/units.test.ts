@@ -137,4 +137,5 @@ test('a binary limit that rounds like the file falls back to exact bytes', () =>
   expect(overLimit(33_554_433, parseSize('32MiB'))).toBe('33,554,433 bytes, over the 33,554,432 byte limit');
   expect(overLimit(3_100_000, parseSize('2MB'))).toBe('3.1 MB, over the 2 MB limit');
   expect(overLimit(2_000_000, parseSize('1.9MiB'))).toBe('2,000,000 bytes, over the 1,992,294 byte limit');
+  expect(overLimit(1e40, parseSize('1MB'))).toContain('over the 1 MB limit');
 });
