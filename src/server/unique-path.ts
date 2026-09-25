@@ -43,6 +43,12 @@ function sanitize(value: unknown): string {
 /**
  * Path builder whose trust boundary is the interpolation: slashes in the literal chunks are
  * structure, slashes inside ${} are stripped along with the rest of the directory component.
+ *
+ * Each ${} value is cut to its last segment, lowercased and slugged, so it cannot carry a prefix
+ * or keep its case: `${'Alice_1'}` becomes `alice-1`, and `${'app/'}` contributes `file`. Prepend
+ * a runtime prefix outside the template, `` prefix + uniquePath`${userId}/${file.name}` ``, and
+ * store the returned path: a prefix rebuilt from the raw values will not match it.
+ * @see node_modules/@upstash/blob/docs/bucket/writing.mdx
  */
 export function uniquePath(strings: TemplateStringsArray, ...values: unknown[]): string {
   let path = '';

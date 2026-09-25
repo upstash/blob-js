@@ -1,6 +1,16 @@
 // Sizes are decimal ('2mb' = 2,000,000), matching how storage is billed. The only binary math in
 // the SDK is multipart part sizing, because R2's part floor is 5 MiB.
+/**
+ * Bytes, or a string with a decimal unit (b, kb, mb, gb, tb). '32mb' is 32,000,000 bytes, so
+ * `maxSize: '32mb'` refuses a 32 MiB (33,554,432-byte) file. For a binary limit pass a number:
+ * 32 * 1024 * 1024. Binary units such as '32MiB' throw.
+ * @see node_modules/@upstash/blob/docs/reference/types.mdx
+ */
 export type Size = string | number;
+/**
+ * A number of seconds, or a string with a unit: '15m', '1h', '7d'.
+ * @see node_modules/@upstash/blob/docs/reference/types.mdx
+ */
 export type Duration = string | number;
 
 const SIZE_UNITS: Record<string, number> = {
@@ -29,6 +39,7 @@ export function parseSize(input: Size, what = 'size'): number {
  * exact multiple of the unit prints whole and anything else keeps a decimal, because rounding both
  * sides independently produced refusals reading "1MB, over the 1MB limit"; past 10 of a unit the
  * decimal is noise and is dropped.
+ * @see node_modules/@upstash/blob/docs/reference/types.mdx
  */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes)) return `${bytes} B`;
@@ -94,6 +105,7 @@ export function parseDuration(input: Duration, what = 'duration'): number {
  *
  * `private` replaces `public` on a private bucket, since a shared cache must not keep a copy of an
  * object only a signed request may read.
+ * @see node_modules/@upstash/blob/docs/bucket/caching.mdx
  */
 export type CacheOption = Duration | 'immutable' | 'revalidate' | 'no-store';
 

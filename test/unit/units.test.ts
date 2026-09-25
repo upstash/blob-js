@@ -24,6 +24,13 @@ describe('parseSize', () => {
     expect(parseSize(10.9)).toBe(10);
   });
 
+  test("the Size caveat: '32mb' is under 32 MiB, and the number form is exact", () => {
+    expect(parseSize('32mb')).toBe(32_000_000);
+    expect(parseSize('32mb')).toBeLessThan(32 * 1024 * 1024);
+    expect(parseSize(32 * 1024 * 1024)).toBe(33_554_432);
+    expect(() => parseSize('32MiB')).toThrow('unknown unit');
+  });
+
   test('binary units are not part of the user-facing vocabulary', () => {
     expect(() => parseSize('5mib')).toThrow('unknown unit');
     expect(() => parseSize('5 KiB')).toThrow('unknown unit');

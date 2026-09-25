@@ -18,6 +18,7 @@ export const SINGLE_PUT_MAX = 5 * 1024 * 1024 * 1024;
 /**
  * `true` always parts, `false` never does, a size is the threshold to use instead of the default.
  * @see MULTIPART_THRESHOLD
+ * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
  */
 export type MultipartOption = boolean | Size;
 

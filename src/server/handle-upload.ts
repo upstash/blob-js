@@ -29,8 +29,13 @@ export interface StandardSchema<TInput = unknown, TOutput = TInput> {
 
 export type StandardResult<T> = { readonly value: T; readonly issues?: undefined } | { readonly issues: ReadonlyArray<{ readonly message: string; readonly path?: ReadonlyArray<PropertyKey | { key: PropertyKey }> | undefined }> };
 
+/** @see node_modules/@upstash/blob/docs/uploads/constraints.mdx */
 export interface UploadConstraints {
   contentTypes?: readonly string[];
+  /**
+   * Decimal: '32mb' is 32,000,000 bytes. For 32 MiB pass 32 * 1024 * 1024. See Size.
+   * @see node_modules/@upstash/blob/docs/uploads/constraints.mdx
+   */
   maxSize?: Size;
 }
 

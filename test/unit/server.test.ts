@@ -926,6 +926,99 @@ describe('uploadHandler: the direct transport', () => {
     expect(new URL(aborted.url).searchParams.get('uploadId')).toBe('mp-1');
   });
 
+  test("the maxSize caveat: '32mb' refuses a 32 MiB file, 32 * 1024 * 1024 takes it, '32MiB' throws", async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const file = { name: 'big.bin', type: 'application/octet-stream', size: 32 * 1024 * 1024 };
+    const decimal = uploadHandler({ bucket: bucket(), constraints: { maxSize: '32mb' }, onBeforeUpload: () => ({ path: 'big.bin' }) });
+    const refused = await post(decimal, { phase: 'begin', file });
+    expect(refused.status).toBe(413);
+    expect((await refused.json()).code).toBe('too_large');
+    const binary = uploadHandler({ bucket: bucket(), constraints: { maxSize: 32 * 1024 * 1024 }, onBeforeUpload: () => ({ path: 'big.bin' }) });
+    expect((await post(binary, { phase: 'begin', file })).status).toBe(200);
+    expect(() => uploadHandler({ bucket: bucket(), constraints: { maxSize: '32MiB' }, onBeforeUpload: () => ({ path: 'big.bin' }) })).toThrow('unknown unit');
+  });
+
+  test('the onUploadComplete caveat: a forged, expired or mis-sized completion never reaches it', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const seen: string[] = [];
+    const route = uploadHandler({ bucket: bucket(), multipart: true, onBeforeUpload: () => ({ path: 'a.png' }), onUploadComplete: ({ path }) => void seen.push(path) });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    const parts = [{ n: 1, etag: '"p1"' }];
+    r2Handler = fullR2();
+
+    const [payload, sig] = started.completionToken.split('.');
+    const flipped = `${sig!.slice(0, -1)}${sig!.endsWith('A') ? 'B' : 'A'}`;
+    expect((await post(route, { phase: 'end', completionToken: `${payload}.${flipped}`, parts })).status).toBe(403);
+
+    const later = spyOn(Date, 'now').mockReturnValue(Date.now() + 8 * 86_400_000);
+    try {
+      expect((await post(route, { phase: 'end', completionToken: started.completionToken, parts })).status).toBe(403);
+    } finally {
+      later.mockRestore();
+    }
+
+    r2Handler = fullR2({ 'content-length': '9', etag: '"e"', 'content-type': 'image/png' });
+    const short = await post(route, { phase: 'end', completionToken: started.completionToken, parts });
+    expect((await short.json()).code).toBe('signature_mismatch');
+    expect(seen).toEqual([]);
+
+    r2Handler = fullR2();
+    expect((await post(route, { phase: 'end', completionToken: started.completionToken, parts })).status).toBe(200);
+    expect(seen).toEqual(['a.png']);
+  });
+
+  test('the onUploadComplete caveat: a refusal on a retried multipart end keeps the object and logs', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    let runs = 0;
+    const route = uploadHandler({
+      bucket: bucket(),
+      multipart: true,
+      onBeforeUpload: () => ({ path: 'a.png' }),
+      onUploadComplete: () => {
+        if (++runs > 1) throw new BlobError('forbidden', { message: 'refused on the retry' });
+      },
+    });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    let completes = 0;
+    r2Handler = (call) => {
+      const created = initiated(call);
+      if (created) return created;
+      if (call.method === 'POST' && ++completes > 1) return new Response('<Error><Code>NoSuchUpload</Code></Error>', { status: 404 });
+      if (call.method === 'POST') return new Response('<CompleteMultipartUploadResult><ETag>"e"</ETag></CompleteMultipartUploadResult>', { status: 200 });
+      if (call.method === 'HEAD') return new Response('', { status: 200, headers: { 'content-length': '10', etag: '"e"', 'content-type': 'image/png' } });
+      return new Response('', { status: 204 });
+    };
+    const end = { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] };
+    expect((await post(route, end)).status).toBe(200);
+    calls = [];
+    const logged = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await post(route, end)).status).toBe(403);
+      expect(logged).toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+    // It ran twice, and the refusal on the retry could not tell the object was this upload's.
+    expect(runs).toBe(2);
+    expect(r2Calls().map((c) => c.method)).toEqual(['POST', 'HEAD', 'HEAD']);
+  });
+
+  test("the onUploadComplete caveat: another route's token is a 403 only when the route ids differ", async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const b = bucket();
+    const make = (endpoint?: string) => uploadHandler({ bucket: b, endpoint, multipart: true, onBeforeUpload: () => ({ path: 'a.png' }) });
+    const started = await begin(make(), { name: 'a.png', type: 'image/png', size: 10 });
+    const end = { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] };
+    r2Handler = fullR2();
+    // Same bucket, no endpoint, same constraints: the second handler derives the same id and accepts it.
+    expect((await post(make(), end)).status).toBe(200);
+    expect((await post(make('/api/other'), end)).status).toBe(403);
+  });
+
   /** A single PUT stores the object itself, so 'end' only reads it back. */
   const storedR2 =
     (head: Record<string, string> = { 'content-length': '10', etag: '"stored"', 'content-type': 'image/png' }) =>

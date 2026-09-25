@@ -109,4 +109,12 @@ describe('uniquePath', () => {
     for (const c of '0OIl') expect(seen.has(c)).toBe(false);
     expect(seen.size).toBe(58);
   });
+
+  test('the caveat: values are cut, lowercased and slugged, so a prefix goes outside the template', () => {
+    expect(uniquePath`${'Alice_1'}/${'a.png'}`).toMatch(new RegExp(`^alice-1/a-${SUFFIX}\\.png$`));
+    expect(uniquePath`${'app/'}${'x.png'}`).toMatch(new RegExp(`^filex-${SUFFIX}\\.png$`));
+    const path = 'bench/run-1/' + uniquePath`${'Alice_1'}/${'My Report.PDF'}`;
+    expect(path).toMatch(new RegExp(`^bench/run-1/alice-1/my-report-${SUFFIX}\\.pdf$`));
+    expect(path.startsWith('bench/run-1/Alice_1/')).toBe(false);
+  });
 });
