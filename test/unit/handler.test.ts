@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import * as z from 'zod';
-import { BlobError, Bucket, uploadRoute, uploadHandler } from '../../src/index.ts';
+import { BlobError, Bucket, uniquePath, uploadRoute, uploadHandler } from '../../src/index.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { encodeToken } from '../../src/server/token.ts';
 import type { WireBeginResponse } from '../../src/shared/types.ts';
@@ -480,5 +480,15 @@ test('a 32MiB upload limit accepts the exact file size and rejects one byte over
   calls = [];
   const oversized = await post(uploads, undefined, { phase: 'begin', file: { name: 'file.bin', type: 'application/octet-stream', size: 33_554_433 } });
   expect(oversized.status).toBe(413);
+  expect(r2Calls()).toHaveLength(0);
+});
+
+// uniquePath keeps the browser's filename, so a traversing name is the client's bad input, not a 500.
+test('a filename that climbs out of the route prefix is refused as invalid input', async () => {
+  const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: ({ file }) => ({ path: uniquePath`u1/${file.name}` }) });
+  calls = [];
+  const res = await post(uploads, undefined, { phase: 'begin', file: { name: '../x.png', type: 'image/png', size: 4 } });
+  expect(res.status).toBe(400);
+  expect((await res.json()).code).toBe('invalid_input');
   expect(r2Calls()).toHaveLength(0);
 });

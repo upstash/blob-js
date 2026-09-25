@@ -31,7 +31,8 @@ function splitExtension(name: string): [stem: string, extension: string] {
  *   uniquePath(`${prefix}users/${userId}/${file.name}`)
  *   uniquePath`users/${userId}/${file.name}`
  *
- * Both produce `users/Alice_123/Q3 Report-<random>.pdf`. An empty final filename uses "file".
+ * With userId `Alice_123` and file `Q3 Report.pdf`, both end in `users/Alice_123/Q3 Report-<random>.pdf`.
+ * An empty final filename uses "file".
  * Paths are not validated here; every request refuses "." and ".." segments and percent-encodes
  * the rest (see encodeKey). Store the returned path and use it unchanged for later reads/deletes.
  */

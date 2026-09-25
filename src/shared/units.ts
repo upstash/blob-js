@@ -47,6 +47,17 @@ export function formatBytes(bytes: number): string {
   return `${Number.isInteger(n) ? n : n.toFixed(n < 10 ? 1 : 0)} ${units[unit]}`;
 }
 
+/**
+ * The "X, over the Y limit" half of a size refusal. A limit given in binary units is never a whole
+ * decimal unit, so both sides can round to the same text ("34 MB, over the 34 MB limit"); then
+ * exact byte counts are shown instead.
+ */
+export function overLimit(size: number, limit: number): string {
+  const [s, l] = [formatBytes(size), formatBytes(limit)];
+  if (s !== l) return `${s}, over the ${l} limit`;
+  return `${size.toLocaleString('en-US')} bytes, over the ${limit.toLocaleString('en-US')} byte limit`;
+}
+
 const DURATION_UNITS: Record<string, number> = {
   ms: 1,
   s: 1000,

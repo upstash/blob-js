@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { cacheControl, formatBytes, parseDuration, parseSize } from '../../src/shared/units.ts';
+import { cacheControl, formatBytes, overLimit, parseDuration, parseSize } from '../../src/shared/units.ts';
 
 describe('parseSize', () => {
   test('is decimal, the way storage is billed', () => {
@@ -131,4 +131,9 @@ test('a size just over a limit does not format as the limit', () => {
   expect(formatBytes(1_049_999)).toBe('1.0 MB');
   expect(formatBytes(999_999)).toBe('1.0 MB');
   expect(formatBytes(1_000_000)).toBe('1 MB');
+});
+
+test('a binary limit that rounds like the file falls back to exact bytes', () => {
+  expect(overLimit(33_554_433, parseSize('32MiB'))).toBe('33,554,433 bytes, over the 33,554,432 byte limit');
+  expect(overLimit(3_100_000, parseSize('2MB'))).toBe('3.1 MB, over the 2 MB limit');
 });

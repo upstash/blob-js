@@ -1,6 +1,6 @@
 import { BlobError } from '../shared/errors.ts';
 import type { BlobObject, CompletedBlob } from '../shared/types.ts';
-import { cacheControl, formatBytes, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
+import { cacheControl, overLimit, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, tag } from './keys.ts';
 import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
@@ -249,7 +249,7 @@ export class Bucket {
 
     if (size === undefined && options.size !== undefined) size = parseSize(options.size, 'size');
     if (maxSize !== undefined && size !== undefined && size > maxSize) {
-      throw new BlobError('too_large', { message: `the body is ${formatBytes(size)}, over the ${formatBytes(maxSize)} limit` });
+      throw new BlobError('too_large', { message: `the body is ${overLimit(size, maxSize)}` });
     }
     if (size === undefined) {
       if (maxSize === undefined) throw new BlobError('length_required');
