@@ -1,6 +1,3 @@
-import { BlobError } from '../shared/errors.ts';
-import { encodeKey } from './keys.ts';
-
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const SUFFIX_LENGTH = 8;
 const EXTENSION = /\.[a-z0-9]{1,8}$/i;
@@ -36,9 +33,8 @@ function splitExtension(name: string): [stem: string, extension: string] {
  *
  * With userId `Alice_123` and file `Q3 Report.pdf`, both end in `users/Alice_123/Q3 Report-<random>.pdf`.
  * An empty final filename uses "file".
- * A path with "." or ".." segments throws invalid_input here, the same rule every request applies
- * (see encodeKey), so a browser filename like "../x.png" is refused before the app records the
- * path anywhere. Store the returned path and use it unchanged for later reads/deletes.
+ * Paths are not validated here; every request refuses "." and ".." segments and percent-encodes
+ * the rest (see encodeKey). Store the returned path and use it unchanged for later reads/deletes.
  */
 export function uniquePath(path: string): string;
 export function uniquePath(strings: TemplateStringsArray, ...values: unknown[]): string;
@@ -46,11 +42,5 @@ export function uniquePath(input: string | TemplateStringsArray, ...values: unkn
   const path = typeof input === 'string' ? input : String.raw({ raw: input.map((s) => s ?? '') }, ...values);
   const basenameAt = path.lastIndexOf('/') + 1;
   const [stem, extension] = splitExtension(path.slice(basenameAt));
-  const unique = `${path.slice(0, basenameAt)}${stem || 'file'}-${randomSuffix()}${extension}`;
-  try {
-    encodeKey(unique);
-  } catch (e) {
-    throw new BlobError('invalid_input', { message: e instanceof Error ? e.message : String(e), cause: e });
-  }
-  return unique;
+  return `${path.slice(0, basenameAt)}${stem || 'file'}-${randomSuffix()}${extension}`;
 }

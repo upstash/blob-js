@@ -38,10 +38,9 @@ describe('uniquePath', () => {
     expect(uniquePath`chat/${'b/c.png'}`).toMatch(new RegExp(`^chat/b/c-${SUFFIX}\\.png$`));
   });
 
-  // Refused here, before an onBeforeUpload goes on to record the path, with the same rule as encodeKey.
-  test('refuses a result with "." or ".." segments as invalid input', () => {
-    for (const make of [() => uniquePath`uploads/${'..'}/${'x.png'}`, () => uniquePath('a/./b.png'), () => uniquePath`u1/${'../x.png'}`]) {
-      expect(make).toThrow(expect.objectContaining({ code: 'invalid_input' }));
+  test('traversal is refused where the key is used, not here', () => {
+    for (const path of [uniquePath`uploads/${'..'}/${'x.png'}`, uniquePath('a/./b.png'), uniquePath('../x.png')]) {
+      expect(() => encodeKey(path)).toThrow(TypeError);
     }
     // An invalid escape leaves the cooked chunk undefined; it must not print as "undefined".
     expect(uniquePath`up\users/${'a.png'}`).toMatch(new RegExp(`^a-${SUFFIX}\\.png$`));
