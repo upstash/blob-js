@@ -38,10 +38,12 @@ describe('uniquePath', () => {
     expect(uniquePath`chat/${'b/c.png'}`).toMatch(new RegExp(`^chat/b/c-${SUFFIX}\\.png$`));
   });
 
-  test('traversal is refused where the key is used, not here', () => {
-    for (const path of [uniquePath`uploads/${'..'}/${'x.png'}`, uniquePath('a/./b.png'), uniquePath('../x.png')]) {
-      expect(() => encodeKey(path)).toThrow(TypeError);
+  // Refused here, before an onBeforeUpload goes on to record the path, with the same rule as encodeKey.
+  test('refuses a result with "." or ".." segments as invalid input', () => {
+    for (const make of [() => uniquePath`uploads/${'..'}/${'x.png'}`, () => uniquePath('a/./b.png'), () => uniquePath`u1/${'../x.png'}`]) {
+      expect(make).toThrow(expect.objectContaining({ code: 'invalid_input' }));
     }
+    expect(uniquePath('a/..')).toMatch(new RegExp(`^a/\\.\\.-${SUFFIX}$`));
     expect(encodeKey(uniquePath`${'a\\b'}/${'c\nd.png'}`)).not.toMatch(/[\\\n]/);
   });
 

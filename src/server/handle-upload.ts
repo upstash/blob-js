@@ -139,12 +139,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
 
     const decided = await options.onBeforeUpload({ request, route: options.route, file, input });
     if (!decided || typeof decided.path !== 'string') throw new TypeError('onBeforeUpload must return { path }');
-    try {
-      encodeKey(decided.path);
-    } catch (e) {
-      // uniquePath keeps the browser's filename as given, so a "../" in it is the client's input.
-      throw new BlobError('invalid_input', { message: e instanceof Error ? e.message : String(e) });
-    }
+    encodeKey(decided.path);
     details.path = decided.path;
     details.state = decided.state;
 

@@ -107,8 +107,8 @@ export const { GET, POST } = uploads;
 else as given: `Alice_123/Q3 Report.pdf` becomes `Alice_123/Q3 Report-<random>.pdf`. It does not
 lowercase, normalize Unicode, trim or truncate values, and it accepts slashes anywhere, so a
 prefix works either way: ``uniquePath`${prefix}${user.id}/${file.name}` `` or
-``uniquePath(`${prefix}${user.id}/${file.name}`)``. Paths with `.` or `..` segments are refused
-when used. Store the returned path and authorize reads and deletes using the stored owner and
+``uniquePath(`${prefix}${user.id}/${file.name}`)``. A result with `.` or `..` segments, such as
+a browser filename of `../x.png`, throws `invalid_input`. Store the returned path and authorize reads and deletes using the stored owner and
 exact path.
 
 ```tsx
