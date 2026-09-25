@@ -190,7 +190,9 @@ export class R2 {
           signal: AbortSignal.timeout(PRESIGN_TIMEOUT_MS),
         });
       } catch (e) {
-        if (attempt >= RETRY_ATTEMPTS) throw new BlobError('request_failed', { message: 'could not reach the signing service', status: 502, cause: e });
+        // A hung agent is not asked again: three timeouts would hold a serverless begin for 30 s.
+        const timedOut = (e as Error)?.name === 'TimeoutError';
+        if (timedOut || attempt >= RETRY_ATTEMPTS) throw new BlobError('request_failed', { message: 'could not reach the signing service', status: 502, cause: e });
         await sleep(backoff(attempt, null));
         continue;
       }
@@ -299,7 +301,9 @@ async function presignedFrom(res: Response): Promise<Presigned> {
   const body = (await res.json().catch(() => undefined)) as { url?: unknown; expiresAt?: unknown; error?: unknown } | undefined;
   const reason = typeof body?.error === 'string' ? body.error : undefined;
   // 413 is a request body over the agent's cap, which only oversized metadata reaches.
-  if (res.status === 400 || res.status === 413) throw new BlobError('invalid_input', { message: `the signing service refused the request: ${reason ?? 'body too large'}` });
+  if (res.status === 400 || res.status === 413) {
+    throw new BlobError('invalid_input', { message: `the signing service refused the request: ${reason ?? (res.status === 413 ? 'body too large' : 'bad request')}` });
+  }
   // A 401 or 403 reason is the bucket owner's billing notice (suspended, read-only), and an upload
   // route hands e.message to its end users, so it rides on cause, which toJSON() never sends.
   if (res.status === 401) throw new BlobError('unauthorized', { message: 'the bucket token was rejected', cause: reason });

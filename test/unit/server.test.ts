@@ -270,8 +270,10 @@ describe('signedReadUrl', () => {
     expect(e.message).toContain('empty, "." or ".." segments');
     presignResponse = refuse(413, 'body too large');
     await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ code: 'invalid_input' });
+    presignResponse = () => new Response('<html>bad request</html>', { status: 400 });
+    await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ message: 'The signing service refused the request: bad request' });
     // Refusals are answers, not outages: none was asked twice.
-    expect(presigns.length).toBe(4);
+    expect(presigns.length).toBe(5);
   });
 
   test('a 429 or a 5xx is asked again, three times at most', async () => {
@@ -289,6 +291,13 @@ describe('signedReadUrl', () => {
     };
     await bucket().signedReadUrl('a');
     expect(presigns.length).toBe(3);
+
+    presigns = [];
+    presignResponse = () => {
+      throw new DOMException('The operation timed out.', 'TimeoutError');
+    };
+    await expect(bucket().signedReadUrl('a')).rejects.toMatchObject({ code: 'request_failed' });
+    expect(presigns.length).toBe(1);
 
     presigns = [];
     presignResponse = () => Response.json({ error: 'server misconfigured' }, { status: 500 });
