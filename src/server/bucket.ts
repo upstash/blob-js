@@ -18,7 +18,7 @@ export interface BucketOptions {
    */
   cache?: CacheOption;
   /**
-   * Send the SDK version, runtime and platform as headers on credential requests to Upstash.
+   * Send the SDK version, runtime and platform as headers on credential and signing requests to Upstash.
    * `UPSTASH_DISABLE_TELEMETRY` in the environment also turns it off.
    * @default true
    */

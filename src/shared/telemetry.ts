@@ -36,8 +36,8 @@ function platform(g: TelemetryGlobals): string | undefined {
 }
 
 /**
- * Sent only on calls to the Upstash agent, not on object requests: it is one request per credential
- * lifetime, so it costs nothing there, while the object path is the hot path.
+ * Sent only on calls to the Upstash agent (credentials and signing), not on object requests, which
+ * are the hot path.
  * Opt out with UPSTASH_DISABLE_TELEMETRY (only reachable where process.env exists). Setting it to
  * 'false' or '0' does not opt out: an env var that says false and means true is a trap.
  */

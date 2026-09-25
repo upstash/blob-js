@@ -13,7 +13,7 @@ export function encodeKey(path: string): string {
 }
 
 // The agent signs no key with an empty segment ("dir/", "a//b") or a control character. Refused here
-// as well, so an upload fails before it has created a multipart upload the refusal would strand.
+// as well, so an upload with such a path fails before its multipart is created.
 export function presignableKey(path: string): void {
   encodeKey(path);
   if (/[\x00-\x1f\x7f]/.test(path)) throw new BlobError('invalid_input', { message: 'a signed url cannot name a path with control characters' });

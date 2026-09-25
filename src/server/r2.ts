@@ -165,10 +165,10 @@ export class R2 {
   }
 
   /**
-   * A url for one request on one object, signed by the agent. Never signed here: R2 derives a
+   * A url for one operation on one object, signed by the agent. Never signed here: R2 derives a
    * temporary credential's secret from its session token, and a url has to carry that token, so a
    * url signed with it would hand its holder every object in the bucket until the credential expires.
-   * The agent signs with a key no url reveals, and the url does the one request it names.
+   * The agent signs with a key no url reveals, and the url does the one operation it names.
    */
   async presign(init: PresignInit): Promise<Presigned> {
     presignableKey(init.path);

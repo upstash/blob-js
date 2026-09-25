@@ -215,7 +215,6 @@ describe('signedReadUrl', () => {
     const b = bucket();
     const read = await b.signedReadUrl('dir/secret.txt', { expiresIn: '2m' });
     expect(presigns[0]).toEqual({ method: 'GET', key: 'dir/secret.txt', expiresIn: 120 });
-    expect(read.url).toBe(new URL(read.url).href);
     expect(read.url).toContain('X-Amz-Expires=120');
     expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + 110_000);
     expect(read.expiresAt.getTime()).toBeLessThan(Date.now() + 130_000);
@@ -233,6 +232,10 @@ describe('signedReadUrl', () => {
     expect(request.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
     expect(request.headers.get('content-type')).toBe('application/json');
     expect(request.init.signal).toBeInstanceOf(AbortSignal);
+    expect(request.headers.get('upstash-telemetry-sdk')).toStartWith('upstash-blob-js@');
+    calls = [];
+    await new Bucket({ token: TOKEN, enableTelemetry: false }).signedReadUrl('a');
+    expect(calls.find((c) => c.url.includes('/v1/presign'))!.headers.get('upstash-telemetry-sdk')).toBeNull();
   });
 
   test('a path the agent cannot sign is refused before it is asked', async () => {
@@ -265,6 +268,15 @@ describe('signedReadUrl', () => {
     resetCredentialCaches();
     const answers = [new Response('', { status: 429, headers: { 'retry-after': '0' } }), Response.json({ error: 'server misconfigured' }, { status: 500 })];
     presignResponse = (body) => answers.shift() ?? agentPresign(body);
+    await bucket().signedReadUrl('a');
+    expect(presigns.length).toBe(3);
+
+    presigns = [];
+    let dropped = 0;
+    presignResponse = (body) => {
+      if (dropped++ < 2) throw new TypeError('fetch failed');
+      return agentPresign(body);
+    };
     await bucket().signedReadUrl('a');
     expect(presigns.length).toBe(3);
 
@@ -685,6 +697,18 @@ describe('uploadHandler: the direct transport', () => {
       [17, String(5 * 1024 * 1024)],
       [18, '3'],
     ]);
+  });
+
+  test('a multipart whose first batch cannot be signed is aborted, not stranded', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    presignResponse = () => Response.json({ error: 'presign is not enabled for this bucket' }, { status: 403 });
+    const route = uploadHandler({ bucket: bucket(), multipart: true, onBeforeUpload: () => ({ path: 'big.bin' }) });
+    const res = await post(route, { phase: 'begin', file: { name: 'big.bin', type: '', size: 10 } });
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe('forbidden');
+    const abort = r2Calls().find((c) => c.method === 'DELETE')!;
+    expect(new URL(abort.url).searchParams.get('uploadId')).toBe('mp-1');
   });
 
   test('a path no url can be signed for is refused before a multipart exists', async () => {

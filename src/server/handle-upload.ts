@@ -193,7 +193,16 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       partSize,
     };
     const completionToken = await signToken(payload, tokenKey());
-    return { completionToken, path: decided.path, upload: { partSize, multipart, parts: await presignParts(payload, 1) } };
+    let parts: WirePart[];
+    try {
+      parts = await presignParts(payload, 1);
+    } catch (e) {
+      // The browser never gets the token it would cancel with, so a multipart nobody can sign parts
+      // for is aborted here rather than left as billed storage nothing lists.
+      if (uploadId !== undefined) await r2.abortMultipart(decided.path, uploadId).catch(() => {});
+      throw e;
+    }
+    return { completionToken, path: decided.path, upload: { partSize, multipart, parts } };
   }
 
   async function parts(body: any, details: ErrorDetails): Promise<WirePartsResponse> {

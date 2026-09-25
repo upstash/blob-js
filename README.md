@@ -50,7 +50,7 @@ const upload = await bucket.signedUploadUrl('u/7/report.pdf', { contentType: 'ap
 await fetch(upload.url, { method: 'PUT', headers: upload.headers, body });
 ```
 
-Upstash signs each link for one request on one object, and it lives at most 10 minutes (default
+Upstash signs each link for one operation on one object, and it lives at most 10 minutes (default
 read: 5 minutes, upload: 10; a longer `expiresIn` gets 10). `headers` on an upload URL are pinned
 into the signature. A path with an empty segment (`dir/`, `a//b`) cannot be signed.
 `bucket.publicUrl(path)` is `undefined` on a private bucket.
