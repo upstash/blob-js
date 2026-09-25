@@ -6,8 +6,9 @@ import { answerError, deriveRouteId, handleUpload, resolveConstraints, type Erro
 import { resolveMultipart, type MultipartOption } from './multipart.ts';
 
 /**
- * One upload endpoint. With no `routes` it is the route: the client calls `useUpload()` and nothing
- * names anything twice. With `routes` it mounts several at the same endpoint, the name in the query
+ * One upload endpoint. With no `routes` it is the route: the client calls `useUpload('/api/upload')`,
+ * or the bound `useUpload()` from `uploadHooks<typeof uploads>()`, and nothing names anything
+ * twice. With `routes` it mounts several at the same endpoint, the name in the query
  * -- `useUpload('avatar')` -- and the client reads each route's input and completion data off
  * `typeof uploads`, so a page never spells out a url and a typo does not compile.
  *
@@ -29,6 +30,10 @@ type RouteInputOf<TSchema> = TSchema extends StandardSchema<any, any> ? InferOut
 /** A route's constraints REPLACE the handler's per key; `null` clears a key the handler set. */
 export interface RouteConstraints {
   contentTypes?: readonly string[] | null;
+  /**
+   * Decimal: '32mb' is 32,000,000 bytes. For 32 MiB pass 32 * 1024 * 1024. See Size.
+   * @see node_modules/@upstash/blob/docs/uploads/constraints.mdx
+   */
   maxSize?: Size | null;
 }
 
@@ -130,7 +135,13 @@ interface PlainRouteBase<TCtx, TInput> {
   multipart?: MultipartOption;
   /** Replaces the handler's. */
   onBeforeUpload?: (args: BeforeArgs<TCtx, TInput>) => BeforeResult<undefined> | Promise<BeforeResult<undefined>>;
-  /** Replaces the handler's. What it returns is `upload.blob.data` in the browser, typed. */
+  /**
+   * Replaces the handler's. What it returns is `upload.blob.data` in the browser, typed.
+   * Runs only after the route verified its signed completion token (forged, expired or another
+   * route's is a 403) and that the stored object has the declared size. Throw to refuse: the object
+   * is deleted. Delivery is at-least-once, so write idempotently on `uploadId`.
+   * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
+   */
   onUploadComplete?: (args: CompleteBase<TCtx, undefined> & DirectCompleteExtras) => unknown;
   /** Replaces the handler's. */
   onError?: (args: ErrorArgs<TCtx>) => ErrorReturn;
@@ -173,6 +184,13 @@ export interface UploadRouteOptions<TCtx, TSchema extends StandardSchema<any, an
   /** A Standard Schema the browser's `input` is validated against before onBeforeUpload runs. */
   input?: TSchema;
   onBeforeUpload?: (args: BeforeArgs<TCtx, RouteInputOf<TSchema>>) => BeforeResult<TState> | Promise<BeforeResult<TState>>;
+  /**
+   * What it returns is `upload.blob.data` in the browser, typed.
+   * Runs only after the route verified its signed completion token (forged, expired or another
+   * route's is a 403) and that the stored object has the declared size. Throw to refuse: the object
+   * is deleted. Delivery is at-least-once, so write idempotently on `uploadId`.
+   * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
+   */
   onUploadComplete?: (args: CompleteBase<TCtx, TState> & DirectCompleteExtras) => TData | Promise<TData>;
   onError?: (args: ErrorArgs<TCtx>) => ErrorReturn;
 }
@@ -195,6 +213,7 @@ export interface UploadBuilder<TCtx> {
  *   onUploadComplete: ({ state, url }) => db.files.insert({ name: state.name, url }),
  * });
  * ```
+ * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
  */
 export function uploadRoute<TCtx = undefined>(): UploadBuilder<TCtx> {
   return ((options: object) => ({ [BUILT]: options })) as unknown as UploadBuilder<TCtx>;
@@ -221,6 +240,7 @@ export type HandlerRoutes<TRoutes, TData, TInput> = string extends keyof TRoutes
   ? { readonly '': RouteBrand<TInput, TData> }
   : { readonly [K in keyof TRoutes]: RouteBrand<InputOf<TRoutes[K], TInput>, DataOf<TRoutes[K], TData>> };
 
+/** @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx */
 export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends StandardSchema<any, any> | undefined> {
   /**
    * Every route inherits it; a route may name its own. Omit it and the handler builds one from
@@ -262,7 +282,10 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
   onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<undefined> | Promise<BeforeResult<undefined>>;
   /**
    * The default. A route with its own onUploadComplete replaces it, and answers the browser with its
-   * own return instead of this one. Direct completion is at-least-once; use `uploadId` atomically.
+   * own return instead of this one.
+   * Runs only after the route verified its signed completion token (forged, expired or another
+   * route's is a 403) and that the stored object has the declared size. Throw to refuse: the object
+   * is deleted. Delivery is at-least-once, so write idempotently on `uploadId`.
    */
   onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, undefined> & DirectCompleteExtras) => TData | Promise<TData>;
   /**
@@ -324,6 +347,7 @@ interface AnyRouteSpec {
  * deliberately shapeless: the route shape, with the ctx, is the `UploadRoutes` half of `routes`,
  * and a constraint that repeated it would be intersected with that half in every callback's
  * contextual type.
+ * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
  */
 export function uploadHandler<
   TRoutes extends Record<string, object>,

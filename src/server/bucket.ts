@@ -28,6 +28,7 @@ export interface BucketOptions {
 export interface PutOptions {
   contentType?: string;
   contentTypes?: readonly string[];
+  /** Decimal: '32mb' is 32,000,000 bytes. For 32 MiB pass 32 * 1024 * 1024. See Size. */
   maxSize?: Size;
   /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
@@ -201,10 +202,12 @@ export function r2Of(bucket: Bucket): R2 {
   return r2;
 }
 
+/** @see node_modules/@upstash/blob/docs/bucket/connecting.mdx */
 export class Bucket {
   private readonly r2: R2;
   private readonly defaultCache: CacheOption | undefined;
 
+  /** @see node_modules/@upstash/blob/docs/bucket/connecting.mdx */
   constructor(options: BucketOptions) {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
@@ -213,9 +216,15 @@ export class Bucket {
     INTERNALS.set(this, this.r2);
   }
 
-  /** Reads `UPSTASH_BLOB_TOKEN`; the options are the constructor's, minus the token. */
+  /**
+   * Reads `UPSTASH_BLOB_TOKEN`; the options are the constructor's, minus the token.
+   * @see node_modules/@upstash/blob/docs/bucket/connecting.mdx
+   */
   static fromEnv(options?: FromEnvOptions): Bucket;
-  /** Reads the token from `name` instead of `UPSTASH_BLOB_TOKEN`. */
+  /**
+   * Reads the token from `name` instead of `UPSTASH_BLOB_TOKEN`.
+   * @see node_modules/@upstash/blob/docs/bucket/connecting.mdx
+   */
   static fromEnv(name: string | undefined, options?: FromEnvOptions): Bucket;
   static fromEnv(nameOrOptions: string | FromEnvOptions = TOKEN_ENV, options: FromEnvOptions = {}): Bucket {
     const name = typeof nameOrOptions === 'string' ? nameOrOptions : TOKEN_ENV;
@@ -229,6 +238,7 @@ export class Bucket {
    * The public object URL. Undefined on a private bucket: nothing serves its objects over the public
    * host, so use `signedReadUrl()` there. Whether the bucket is private comes from the backend, not
    * the token, so the first call on a fresh bucket fetches credentials; after that it is local.
+   * @see node_modules/@upstash/blob/docs/bucket/reading.mdx
    */
   async publicUrl(path: string): Promise<string | undefined> {
     encodeKey(path);
@@ -238,6 +248,7 @@ export class Bucket {
 
   /* ------------------------------------------------------------------ put */
 
+  /** @see node_modules/@upstash/blob/docs/bucket/writing.mdx */
   async put(path: string, body: PutBody, options: PutOptions = {}): Promise<CompletedBlob> {
     encodeKey(path);
     const allowed = options.contentTypes === undefined ? undefined : expandContentTypes(options.contentTypes);
@@ -384,6 +395,7 @@ export class Bucket {
 
   /* ----------------------------------------------------------------- read */
 
+  /** @see node_modules/@upstash/blob/docs/bucket/reading.mdx */
   async get(path: string): Promise<BlobDownload> {
     const res = await this.r2.fetch({ method: 'GET', path });
     if (!res.ok) throw await errorFromResponse(res);
@@ -392,6 +404,7 @@ export class Bucket {
     return { ...blob, contentType: head.contentType, metadata: head.metadata, body: res.body ?? new Blob([]).stream() };
   }
 
+  /** @see node_modules/@upstash/blob/docs/bucket/reading.mdx */
   async info(path: string): Promise<BlobInfo> {
     const head = await this.r2.head(path);
     if (!head) throw new BlobError('not_found', { message: `${path} not found` });
@@ -399,10 +412,12 @@ export class Bucket {
     return { ...blob, contentType: head.contentType, metadata: head.metadata };
   }
 
+  /** @see node_modules/@upstash/blob/docs/bucket/reading.mdx */
   async exists(path: string): Promise<boolean> {
     return (await this.r2.head(path)) !== undefined;
   }
 
+  /** @see node_modules/@upstash/blob/docs/bucket/reading.mdx */
   async list(options: ListOptions = {}): Promise<ListPage> {
     const query: Record<string, string> = { 'list-type': '2' };
     if (options.prefix) query.prefix = options.prefix;
@@ -422,7 +437,10 @@ export class Bucket {
     return { blobs, cursor: tag(xml, 'IsTruncated') === 'true' && next ? decodeEntities(next) : undefined };
   }
 
-  /** The link and when it dies, so a caller can cache it until then rather than guess. */
+  /**
+   * The link and when it dies, so a caller can cache it until then rather than guess.
+   * @see node_modules/@upstash/blob/docs/bucket/reading.mdx
+   */
   async signedReadUrl(path: string, options: SignedReadUrlOptions = {}): Promise<SignedReadUrl> {
     const expiresIn = options.expiresIn === undefined ? undefined : Math.max(1, Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000));
     const query: Record<string, string> = {};
@@ -435,6 +453,8 @@ export class Bucket {
    * A url someone else can PUT one object to: the counterpart of signedReadUrl, for a CLI or a
    * server-to-server job. A browser upload wants uploadRoute() instead, which also handles
    * multipart and the completion callback this cannot.
+   * @see node_modules/@upstash/blob/docs/bucket/writing.mdx
+   * @see node_modules/@upstash/blob/docs/reference/signing.mdx
    */
   async signedUploadUrl(path: string, options: SignedUploadUrlOptions = {}): Promise<SignedUploadUrl> {
     encodeKey(path);
@@ -455,6 +475,7 @@ export class Bucket {
 
   /* ---------------------------------------------------------------- write */
 
+  /** @see node_modules/@upstash/blob/docs/bucket/deleting.mdx */
   async del(target: DeleteTarget): Promise<void> {
     if (typeof target === 'string') {
       const res = await this.r2.fetch({ method: 'DELETE', path: target });
@@ -507,6 +528,7 @@ export class Bucket {
   /**
    * Multipart uploads that were started and never completed or aborted. They are billed storage that
    * list() cannot see, and a bucket cannot be deleted while one exists.
+   * @see node_modules/@upstash/blob/docs/bucket/deleting.mdx
    */
   async listMultipartUploads(options: ListMultipartOptions = {}): Promise<MultipartUpload[]> {
     return this.r2.listMultipartUploads(options.prefix);
@@ -516,6 +538,7 @@ export class Bucket {
    * Throws away an incomplete upload and every part that landed for it. Missing is success, which is
    * why it takes the record listMultipartUploads() returned rather than two strings: a swapped pair
    * would abort nothing and report that it worked.
+   * @see node_modules/@upstash/blob/docs/bucket/deleting.mdx
    */
   async abortMultipartUpload(upload: Pick<MultipartUpload, 'path' | 'uploadId'>): Promise<void> {
     if (!upload || typeof upload !== 'object') throw new BlobError('invalid_input', { message: 'abortMultipartUpload({ path, uploadId }): an upload is required' });
@@ -527,6 +550,8 @@ export class Bucket {
   /**
    * List plus abort, for an app cron: an abandoned upload is not expired for you, and one that
    * list() cannot see is what turns "delete the bucket" into a dead end. Returns what it aborted.
+   * @see node_modules/@upstash/blob/docs/bucket/deleting.mdx
+   * @see node_modules/@upstash/blob/docs/uploads/abandoned-uploads.mdx
    */
   async abortStaleMultipartUploads(options: AbortStaleMultipartOptions): Promise<MultipartUpload[]> {
     const cutoff = Date.now() - parseDuration(options.olderThan, 'olderThan');
@@ -537,6 +562,7 @@ export class Bucket {
 
   /* ---------------------------------------------------------- copy/move */
 
+  /** @see node_modules/@upstash/blob/docs/bucket/writing.mdx */
   async copy(from: string, to: string, options: CopyOptions = {}): Promise<BlobObject> {
     const creds = await this.r2.credentials();
     const headers: Record<string, string> = { 'x-amz-copy-source': `/${creds.bucket}/${encodeKey(from)}` };
@@ -561,7 +587,10 @@ export class Bucket {
     return this.r2.blobObject(to, head.size, head.etag, head.uploadedAt);
   }
 
-  /** A copy followed by a delete of the source: storage has no rename. Same options as `copy`. */
+  /**
+   * A copy followed by a delete of the source: storage has no rename. Same options as `copy`.
+   * @see node_modules/@upstash/blob/docs/bucket/writing.mdx
+   */
   async move(from: string, to: string, options: CopyOptions = {}): Promise<BlobObject> {
     const blob = await this.copy(from, to, options);
     try {
@@ -577,6 +606,7 @@ export class Bucket {
    * when nothing was there. A write that lost the race is re-read and re-run after a short jittered
    * pause, up to `maxAttempts` (default 6) times; then it throws 'conflict'. Existing metadata is
    * kept unless options.metadata is given.
+   * @see node_modules/@upstash/blob/docs/bucket/writing.mdx
    */
   async updateJson<T = unknown>(path: string, fn: (prev: T | null) => T | Promise<T>, options: UpdateJsonOptions = {}): Promise<BlobObject> {
     const attempts = options.maxAttempts ?? 6;
@@ -621,6 +651,7 @@ export class Bucket {
   // Async because the endpoint is only known from a credentials response: the aws-sdk reads
   // `endpoint` and `bucket` while the client is constructed (measured 2026-08-24, @aws-sdk 3.1116:
   // resolveEndpointConfig spreads the config, so a lazy getter is captured as its first value).
+  /** @see node_modules/@upstash/blob/docs/bucket/connecting.mdx */
   s3(): S3Config {
     const r2 = this.r2;
     return {

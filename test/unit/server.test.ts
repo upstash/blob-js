@@ -926,6 +926,49 @@ describe('uploadHandler: the direct transport', () => {
     expect(new URL(aborted.url).searchParams.get('uploadId')).toBe('mp-1');
   });
 
+  test("the maxSize caveat: '32mb' refuses a 32 MiB file, 32 * 1024 * 1024 takes it, '32MiB' throws", async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const file = { name: 'big.bin', type: 'application/octet-stream', size: 32 * 1024 * 1024 };
+    const decimal = uploadHandler({ bucket: bucket(), constraints: { maxSize: '32mb' }, onBeforeUpload: () => ({ path: 'big.bin' }) });
+    const refused = await post(decimal, { phase: 'begin', file });
+    expect(refused.status).toBe(413);
+    expect((await refused.json()).code).toBe('too_large');
+    const binary = uploadHandler({ bucket: bucket(), constraints: { maxSize: 32 * 1024 * 1024 }, onBeforeUpload: () => ({ path: 'big.bin' }) });
+    expect((await post(binary, { phase: 'begin', file })).status).toBe(200);
+    expect(() => uploadHandler({ bucket: bucket(), constraints: { maxSize: '32MiB' }, onBeforeUpload: () => ({ path: 'big.bin' }) })).toThrow('unknown unit');
+  });
+
+  test('the onUploadComplete caveat: a forged, expired or mis-sized completion never reaches it', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const seen: string[] = [];
+    const route = uploadHandler({ bucket: bucket(), multipart: true, onBeforeUpload: () => ({ path: 'a.png' }), onUploadComplete: ({ path }) => void seen.push(path) });
+    const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
+    const parts = [{ n: 1, etag: '"p1"' }];
+    r2Handler = fullR2();
+
+    const [payload, sig] = started.completionToken.split('.');
+    const flipped = `${sig!.slice(0, -1)}${sig!.endsWith('A') ? 'B' : 'A'}`;
+    expect((await post(route, { phase: 'end', completionToken: `${payload}.${flipped}`, parts })).status).toBe(403);
+
+    const later = spyOn(Date, 'now').mockReturnValue(Date.now() + 8 * 86_400_000);
+    try {
+      expect((await post(route, { phase: 'end', completionToken: started.completionToken, parts })).status).toBe(403);
+    } finally {
+      later.mockRestore();
+    }
+
+    r2Handler = fullR2({ 'content-length': '9', etag: '"e"', 'content-type': 'image/png' });
+    const short = await post(route, { phase: 'end', completionToken: started.completionToken, parts });
+    expect((await short.json()).code).toBe('signature_mismatch');
+    expect(seen).toEqual([]);
+
+    r2Handler = fullR2();
+    expect((await post(route, { phase: 'end', completionToken: started.completionToken, parts })).status).toBe(200);
+    expect(seen).toEqual(['a.png']);
+  });
+
   /** A single PUT stores the object itself, so 'end' only reads it back. */
   const storedR2 =
     (head: Record<string, string> = { 'content-length': '10', etag: '"stored"', 'content-type': 'image/png' }) =>
