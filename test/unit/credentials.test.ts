@@ -50,14 +50,14 @@ describe('credential mint telemetry', () => {
   test('new Bucket({ enableTelemetry: false }) reaches the mint request', async () => {
     const m = mockMint();
     const bucket = new Bucket({ token: encodeToken('bucket', 'pw', 'bdeadbeef012'), enableTelemetry: false });
-    await bucket.signedReadUrl('a.txt');
+    await bucket.s3().credentials();
     expect(m.headers().get('upstash-telemetry-sdk')).toBeNull();
     expect(m.headers().get('authorization')).toStartWith('Bearer ');
   });
 
   test('new Bucket({}) sends telemetry by default', async () => {
     const m = mockMint();
-    await new Bucket({ token: encodeToken('bucket', 'pw', 'bdeadbeef012') }).signedReadUrl('a.txt');
+    await new Bucket({ token: encodeToken('bucket', 'pw', 'bdeadbeef012') }).s3().credentials();
     expect(m.headers().get('upstash-telemetry-sdk')).toBe(`upstash-blob-js@${VERSION}`);
   });
 });

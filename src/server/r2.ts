@@ -1,10 +1,11 @@
 import { BlobError } from '../shared/errors.ts';
+import { telemetryHeaders } from '../shared/telemetry.ts';
 import type { BlobObject } from '../shared/types.ts';
 import type { CacheOption } from '../shared/units.ts';
 import { credentialCacheFor, type CredentialCache, type TempCredentials } from './credentials.ts';
-import { blocks, decodeEntities, encodeKey, escapeXml, tag } from './keys.ts';
-import { presign, signHeaders } from './sigv4.ts';
-import { DOMAIN_SUFFIX } from './token.ts';
+import { blocks, decodeEntities, encodeKey, escapeXml, presignableKey, tag } from './keys.ts';
+import { signHeaders } from './sigv4.ts';
+import { AGENT_URL, DOMAIN_SUFFIX } from './token.ts';
 
 export interface R2RequestInit {
   method: string;
@@ -31,29 +32,33 @@ export interface MultipartUpload {
   initiatedAt: Date;
 }
 
-export interface PresignedRead {
+export interface PresignInit {
+  method: 'GET' | 'PUT';
+  path: string;
+  /** Seconds. Capped at MAX_PRESIGN_SECONDS, since the agent refuses anything longer. */
+  expiresIn: number;
+  /** PUT only: pinned into the signature, so the request must send exactly these. */
+  headers?: Record<string, string>;
+  /** GET only: response-content-disposition and response-content-type. */
+  query?: Record<string, string>;
+  /** PUT only: signs one part of a multipart upload rather than the object. */
+  part?: { partNumber: number; uploadId: string };
+}
+
+export interface Presigned {
   url: string;
-  /** When the link stops working: the signature's own expiry, or the credential's, whichever is first. */
   expiresAt: Date;
 }
 
-export interface PresignedWrite {
-  url: string;
-  expiresAt: Date;
-}
+/** The agent refuses a longer url: it is also how long one outlives a suspension or a password rotation. */
+export const MAX_PRESIGN_SECONDS = 600;
 
 const RETRIABLE_METHODS = new Set(['GET', 'HEAD', 'PUT', 'DELETE']);
 const RETRY_ATTEMPTS = 3;
 // R2 answers a temporary credential that has expired with a 403 naming it, which is indistinguishable
 // from a signature error unless the body is read.
 const CREDENTIAL_REJECTED = /ExpiredToken|InvalidAccessKeyId|TokenRefreshRequired/;
-// What a read link is signed for when the caller does not say. Shorter than the cap on purpose: an
-// ask at the cap re-mints, and the cap moves with whatever the agent had left.
-const DEFAULT_READ_SECONDS = 300;
-const DEFAULT_WRITE_SECONDS = 3600;
-// A credential this much older than it was minted might be replaced by a newer one; a fresher one
-// would only come back identical.
-const WORTH_REMINTING_S = 30;
+const PRESIGN_TIMEOUT_MS = 10_000;
 
 export class R2 {
   private readonly creds: CredentialCache;
@@ -61,13 +66,13 @@ export class R2 {
 
   constructor(
     readonly bucketId: string,
-    token: string,
+    private readonly token: string,
     /** The bucket's public DNS label, carried in the token. */
     hashForDomain: string,
     /** The bucket password: the HMAC key for completion tokens. Never leaves the server. */
     readonly signingSecret: string,
     readonly defaultCache: CacheOption | undefined,
-    enableTelemetry = true,
+    private readonly enableTelemetry = true,
   ) {
     this.creds = credentialCacheFor(token, enableTelemetry);
     this.hostname = `${hashForDomain}.${DOMAIN_SUFFIX}`;
@@ -159,68 +164,46 @@ export class R2 {
     return fetch(url, { method: init.method, headers, body, signal: init.signal, ...extra });
   }
 
-  /** Query-signed URL. Lives min(expiresIn, credential remaining life): R2 checks the credential at request start. */
-  async presign(init: {
-    method: string;
-    path: string;
-    query?: Record<string, string>;
-    expiresIn: number;
-    signedHeaders?: Record<string, string>;
-    /** Mint a fresh credential when less than this is left, so the url is usable for that long. */
-    minRemainingSeconds?: number;
-  }): Promise<string> {
-    const c = await this.creds.get(init.minRemainingSeconds ?? 0);
-    const remaining = Math.floor(c.expiresAt - Date.now() / 1000);
-    const url = await this.objectUrl(init.path, init.query);
-    return presign(
-      { accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, sessionToken: c.sessionToken, region: c.region },
-      { method: init.method, url, expiresIn: Math.max(1, Math.min(init.expiresIn, remaining)), signedHeaders: init.signedHeaders },
-    );
-  }
-
   /**
-   * A read link that lives no longer than requested. The signing credential can expire sooner, so
-   * the SDK transparently uses the available duration and `expiresAt` reports the exact result.
+   * A url for one operation on one object, signed by the agent. Never signed here: R2 derives a
+   * temporary credential's secret from its session token, and a url has to carry that token, so a
+   * url signed with it would hand its holder every object in the bucket until the credential expires.
+   * The agent signs with a key no url reveals, and the url does the one operation it names.
    */
-  async presignRead(init: { path: string; query?: Record<string, string>; expiresIn?: number }): Promise<PresignedRead> {
-    let c = await this.creds.get();
-    let cap = capOf(c);
-    let seconds = init.expiresIn === undefined ? Math.min(cap, DEFAULT_READ_SECONDS) : Math.max(1, Math.floor(init.expiresIn));
-    if (seconds > cap && worthReminting(c)) {
-      c = await this.creds.get(seconds);
-      cap = capOf(c);
+  async presign(init: PresignInit): Promise<Presigned> {
+    presignableKey(init.path);
+    const body = JSON.stringify({
+      method: init.method,
+      key: init.path,
+      expiresIn: Math.min(MAX_PRESIGN_SECONDS, Math.max(1, Math.floor(init.expiresIn))),
+      ...(init.headers && Object.keys(init.headers).length ? { headers: init.headers } : {}),
+      ...(init.query && Object.keys(init.query).length ? { query: init.query } : {}),
+      ...(init.part ?? {}),
+    });
+    for (let attempt = 1; ; attempt++) {
+      let res: Response;
+      try {
+        res = await fetch(`${AGENT_URL}/v1/presign`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json', ...(this.enableTelemetry ? telemetryHeaders() : {}) },
+          body,
+          signal: AbortSignal.timeout(PRESIGN_TIMEOUT_MS),
+        });
+      } catch (e) {
+        // A hung agent is not asked again: three timeouts would hold a serverless begin for 30 s.
+        const timedOut = (e as Error)?.name === 'TimeoutError';
+        if (timedOut || attempt >= RETRY_ATTEMPTS) throw new BlobError('request_failed', { message: 'could not reach the signing service', status: 502, cause: e });
+        await sleep(backoff(attempt, null));
+        continue;
+      }
+      // Signing has no side effect, so every 429 and 5xx is safe to ask again.
+      if (attempt < RETRY_ATTEMPTS && (res.status === 429 || res.status >= 500)) {
+        await res.body?.cancel();
+        await sleep(backoff(attempt, res.headers.get('retry-after')));
+        continue;
+      }
+      return presignedFrom(res);
     }
-    seconds = Math.min(seconds, cap);
-    const signer = c.signing ?? c;
-    const url = await this.objectUrl(init.path, init.query);
-    const signed = await presign(
-      { accessKeyId: signer.accessKeyId, secretAccessKey: signer.secretAccessKey, sessionToken: signer.sessionToken, region: c.region },
-      { method: 'GET', url, expiresIn: seconds },
-    );
-    return { url: signed, expiresAt: new Date(Math.min(Date.now() + seconds * 1000, signer.expiresAt * 1000)) };
-  }
-
-  /**
-   * A write link. The read-signing credential is read-only, so the object credential signs this one
-   * and its remaining life is the cap: ask for longer and the SDK re-mints rather than hand back a
-   * url that dies early. `headers` are pinned into the signature and must be sent verbatim.
-   */
-  async presignWrite(init: { path: string; query?: Record<string, string>; headers: Record<string, string>; expiresIn?: number }): Promise<PresignedWrite> {
-    let seconds = init.expiresIn === undefined ? DEFAULT_WRITE_SECONDS : Math.max(1, Math.floor(init.expiresIn));
-    const c = await this.creds.get(seconds);
-    seconds = Math.min(seconds, Math.max(1, Math.floor(c.expiresAt - Date.now() / 1000)));
-    const url = await this.objectUrl(init.path, init.query);
-    const signed = await presign(
-      { accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, sessionToken: c.sessionToken, region: c.region },
-      { method: 'PUT', url, expiresIn: seconds, signedHeaders: init.headers },
-    );
-    return { url: signed, expiresAt: new Date(Date.now() + seconds * 1000) };
-  }
-
-  /** The cap a presigned read can ask for right now, in seconds. Not public API: `expiresAt` on
-   * a signed read is the answer callers need, after the fact. Kept for the tests that assert the cap. */
-  async readCap(): Promise<number> {
-    return capOf(await this.creds.get());
   }
 
   async head(path: string): Promise<BlobHead | undefined> {
@@ -314,13 +297,32 @@ export class R2 {
   }
 }
 
-/** What the credential that will sign has left: no link can outlive it, whatever was asked for. */
-function capOf(c: TempCredentials): number {
-  return Math.max(1, Math.floor((c.signing ? c.signing.expiresAt : c.expiresAt) - Date.now() / 1000));
-}
+async function presignedFrom(res: Response): Promise<Presigned> {
+  const body = (await res.json().catch(() => undefined)) as { url?: unknown; expiresAt?: unknown; error?: unknown } | undefined;
+  const reason = typeof body?.error === 'string' ? body.error : undefined;
+  // 413 is a request body over the agent's cap, which only oversized metadata reaches.
+  if (res.status === 400 || res.status === 413) {
+    throw new BlobError('invalid_input', { message: `the signing service refused the request: ${reason ?? (res.status === 413 ? 'body too large' : 'bad request')}` });
+  }
+  // A 401 or 403 reason is the bucket owner's billing notice (suspended, read-only), and an upload
+  // route hands e.message to its end users, so it rides on cause, which toJSON() never sends.
+  if (res.status === 401) throw new BlobError('unauthorized', { message: 'the bucket token was rejected', cause: reason });
+  if (res.status === 403) throw new BlobError('forbidden', { message: 'Upstash refused to sign a url for this bucket', cause: reason });
+  if (res.status === 429) throw new BlobError('rate_limited', { message: 'presign requests are rate limited' });
+  if (!res.ok) throw new BlobError('request_failed', { message: `presign request failed with ${res.status}${reason ? `: ${reason}` : ''}`, status: 502 });
 
-function worthReminting(c: TempCredentials): boolean {
-  return !c.signing && capOf(c) < c.lifetime - WORTH_REMINTING_S;
+  // The url is handed to whoever the caller gives it to; refuse anything but R2 over https.
+  let url: URL | undefined;
+  try {
+    url = typeof body?.url === 'string' ? new URL(body.url) : undefined;
+  } catch {
+    url = undefined;
+  }
+  const expiresAt = body?.expiresAt;
+  if (!url || url.protocol !== 'https:' || !url.hostname.endsWith('.r2.cloudflarestorage.com') || typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
+    throw new BlobError('request_failed', { message: 'the signing service answered with an unexpected url', status: 502 });
+  }
+  return { url: body!.url as string, expiresAt: new Date(expiresAt * 1000) };
 }
 
 export function sleep(ms: number): Promise<void> {

@@ -118,7 +118,8 @@ function sentenceCase(message: string): string {
 }
 
 // e.message never carries a credential, a token, or an internal path. Every message assembled
-// here comes from a code, a caller-supplied string, or an HTTP status.
+// here comes from a code, a caller-supplied string, an HTTP status, or the signing service's reason;
+// a suspended or read-only bucket's notice is on cause instead, since it is for the owner.
 export class BlobError extends Error {
   readonly code: BlobErrorCode;
   readonly status: number;
