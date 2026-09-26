@@ -18,7 +18,7 @@ export function presignableKey(path: string): void {
   encodeKey(path);
   if (/[\x00-\x1f\x7f]/.test(path)) throw new BlobError('invalid_input', { message: 'a signed url cannot name a path with control characters' });
   if (path.split('/').includes('')) {
-    throw new BlobError('invalid_input', { message: `a signed url cannot name a path with an empty segment: ${path}`, hint: 'drop the leading, trailing or doubled "/"' });
+    throw new BlobError('invalid_input', { message: 'a signed url cannot name a path with an empty segment', hint: 'drop the leading, trailing or doubled "/"' });
   }
 }
 

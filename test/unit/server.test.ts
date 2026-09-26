@@ -241,7 +241,12 @@ describe('signedReadUrl', () => {
   test('a path the agent cannot sign is refused before it is asked', async () => {
     resetCredentialCaches();
     for (const path of ['dir/', '/a', 'a//b', 'a\nb']) {
-      await expect(bucket().signedReadUrl(path)).rejects.toMatchObject({ code: 'invalid_input' });
+      const e = await bucket()
+        .signedReadUrl(path)
+        .catch((x) => x);
+      expect(e.code).toBe('invalid_input');
+      // An upload route sends this to the browser, and the path is the server's choice.
+      expect(e.message).not.toContain(path);
     }
     await expect(bucket().signedReadUrl('a/../b')).rejects.toThrow(TypeError);
     expect(presigns).toEqual([]);
