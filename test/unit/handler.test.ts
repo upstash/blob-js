@@ -37,6 +37,10 @@ const mockFetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
       expiresAt: Math.floor(Date.now() / 1000) + 600,
     });
   }
+  if (url.includes('/v1/presign')) {
+    const { key, expiresIn } = JSON.parse(String(init.body)) as { key: string; expiresIn: number };
+    return Response.json({ url: `${ENDPOINT}/bucket-id/${key}?X-Amz-Expires=${expiresIn}`, expiresAt: Math.floor(Date.now() / 1000) + expiresIn });
+  }
   if (url.startsWith(ENDPOINT)) return r2Handler(call);
   return realFetch(input as RequestInfo, init);
 }) as typeof fetch;
