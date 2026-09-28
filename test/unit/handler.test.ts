@@ -485,7 +485,7 @@ test('a 32MiB upload limit accepts the exact file size and rejects one byte over
 
 // uniquePath keeps the browser's filename, so a traversing name is the client's bad input, not a 500.
 test('a filename that climbs out of the route prefix is refused as invalid input', async () => {
-  const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: ({ file }) => ({ path: uniquePath`u1/${file.name}` }) });
+  const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: ({ file }) => ({ path: uniquePath(`u1/${file.name}`) }) });
   calls = [];
   const res = await post(uploads, undefined, { phase: 'begin', file: { name: '../x.png', type: 'image/png', size: 4 } });
   expect(res.status).toBe(400);

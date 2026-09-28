@@ -88,7 +88,7 @@ export const uploads = uploadHandler({
   onBeforeUpload: async ({ request, file }) => {
     const user = await getUser(request);
     if (!user) throw new BlobError('unauthorized'); // the 401; nothing is signed
-    return { path: uniquePath`${user.id}/${file.name}`, metadata: { owner: user.id } };
+    return { path: uniquePath(`${user.id}/${file.name}`), metadata: { owner: user.id } };
   },
 
   onUploadComplete: async ({ metadata, url, uploadId }) => {
@@ -106,8 +106,7 @@ export const { GET, POST } = uploads;
 `uniquePath` adds an eight-character random suffix to the final filename and keeps everything
 else as given: `Alice_123/Q3 Report.pdf` becomes `Alice_123/Q3 Report-<random>.pdf`. It does not
 lowercase, normalize Unicode, trim or truncate values, and it accepts slashes anywhere, so a
-prefix works either way: ``uniquePath`${prefix}${user.id}/${file.name}` `` or
-``uniquePath(`${prefix}${user.id}/${file.name}`)``. Paths with `.` or `..` segments are refused
+prefix goes in as is: ``uniquePath(`${prefix}${user.id}/${file.name}`)``. Paths with `.` or `..` segments are refused
 when used. Store the returned path and authorize reads and deletes using the stored owner and
 exact path.
 

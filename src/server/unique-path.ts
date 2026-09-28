@@ -26,17 +26,16 @@ function splitExtension(name: string): [stem: string, extension: string] {
 /**
  * Adds a random suffix to the final filename, before its extension, so uploads never overwrite
  * each other. Everything else is kept exactly as given: case, spaces, punctuation, Unicode, slashes
- * and length. Call it with a string or as a template tag:
+ * and length:
  *
- *   uniquePath(`${prefix}users/${userId}/${file.name}`)
- *   uniquePath`users/${userId}/${file.name}`
+ *   uniquePath(`users/${userId}/${file.name}`) // 'users/Alice_123/Q3 Report-<random>.pdf'
  *
- * With userId `Alice_123` and file `Q3 Report.pdf`, both end in `users/Alice_123/Q3 Report-<random>.pdf`.
  * An empty final filename uses "file".
  * Paths are not validated here; every request refuses "." and ".." segments and percent-encodes
  * the rest (see encodeKey). Store the returned path and use it unchanged for later reads/deletes.
  */
 export function uniquePath(path: string): string;
+// Undocumented: the tag form behaves like the string form and stays only for existing callers.
 export function uniquePath(strings: TemplateStringsArray, ...values: unknown[]): string;
 export function uniquePath(input: string | TemplateStringsArray, ...values: unknown[]): string {
   const path = typeof input === 'string' ? input : String.raw({ raw: input.map((s) => s ?? '') }, ...values);

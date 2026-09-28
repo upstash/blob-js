@@ -30,7 +30,7 @@ const chat = uploadHandler({
   input: z.object({ threadId: z.string().uuid() }),
   onBeforeUpload: ({ ctx, file, input }) => {
     if (input.threadId.startsWith('00000000')) throw new BlobError('forbidden');
-    const path = root + uniquePath`chat/${ctx.id}/${input.threadId}/${file.name}`;
+    const path = root + uniquePath(`chat/${ctx.id}/${input.threadId}/${file.name}`);
     rows[path] = { status: 'pending', owner: ctx.id };
     return { path, cache: 'immutable', metadata: { uploadedBy: ctx.id, originalName: file.name } };
   },

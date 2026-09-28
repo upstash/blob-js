@@ -39,7 +39,7 @@ const chat = uploadHandler({
   },
   input: z.object({ threadId: z.string().uuid() }),
   onBeforeUpload: ({ ctx, file, input }) => {
-    const path = root + uniquePath`chat/${ctx.id}/${input.threadId}/${file.name}`;
+    const path = root + uniquePath(`chat/${ctx.id}/${input.threadId}/${file.name}`);
     rows[path] = 'pending';
     return { path, cache: 'immutable', metadata: { uploadedBy: ctx.id } };
   },
