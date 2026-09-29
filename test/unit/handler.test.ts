@@ -110,7 +110,7 @@ describe('dispatch', () => {
     const uploads = handler();
     const res = await uploads.GET(new Request(url('large')));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ constraints: { maxSize: 2_000_000_000 } });
+    expect(await res.json()).toEqual({ protocol: 1, constraints: { maxSize: 2_000_000_000 } });
 
     const begin = await post(uploads, 'attachment', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } });
     expect(begin.status).toBe(200);
@@ -148,7 +148,7 @@ describe('dispatch', () => {
     const uploads = uploadHandler({ bucket: bucket(), constraints: { maxSize: '1mb' }, onBeforeUpload: () => ({ path: 'only/1.png' }) });
     const begin = await began(uploads, undefined, { name: 'a.png', type: 'image/png', size: 10 });
     expect(begin.path).toBe('only/1.png');
-    expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ constraints: { maxSize: 1_000_000 } });
+    expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ protocol: 1, constraints: { maxSize: 1_000_000 } });
     // A name on the query is a client bound to some other handler: it does not silently get this
     // route, for GET or for POST.
     for (const name of ['anything', '__proto__', 'toString']) {
@@ -231,11 +231,11 @@ describe('dispatch', () => {
 describe('defaults', () => {
   test('a route replaces constraints per key, and null clears one', async () => {
     const uploads = handler();
-    expect(await (await uploads.GET(new Request(url('attachment')))).json()).toEqual({ constraints: { contentTypes: ['image/png'], maxSize: 20_000_000 } });
+    expect(await (await uploads.GET(new Request(url('attachment')))).json()).toEqual({ protocol: 1, constraints: { contentTypes: ['image/png'], maxSize: 20_000_000 } });
     // maxSize replaced, contentTypes cleared by null.
-    expect(await (await uploads.GET(new Request(url('large')))).json()).toEqual({ constraints: { maxSize: 2_000_000_000 } });
+    expect(await (await uploads.GET(new Request(url('large')))).json()).toEqual({ protocol: 1, constraints: { maxSize: 2_000_000_000 } });
     // maxSize replaced, the handler's type list inherited.
-    expect(await (await uploads.GET(new Request(url('avatar')))).json()).toEqual({ constraints: { contentTypes: ['image/png'], maxSize: 2_000_000 } });
+    expect(await (await uploads.GET(new Request(url('avatar')))).json()).toEqual({ protocol: 1, constraints: { contentTypes: ['image/png'], maxSize: 2_000_000 } });
   });
 
   test('the inherited constraints still refuse', async () => {
@@ -339,8 +339,8 @@ describe('defaults', () => {
       routes: { omega: { constraints: { maxSize: '1kb' } }, alpha: {} },
     });
     for (const uploads of [first, second]) {
-      expect(await (await uploads.GET(new Request(url('alpha')))).json()).toEqual({ constraints: { maxSize: 20_000_000 } });
-      expect(await (await uploads.GET(new Request(url('omega')))).json()).toEqual({ constraints: { maxSize: 1_000 } });
+      expect(await (await uploads.GET(new Request(url('alpha')))).json()).toEqual({ protocol: 1, constraints: { maxSize: 20_000_000 } });
+      expect(await (await uploads.GET(new Request(url('omega')))).json()).toEqual({ protocol: 1, constraints: { maxSize: 1_000 } });
     }
   });
 });

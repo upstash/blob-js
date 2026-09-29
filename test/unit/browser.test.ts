@@ -11,7 +11,7 @@ const memory = new Map<string, string>();
 const sleeps: number[] = [];
 let timers: { ms: number; cb: () => void }[] = [];
 let wakers: (() => void)[] = [];
-let calls: { phase: string; body: any }[] = [];
+let calls: { phase: string; body: any; protocol: unknown }[] = [];
 let onPhase: (body: any) => unknown | Response;
 const restore: (() => void)[] = [];
 
@@ -86,7 +86,9 @@ beforeAll(() => {
     const url = typeof input === 'string' ? input : input.url;
     if (!url.startsWith('/api/')) return real(input, init);
     const body = JSON.parse(init!.body as string);
-    calls.push({ phase: body.phase, body });
+    // Kept apart so the body assertions stay about the phase; afterEach checks it on every call.
+    const { protocol, ...rest } = body;
+    calls.push({ phase: body.phase, body: rest, protocol });
     const out = onPhase(body);
     if (out instanceof Response) return out;
     return Response.json(out);
@@ -112,6 +114,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   expect(poolState().active).toBe(0);
+  // Every phase of every test: the client's protocol rides each POST.
+  expect(calls.map((c) => c.protocol)).toEqual(calls.map(() => 1));
 });
 
 async function settle(rounds = 6) {
@@ -514,6 +518,22 @@ describe('a single PUT', () => {
     for (const m of messages) {
       expect(m).not.toContain(token);
       expect(m).not.toContain('DEADBEEF');
+    }
+  });
+
+  test('a route advertising a newer protocol, or none, is uploaded to the same way', async () => {
+    for (const advertised of [undefined, 2, 'x']) {
+      const from = calls.length;
+      const route = defaultRoute(3);
+      onPhase = (body) => {
+        const out = route(body) as Record<string, unknown>;
+        return body.phase === 'begin' && advertised !== undefined ? { ...out, protocol: advertised } : out;
+      };
+      const task = upload(png(), { route: '/api/upload' });
+      await settle();
+      ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+      await expect(task.done).resolves.toMatchObject({ path: 'p' });
+      expect(calls.slice(from).map((c) => c.phase)).toEqual(['begin', 'end']);
     }
   });
 

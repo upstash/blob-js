@@ -69,6 +69,8 @@ export interface WireUploadPlan {
 }
 
 export interface WireBeginResponse {
+  /** The server's UPLOAD_PROTOCOL. Missing is 1. */
+  protocol?: number;
   completionToken: string;
   path: string;
   upload: WireUploadPlan;
@@ -92,11 +94,13 @@ export interface WireEndResponse<TData = unknown> {
   data: TData;
 }
 
-export type WireRequest =
+/** `protocol` is the client's UPLOAD_PROTOCOL, on every phase. Missing is 1. */
+export type WireRequest = { protocol?: number } & (
   | { phase: 'begin'; file: WireFile; head?: string; input?: unknown }
   | { phase: 'parts'; completionToken: string; from: number }
   | { phase: 'end'; completionToken: string; parts?: WireLanded[] }
-  | { phase: 'cancel'; completionToken: string };
+  | { phase: 'cancel'; completionToken: string }
+);
 
 /* -------------------------------------------------------------- browser -- */
 
@@ -161,5 +165,7 @@ export type UploadRoute<TInput = unknown, TData = unknown, TRoute extends string
 
 /** What GET on an upload route answers: the constraints the route enforces. */
 export interface WireConstraintsResponse {
+  /** The server's UPLOAD_PROTOCOL. Missing is 1. */
+  protocol?: number;
   constraints: ServedConstraints;
 }

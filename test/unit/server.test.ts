@@ -643,9 +643,27 @@ describe('uploadHandler: the direct transport', () => {
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
     const etag = res.headers.get('etag')!;
     expect(etag).toMatch(/^"[a-z0-9]+"$/);
-    expect(await res.json()).toEqual({ constraints: { maxSize: 1_000_000 } });
+    expect(await res.json()).toEqual({ protocol: 1, constraints: { maxSize: 1_000_000 } });
     const again = await route.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }));
     expect(again.status).toBe(304);
+  });
+
+  test('the protocol is advertised on GET and begin, and nothing is refused over it', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    expect((await (await route.GET(new Request('https://app.test/api/upload'))).json()).protocol).toBe(1);
+    const file = { name: 'a.png', type: 'image/png', size: 10 };
+    // Missing is 1, a newer client is answered the way it would be answered at 1, and a value that
+    // is not a version at all is ignored rather than turned into a refusal.
+    for (const protocol of [undefined, 1, 2, 99, 'x', -1, null]) {
+      const res = await post(route, { phase: 'begin', file, ...(protocol === undefined ? {} : { protocol }) });
+      expect(res.status).toBe(200);
+      const started = (await res.json()) as WireBeginResponse;
+      expect(started.protocol).toBe(1);
+      const parts = await post(route, { phase: 'parts', completionToken: started.completionToken, from: 1, protocol });
+      expect(parts.status).toBe(200);
+    }
   });
 
   test('a file under the threshold is one presigned object PUT, with nothing created behind it', async () => {

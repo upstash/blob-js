@@ -1,4 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
+import { UPLOAD_PROTOCOL } from '../shared/protocol.ts';
 import type { UploadFile, WireBeginResponse, WireEndResponse, WireLanded, ServedConstraints, WireConstraintsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
 import { cacheControl, formatBytes, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
@@ -206,7 +207,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       }
       throw e;
     }
-    return { completionToken, path: decided.path, upload: { partSize, multipart, parts } };
+    return { protocol: UPLOAD_PROTOCOL, completionToken, path: decided.path, upload: { partSize, multipart, parts } };
   }
 
   async function parts(body: any, details: ErrorDetails): Promise<WirePartsResponse> {
@@ -422,7 +423,7 @@ export function constraintsEndpoint(routeConstraints: ResolvedConstraints): (req
   const served: ServedConstraints = {};
   if (routeConstraints.contentTypes) served.contentTypes = routeConstraints.contentTypes;
   if (routeConstraints.maxSize !== undefined) served.maxSize = routeConstraints.maxSize;
-  const body = JSON.stringify({ constraints: served } satisfies WireConstraintsResponse);
+  const body = JSON.stringify({ protocol: UPLOAD_PROTOCOL, constraints: served } satisfies WireConstraintsResponse);
   const etag = `"${hash(body)}"`;
   return async (request: Request): Promise<Response> => {
     const headers = { 'content-type': 'application/json', 'cache-control': `public, max-age=${LIMITS_MAX_AGE}`, etag };

@@ -1,4 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
+import { protocolOf, UPLOAD_PROTOCOL } from '../shared/protocol.ts';
 import type { CompletedBlob, UploadSnapshot, UploadTask, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
 import { SNIFF_BYTES } from '../shared/units.ts';
 import { abortError, clock } from './clock.ts';
@@ -78,6 +79,8 @@ class Task implements InternalTask {
   private token: string | undefined;
   private storeKey: string;
   private partSize = 0;
+  /** The protocol the route advertised at 'begin'. A resume after a reload never asks, so it stays 1. */
+  private protocol = 1;
   // Whether the route cut this file into real multipart parts. False is a single PUT: one url, one
   // object write, and nothing on the other side to pause into or resume from.
   private multipart = false;
@@ -321,6 +324,7 @@ class Task implements InternalTask {
       // Never retried: begin runs onBeforeUpload, which inserts the app's row.
       1,
     )) as WireBeginResponse;
+    this.protocol = protocolOf(res.protocol);
     this.token = res.completionToken;
     this.partSize = res.upload.partSize;
     this.multipart = res.upload.multipart !== false;
@@ -552,7 +556,7 @@ class Task implements InternalTask {
         res = await fetch(this.options.route, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...authored },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ ...body, protocol: UPLOAD_PROTOCOL }),
           signal,
         });
       } catch (e) {
