@@ -93,6 +93,7 @@ describe('GET', () => {
     expect(etag).toMatch(/^"/);
     expect((await chat.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }))).status).toBe(304);
     expect(await res.json()).toEqual({
+      protocol: 1,
       constraints: { contentTypes: ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'], maxSize: 20_000_000 },
     });
     const img = uploadHandler({ bucket: pub, constraints: { contentTypes: ['image/*'] }, onBeforeUpload: () => ({ path: 'x' }) });
