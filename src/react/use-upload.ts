@@ -17,10 +17,21 @@ export type RoutePath<R> = R extends { readonly __upstashUploadRoute: UploadRout
 export interface UploadRecordBase {
   readonly id: string;
   readonly file: File;
+  /** @see node_modules/@upstash/blob/docs/uploads/large-files.mdx */
   pause(): boolean;
+  /** @see node_modules/@upstash/blob/docs/uploads/large-files.mdx */
   resume(): boolean;
+  /**
+   * Aborts the requests in flight and has the route abort the multipart upload, or delete a single
+   * PUT that already landed, so onUploadComplete does not run. Once status is 'finishing' the route
+   * is already completing it: the task is canceled locally, but onUploadComplete may still run.
+   * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
+   */
   cancel(): boolean;
-  /** Only from 'error': runs the same upload again from the parts that landed. */
+  /**
+   * Only from 'error': runs the same upload again from the parts that landed.
+   * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
+   */
   retry(): boolean;
   loaded: number;
   total: number;
@@ -122,7 +133,15 @@ function refusedEntry(file: File, error: BlobError): ListEntry<AnyRecord> {
   return { id, subscribe: () => () => {}, status: () => 'error', record: () => record, start: () => {} };
 }
 
-/** Direct browser upload: the handler presigns and the bytes go straight to storage. */
+/**
+ * Direct browser upload: the handler presigns and the bytes go straight to storage.
+ *
+ * `route` is required: the handler's URL (`'/api/upload'`) or a route name. Here `blob.data` is
+ * `unknown`. For typed data bind the hook: `const { useUpload } = uploadHooks<typeof uploads>()`.
+ * For a handler without `routes` the bound hook takes no URL: `useUpload()`, `useUpload({ onDone })`.
+ * It posts to `uploadHooks({ endpoint })`, default `'/api/upload'`.
+ * @see node_modules/@upstash/blob/docs/uploads/upload-client.mdx
+ */
 export function useUpload<R extends AnyUploadRoute = UploadRoute<undefined, unknown>>(route: RoutePath<R>, options?: UseUploadOptions<R>): UseUploadResult<R>;
 export function useUpload(route: string, maybeOptions?: any): any {
   const options: UseUploadOptions<any> = maybeOptions ?? {};

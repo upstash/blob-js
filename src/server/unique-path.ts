@@ -33,6 +33,7 @@ function splitExtension(name: string): [stem: string, extension: string] {
  * An empty final filename uses "file".
  * Paths are not validated here; every request refuses "." and ".." segments and percent-encodes
  * the rest (see encodeKey). Store the returned path and use it unchanged for later reads/deletes.
+ * @see node_modules/@upstash/blob/docs/bucket/writing.mdx
  */
 export function uniquePath(path: string): string;
 // Undocumented: the tag form behaves like the string form and stays only for existing callers.

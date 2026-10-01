@@ -117,6 +117,7 @@ function refusedEntry<TResponse>(file: File, error: BlobError): ListEntry<Server
 /**
  * One ordinary POST to your own route: request upload progress plus cancellation. The response JSON
  * is handed back exactly as it arrived.
+ * @see node_modules/@upstash/blob/docs/uploads/upload-client.mdx
  */
 export function useServerUpload<R = unknown>(route: string, options: UseServerUploadOptions<R> = {}): UseServerUploadResult<R> {
   type TResponse = R;
