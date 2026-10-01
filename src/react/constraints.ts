@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { clock } from '../browser/clock.ts';
 import { resolveHeaders, type HeadersProvider } from '../browser/task.ts';
 import { BlobError } from '../shared/errors.ts';
+import { protocolOf } from '../shared/protocol.ts';
 import type { ServedConstraints, WireConstraintsResponse } from '../shared/types.ts';
 import { formatBytes } from '../shared/units.ts';
 
@@ -12,6 +13,11 @@ const inFlight = new Map<string, Promise<RouteFacts>>();
 
 export interface RouteFacts {
   constraints: ServedConstraints | undefined;
+  /**
+   * The route's UPLOAD_PROTOCOL: 1 when it sent none, or could not be asked. Only an upload route's
+   * means anything: a useServerUpload url is the app's own, and its GET may say whatever it likes.
+   */
+  protocol: number;
   /** Why the route could not be asked. Failed responses are not cached. */
   error?: BlobError;
 }
@@ -42,16 +48,16 @@ async function fetchFacts(route: string, headers: HeadersProvider | undefined): 
   try {
     authored = await resolveHeaders(headers);
   } catch (e) {
-    return { constraints: undefined, error: BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), status: 400, cause: e }) };
+    return { constraints: undefined, protocol: 1, error: BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), status: 400, cause: e }) };
   }
   let res: Response;
   try {
     res = await fetch(route, { headers: authored });
   } catch (e) {
-    return { constraints: undefined, error: new BlobError('request_failed', { message: 'could not reach the route', status: 503, cause: e }) };
+    return { constraints: undefined, protocol: 1, error: new BlobError('request_failed', { message: 'could not reach the route', status: 503, cause: e }) };
   }
   // Ordinary server-upload URLs commonly expose POST only. There are no route constraints to cache.
-  if (res.status === 404 || res.status === 405) return remember(route, { constraints: undefined });
+  if (res.status === 404 || res.status === 405) return remember(route, { constraints: undefined, protocol: 1 });
   if (!res.ok) {
     let body: unknown;
     try {
@@ -59,16 +65,18 @@ async function fetchFacts(route: string, headers: HeadersProvider | undefined): 
     } catch {
       body = undefined;
     }
-    return { constraints: undefined, error: BlobError.fromJSON(body, res.status) ?? BlobError.fromStatus(res.status) };
+    return { constraints: undefined, protocol: 1, error: BlobError.fromJSON(body, res.status) ?? BlobError.fromStatus(res.status) };
   }
   let constraints: ServedConstraints | undefined;
+  let protocol = 1;
   try {
     const body = (await res.json()) as WireConstraintsResponse | undefined;
     if (body?.constraints && typeof body.constraints === 'object') constraints = body.constraints;
+    protocol = protocolOf(body?.protocol);
   } catch {
     // Not a constraints document. The upload itself remains authoritative.
   }
-  return remember(route, { constraints });
+  return remember(route, { constraints, protocol });
 }
 
 function remember(route: string, facts: RouteFacts): RouteFacts {

@@ -1,4 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
+import { UPLOAD_PROTOCOL } from '../shared/protocol.ts';
 import type { UploadFile, WireBeginResponse, WireEndResponse, WireLanded, ServedConstraints, WireConstraintsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
 import { cacheControl, formatBytes, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
@@ -104,13 +105,13 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       if (!body || typeof body !== 'object' || typeof body.phase !== 'string') throw new BlobError('invalid_input', { message: 'expected a JSON body with a phase' });
       switch (body.phase) {
         case 'begin':
-          return Response.json(await begin(request, body, details));
+          return answer(await begin(request, body, details));
         case 'parts':
-          return Response.json(await parts(body, details));
+          return answer(await parts(body, details));
         case 'end':
-          return Response.json(await end(request, body, details));
+          return answer(await end(request, body, details));
         case 'cancel':
-          return Response.json(await cancel(body, details));
+          return answer(await cancel(body, details));
         default:
           throw new BlobError('invalid_input', { message: `unknown phase ${String(body.phase)}` });
       }
@@ -392,6 +393,14 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
 }
 
 /**
+ * Every successful answer carries the protocol of the server that wrote it. On a deploy, instances of
+ * two releases answer one upload side by side, so the client reads each answer by its own number.
+ */
+function answer(body: object): Response {
+  return Response.json({ ...body, protocol: UPLOAD_PROTOCOL });
+}
+
+/**
  * Every refusal leaves a route as BlobError.toJSON(), so the browser rebuilds it with its code
  * intact and callers switch on error.code instead of reading status numbers and message text.
  */
@@ -422,7 +431,7 @@ export function constraintsEndpoint(routeConstraints: ResolvedConstraints): (req
   const served: ServedConstraints = {};
   if (routeConstraints.contentTypes) served.contentTypes = routeConstraints.contentTypes;
   if (routeConstraints.maxSize !== undefined) served.maxSize = routeConstraints.maxSize;
-  const body = JSON.stringify({ constraints: served } satisfies WireConstraintsResponse);
+  const body = JSON.stringify({ protocol: UPLOAD_PROTOCOL, constraints: served } satisfies WireConstraintsResponse);
   const etag = `"${hash(body)}"`;
   return async (request: Request): Promise<Response> => {
     const headers = { 'content-type': 'application/json', 'cache-control': `public, max-age=${LIMITS_MAX_AGE}`, etag };

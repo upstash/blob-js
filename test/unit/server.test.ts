@@ -643,9 +643,34 @@ describe('uploadHandler: the direct transport', () => {
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
     const etag = res.headers.get('etag')!;
     expect(etag).toMatch(/^"[a-z0-9]+"$/);
-    expect(await res.json()).toEqual({ constraints: { maxSize: 1_000_000 } });
+    expect(await res.json()).toEqual({ protocol: 1, constraints: { maxSize: 1_000_000 } });
     const again = await route.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }));
     expect(again.status).toBe(304);
+  });
+
+  test('the protocol is on GET and every answer, and nothing is refused over it', async () => {
+    resetCredentialCaches();
+    r2Handler = beginR2;
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    expect((await (await route.GET(new Request('https://app.test/api/upload'))).json()).protocol).toBe(1);
+    const file = { name: 'a.png', type: 'image/png', size: 10 };
+    // Missing is 1, a newer client is answered the way it would be answered at 1, and a value that
+    // is not a version at all is ignored rather than turned into a refusal.
+    for (const protocol of [undefined, 1, 2, 99, 'x', -1, null]) {
+      const res = await post(route, { phase: 'begin', file, ...(protocol === undefined ? {} : { protocol }) });
+      expect(res.status).toBe(200);
+      const started = (await res.json()) as WireBeginResponse;
+      expect(started.protocol).toBe(1);
+      const parts = await post(route, { phase: 'parts', completionToken: started.completionToken, from: 1, protocol });
+      expect(parts.status).toBe(200);
+      expect(((await parts.json()) as WirePartsResponse).protocol).toBe(1);
+      const cancel = await post(route, { phase: 'cancel', completionToken: started.completionToken, protocol });
+      expect(await cancel.json()).toEqual({ protocol: 1, ok: true });
+    }
+    // A refusal carries none: it is BlobError.toJSON(), read by its code.
+    const refused = await post(route, { phase: 'parts', completionToken: 'nope', protocol: 1 });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).not.toHaveProperty('protocol');
   });
 
   test('a file under the threshold is one presigned object PUT, with nothing created behind it', async () => {
@@ -780,6 +805,7 @@ describe('uploadHandler: the direct transport', () => {
     const res = await post(named, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
     expect(res.status).toBe(200);
     const completed = await res.json();
+    expect(completed.protocol).toBe(1);
     expect(completed.blob.contentType).toBe('image/png');
     expect(completed.data).toEqual({ ok: true });
     expect(seen).toEqual({

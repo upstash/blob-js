@@ -44,6 +44,11 @@ export interface ServedConstraints {
   maxSize?: number;
 }
 
+/** On every successful answer: the UPLOAD_PROTOCOL of the server that wrote it. Missing is 1. */
+export interface WireAnswer {
+  protocol?: number;
+}
+
 export interface WirePart {
   n: number;
   url: string;
@@ -68,7 +73,7 @@ export interface WireUploadPlan {
   multipart: boolean;
 }
 
-export interface WireBeginResponse {
+export interface WireBeginResponse extends WireAnswer {
   completionToken: string;
   path: string;
   upload: WireUploadPlan;
@@ -79,7 +84,7 @@ export interface WireLanded {
   etag: string;
 }
 
-export interface WirePartsResponse {
+export interface WirePartsResponse extends WireAnswer {
   partSize: number;
   size: number;
   parts: WirePart[];
@@ -87,16 +92,18 @@ export interface WirePartsResponse {
   multipart: boolean;
 }
 
-export interface WireEndResponse<TData = unknown> {
+export interface WireEndResponse<TData = unknown> extends WireAnswer {
   blob: Omit<CompletedBlob, 'uploadedAt'> & { uploadedAt: string };
   data: TData;
 }
 
-export type WireRequest =
+/** `protocol` is the client's UPLOAD_PROTOCOL, on every phase. Missing is 1. */
+export type WireRequest = { protocol?: number } & (
   | { phase: 'begin'; file: WireFile; head?: string; input?: unknown }
   | { phase: 'parts'; completionToken: string; from: number }
   | { phase: 'end'; completionToken: string; parts?: WireLanded[] }
-  | { phase: 'cancel'; completionToken: string };
+  | { phase: 'cancel'; completionToken: string }
+);
 
 /* -------------------------------------------------------------- browser -- */
 
@@ -160,6 +167,6 @@ export type UploadRoute<TInput = unknown, TData = unknown, TRoute extends string
 };
 
 /** What GET on an upload route answers: the constraints the route enforces. */
-export interface WireConstraintsResponse {
+export interface WireConstraintsResponse extends WireAnswer {
   constraints: ServedConstraints;
 }
