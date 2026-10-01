@@ -5,7 +5,7 @@ import { MULTIPART_THRESHOLD, partCount, partSizeFor, SINGLE_PUT_MAX, wantsMulti
 const MIB = 1024 * 1024;
 
 describe('MULTIPART_THRESHOLD', () => {
-  test('is 16MB decimal, like every other user-facing size', () => {
+  test('defaults to 16MB decimal', () => {
     expect(MULTIPART_THRESHOLD).toBe(16_000_000);
   });
 
@@ -95,4 +95,10 @@ describe('partCount', () => {
     expect(partCount(5 * MIB + 1, 5 * MIB)).toBe(2);
     expect(partCount(0, 5 * MIB)).toBe(1);
   });
+});
+
+test('an explicit MiB threshold switches to multipart only above its byte boundary', () => {
+  expect(wantsMultipart('32MiB', 33_554_432)).toBe(false);
+  expect(wantsMultipart('32MiB', 33_554_433)).toBe(true);
+  expect(wantsMultipart('32MB', 33_554_432)).toBe(true);
 });

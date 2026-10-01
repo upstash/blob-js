@@ -102,6 +102,5 @@ Prior art, all three shipping it:
 For us that collapses the API rather than growing it, since `listMultipartUploads` /
 `abortStaleMultipartUploads` already model exactly this shape (`{ path, uploadId, initiatedAt }`).
 Registering a single PUT the same way makes it one `abortStaleUploads()` over both, and it fixes the
-root problem the marker cannot: the record, not the object, holds the state. The cost is a call to
-Upstash inside `begin`, where today the handler only signs locally against cached credentials
-(`:158`).
+root problem the marker cannot: the record, not the object, holds the state. The cost is one more call
+to Upstash inside `begin`, which already asks it to sign the part urls.

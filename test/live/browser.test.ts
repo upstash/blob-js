@@ -39,7 +39,7 @@ const chat = uploadHandler({
   },
   input: z.object({ threadId: z.string().uuid() }),
   onBeforeUpload: ({ ctx, file, input }) => {
-    const path = root + uniquePath`chat/${ctx.id}/${input.threadId}/${file.name}`;
+    const path = root + uniquePath(`chat/${ctx.id}/${input.threadId}/${file.name}`);
     rows[path] = 'pending';
     return { path, cache: 'immutable', metadata: { uploadedBy: ctx.id } };
   },
@@ -99,7 +99,7 @@ describe('upload()', () => {
     const seen: string[] = [];
     task.subscribe(() => seen.push(task.snapshot().status));
     const blob = await task.done;
-    expect(blob.path).toMatch(new RegExp(`^${root}chat/u7/${tid}/pic-one-[1-9A-HJ-NP-Za-km-z]{8}\\.png$`));
+    expect(blob.path).toMatch(new RegExp(`^${root}chat/u7/${tid}/Pic One-[1-9A-HJ-NP-Za-km-z]{8}\\.png$`));
     expect(blob.size).toBe(2000);
     expect((blob.data as { rowId: string }).rowId).toBe(blob.path);
     expect(rows[blob.path]).toBe('ready');

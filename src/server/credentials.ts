@@ -2,15 +2,6 @@ import { BlobError } from '../shared/errors.ts';
 import { telemetryHeaders } from '../shared/telemetry.ts';
 import { AGENT_URL } from './token.ts';
 
-/** A credential the agent may hand back purely for presigning reads; longer-lived than the object one. */
-export interface SigningCredentials {
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
-  /** Unix seconds. */
-  expiresAt: number;
-}
-
 export interface TempCredentials {
   accessKeyId: string;
   secretAccessKey: string;
@@ -22,10 +13,6 @@ export interface TempCredentials {
   expiresAt: number;
   /** 'private' means the bucket has no public host, so a BlobObject carries no url. */
   visibility?: 'public' | 'private';
-  /** Present only once the backend ships a long-lived read-signing credential. */
-  signing?: SigningCredentials;
-  /** Seconds between this credential being minted and expiring: the cap on a presigned read. */
-  lifetime: number;
 }
 
 // Must stay under the agent's 60 s re-mint margin: at or above it the agent hands back the same
@@ -35,15 +22,10 @@ const MINT_TIMEOUT_MS = 10_000;
 // A Retry-After longer than this is the agent asking for a pause no request can wait out: the caller
 // is told to come back rather than blocked for the whole of it.
 const MAX_MINT_WAIT_S = 10;
-// The agent hands back its own cached credential until ~60 s of it is left (measured 2026-08-25: a
-// fresh mint came back with 199 s on it), so a re-mint asking for more life often returns exactly
-// what we already had. Do not ask again straight away: mints are an account-wide budget.
-const NO_BETTER_MS = 30_000;
 
 export class CredentialCache {
   private current: TempCredentials | undefined;
   private refreshAt = 0;
-  private noBetterUntil = 0;
   private inflight: Promise<TempCredentials> | undefined;
 
   constructor(
@@ -51,13 +33,8 @@ export class CredentialCache {
     private readonly enableTelemetry = true,
   ) {}
 
-  /**
-   * @param minRemainingSeconds re-mint when the cached credential has less life left than this, so a
-   * presigned url gets the lifetime it asked for rather than whatever happened to be left.
-   */
-  get(minRemainingSeconds = 0): Promise<TempCredentials> {
-    const usable = this.current && Date.now() < this.refreshAt;
-    if (usable && (this.remaining() >= minRemainingSeconds || Date.now() < this.noBetterUntil)) return Promise.resolve(this.current!);
+  get(): Promise<TempCredentials> {
+    if (this.current && Date.now() < this.refreshAt) return Promise.resolve(this.current);
     this.inflight ??= this.mint().finally(() => {
       this.inflight = undefined;
     });
@@ -73,11 +50,6 @@ export class CredentialCache {
   invalidate(): void {
     this.current = undefined;
     this.refreshAt = 0;
-    this.noBetterUntil = 0;
-  }
-
-  private remaining(): number {
-    return this.current ? this.current.expiresAt - Date.now() / 1000 : 0;
   }
 
   private async mint(attempt = 0): Promise<TempCredentials> {
@@ -119,18 +91,11 @@ export class CredentialCache {
       throw new BlobError('request_failed', { message: 'credentials response named an unexpected endpoint', status: 502 });
     }
 
-    creds.lifetime = Math.max(1, Math.ceil(creds.expiresAt - Date.now() / 1000));
-    this.noBetterUntil = this.current && creds.expiresAt <= this.current.expiresAt ? Date.now() + NO_BETTER_MS : 0;
-    if (!validSigning(creds.signing)) delete creds.signing;
     if (creds.visibility !== 'public' && creds.visibility !== 'private') delete creds.visibility;
     this.refreshAt = Math.max(Date.now(), creds.expiresAt * 1000 - REFRESH_MARGIN_MS);
     this.current = creds;
     return creds;
   }
-}
-
-function validSigning(s: SigningCredentials | undefined): boolean {
-  return !!s && typeof s.accessKeyId === 'string' && typeof s.secretAccessKey === 'string' && typeof s.expiresAt === 'number' && Number.isFinite(s.expiresAt);
 }
 
 // Keyed by token rather than held per Bucket: `Bucket.fromEnv()` per request is the documented shape

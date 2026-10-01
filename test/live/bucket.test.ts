@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { BlobError } from '../../src/index.ts';
-import { r2Of } from '../../src/server/bucket.ts';
 import { bytes, cleanup, p, PNG, priv, pub, root, sweep } from './setup.ts';
 
 beforeAll(async () => {
@@ -125,15 +124,14 @@ describe('read', () => {
 
   test('signedReadUrl serves the private object, with a download name and an expiry it can prove', async () => {
     await priv.put(p('secret.txt'), 'shh', { contentType: 'text/plain' });
-    // Measured 2026-08-25: the agent serves one credential until it is nearly out, so the cap is
-    // anywhere from ~30 s to ~10 min. Ask for something it can cover.
-    const cap = await r2Of(priv).readCap();
-    expect(cap).toBeGreaterThanOrEqual(30);
-    const asked = Math.min(120, cap);
-    const read = await priv.signedReadUrl(p('secret.txt'), { expiresIn: asked, downloadAs: 'Report Q3.txt' });
-    expect(Number(new URL(read.url).searchParams.get('X-Amz-Expires'))).toBe(asked);
-    // expiresAt is the truth, including when the current credential shortened what was requested.
-    expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + (asked - 10) * 1000);
+    const read = await priv.signedReadUrl(p('secret.txt'), { expiresIn: 120, downloadAs: 'Report Q3.txt' });
+    expect(Number(new URL(read.url).searchParams.get('X-Amz-Expires'))).toBe(120);
+    expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + 110_000);
+    // Signed by the agent's key, not the temporary credential: the url carries no session token,
+    // and so nothing a holder could turn back into the credential.
+    const temp = await priv.s3().credentials();
+    expect(new URL(read.url).searchParams.has('X-Amz-Security-Token')).toBe(false);
+    expect(new URL(read.url).searchParams.get('X-Amz-Credential')).not.toStartWith(`${temp.accessKeyId}/`);
     const res = await fetch(read.url);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('shh');
@@ -181,11 +179,12 @@ describe('read', () => {
     expect(await (await priv.get(p('taken.txt'))).body.getReader().read().then((r) => new TextDecoder().decode(r.value))).toBe('first');
   });
 
-  test('an expiresIn over the credential cap is shortened transparently', async () => {
+  test('an expiresIn over ten minutes is shortened to ten', async () => {
     await priv.put(p('capped.txt'), 'shh', { contentType: 'text/plain' });
-    const cap = await r2Of(priv).readCap();
     const capped = await priv.signedReadUrl(p('capped.txt'), { expiresIn: '1h' });
-    expect(Number(new URL(capped.url).searchParams.get('X-Amz-Expires'))).toBeLessThanOrEqual(cap + 2);
+    expect(Number(new URL(capped.url).searchParams.get('X-Amz-Expires'))).toBe(600);
+    // The agent's clock, to the second.
+    expect(Math.abs(capped.expiresAt.getTime() - (Date.now() + 600_000))).toBeLessThan(5_000);
     expect((await fetch(capped.url)).status).toBe(200);
   });
 });

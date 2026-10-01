@@ -31,7 +31,7 @@ type RouteInputOf<TSchema> = TSchema extends StandardSchema<any, any> ? InferOut
 export interface RouteConstraints {
   contentTypes?: readonly string[] | null;
   /**
-   * Decimal: '32mb' is 32,000,000 bytes. For 32 MiB pass 32 * 1024 * 1024. See Size.
+   * Decimal: '32MB' is 32,000,000 bytes. For 32 MiB pass '32MiB' or 32 * 1024 * 1024. See Size.
    * @see node_modules/@upstash/blob/docs/uploads/constraints.mdx
    */
   maxSize?: Size | null;

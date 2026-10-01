@@ -3,7 +3,7 @@ import { clock } from '../browser/clock.ts';
 import { resolveHeaders, type HeadersProvider } from '../browser/task.ts';
 import { BlobError } from '../shared/errors.ts';
 import type { ServedConstraints, WireConstraintsResponse } from '../shared/types.ts';
-import { formatBytes } from '../shared/units.ts';
+import { overLimit } from '../shared/units.ts';
 
 /** The constraints a direct upload route serves from its GET endpoint. */
 const CONSTRAINTS_TTL_MS = 60_000;
@@ -83,7 +83,7 @@ export function acceptOf(constraints: ServedConstraints | undefined): string {
 /** Size only. The server remains authoritative for type validation. */
 export function deny(file: File, constraints: ServedConstraints | undefined): BlobError | undefined {
   if (constraints?.maxSize !== undefined && file.size > constraints.maxSize) {
-    return new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(constraints.maxSize)} limit` });
+    return new BlobError('too_large', { message: `${file.name} is ${overLimit(file.size, constraints.maxSize)}` });
   }
   return undefined;
 }

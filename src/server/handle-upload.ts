@@ -1,10 +1,11 @@
 import { BlobError } from '../shared/errors.ts';
 import type { UploadFile, WireBeginResponse, WireEndResponse, WireLanded, ServedConstraints, WireConstraintsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
-import { cacheControl, formatBytes, parseSize, type CacheOption, type Size } from '../shared/units.ts';
+import { cacheControl, overLimit, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
 import { signToken, verifyToken, type TokenPayload } from './completion-token.ts';
-import { encodeKey, metaHeaders } from './keys.ts';
+import { metaHeaders, presignableKey } from './keys.ts';
 import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
+import { MAX_PRESIGN_SECONDS } from './r2.ts';
 import { checkContentType, expandContentTypes, SNIFF_BYTES } from './sniff.ts';
 
 /**
@@ -33,7 +34,7 @@ export type StandardResult<T> = { readonly value: T; readonly issues?: undefined
 export interface UploadConstraints {
   contentTypes?: readonly string[];
   /**
-   * Decimal: '32mb' is 32,000,000 bytes. For 32 MiB pass 32 * 1024 * 1024. See Size.
+   * Decimal: '32MB' is 32,000,000 bytes. For 32 MiB pass '32MiB' or 32 * 1024 * 1024. See Size.
    * @see node_modules/@upstash/blob/docs/uploads/constraints.mdx
    */
   maxSize?: Size;
@@ -92,11 +93,6 @@ const UPLOAD_MARKER = 'upstash-upload';
 const UPLOAD_MARKER_HEADER = `x-amz-meta-${UPLOAD_MARKER}`;
 
 const PARTS_PER_BATCH = 16;
-// What the SDK asks for. R2 signs with a credential that lives at most ~600 s and the signature dies
-// with it, so this is an upper bound, never the real lifetime: the client re-presigns through phase
-// 'parts' when a url stops working, and minRemainingSeconds keeps a fresh url from being born stale.
-const PRESIGN_REQUESTED_SECONDS = 3600;
-const PRESIGN_MIN_REMAINING_SECONDS = 120;
 const TOKEN_TTL_MS = 7 * 86_400_000;
 const LIMITS_MAX_AGE = 60;
 
@@ -144,7 +140,13 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
 
     const decided = await options.onBeforeUpload({ request, route: options.route, file, input });
     if (!decided || typeof decided.path !== 'string') throw new TypeError('onBeforeUpload must return { path }');
-    encodeKey(decided.path);
+    try {
+      presignableKey(decided.path);
+    } catch (e) {
+      // uniquePath keeps the browser's filename as given, so a "../" in the path can be the client's.
+      if (BlobError.is(e)) throw e;
+      throw new BlobError('invalid_input', { message: e instanceof Error ? e.message : String(e), cause: e });
+    }
     details.path = decided.path;
     details.state = decided.state;
 
@@ -202,7 +204,20 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       partSize,
     };
     const completionToken = await signToken(payload, tokenKey());
-    return { completionToken, path: decided.path, upload: { partSize, multipart, parts: await presignParts(payload, 1) } };
+    let parts: WirePart[];
+    try {
+      parts = await presignParts(payload, 1);
+    } catch (e) {
+      // The browser never gets the token it would cancel with, so a multipart nobody can sign parts
+      // for is aborted here rather than left billed until something sweeps it.
+      if (uploadId !== undefined) {
+        await r2.abortMultipart(decided.path, uploadId).catch((abortError) => {
+          console.error(`[upstash-blob] upload ${JSON.stringify(decided.path)} could not be signed and its multipart could not be aborted`, abortError);
+        });
+      }
+      throw e;
+    }
+    return { completionToken, path: decided.path, upload: { partSize, multipart, parts } };
   }
 
   async function parts(body: any, details: ErrorDetails): Promise<WirePartsResponse> {
@@ -353,34 +368,35 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     // content type, the cache-control, the metadata -- has to be signed into this url instead and
     // sent with it. Signed, not merely sent: an unsigned header would be the browser's to choose,
     // and metadata the app reads back in onUploadComplete is not the client's to write.
+    // The longest url the agent signs. The client re-presigns through phase 'parts' when one stops working.
     if (!t.uploadId) {
       if (from > 1) return [];
-      const url = await r2.presign({
+      const { url } = await r2.presign({
         method: 'PUT',
         path: t.path,
-        expiresIn: PRESIGN_REQUESTED_SECONDS,
-        minRemainingSeconds: PRESIGN_MIN_REMAINING_SECONDS,
-        signedHeaders: { ...t.headers, 'content-length': String(t.size) },
+        expiresIn: MAX_PRESIGN_SECONDS,
+        headers: { ...t.headers, 'content-length': String(t.size) },
       });
       return [{ n: 1, url, headers: { ...t.headers } }];
     }
+    const uploadId = t.uploadId;
     const count = partCount(t.size, t.partSize);
-    const out: WirePart[] = [];
-    for (let n = from; n < from + PARTS_PER_BATCH && n <= count; n++) {
-      const length = n === count ? t.size - t.partSize * (count - 1) : t.partSize;
-      out.push({
-        n,
-        url: await r2.presign({
+    const numbers: number[] = [];
+    for (let n = from; n < from + PARTS_PER_BATCH && n <= count; n++) numbers.push(n);
+    // One agent request per url, so the batch is signed concurrently rather than in sixteen round trips.
+    return Promise.all(
+      numbers.map(async (n) => {
+        const length = n === count ? t.size - t.partSize * (count - 1) : t.partSize;
+        const { url } = await r2.presign({
           method: 'PUT',
           path: t.path,
-          query: { partNumber: String(n), uploadId: t.uploadId },
-          expiresIn: PRESIGN_REQUESTED_SECONDS,
-          minRemainingSeconds: PRESIGN_MIN_REMAINING_SECONDS,
-          signedHeaders: { 'content-length': String(length) },
-        }),
-      });
-    }
-    return out;
+          expiresIn: MAX_PRESIGN_SECONDS,
+          headers: { 'content-length': String(length) },
+          part: { partNumber: n, uploadId },
+        });
+        return { n, url };
+      }),
+    );
   }
 
   return { GET, POST };
@@ -456,7 +472,7 @@ export function resolveConstraints(constraints: UploadConstraints | undefined): 
 
 export function enforce(constraints: ResolvedConstraints, file: UploadFile, head?: Uint8Array): void {
   if (constraints.maxSize !== undefined && file.size > constraints.maxSize) {
-    throw new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(constraints.maxSize)} limit` });
+    throw new BlobError('too_large', { message: `${file.name} is ${overLimit(file.size, constraints.maxSize)}` });
   }
   if (constraints.contentTypes) checkContentType(file.type, head, constraints.contentTypes);
 }
