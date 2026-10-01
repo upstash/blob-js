@@ -105,13 +105,13 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       if (!body || typeof body !== 'object' || typeof body.phase !== 'string') throw new BlobError('invalid_input', { message: 'expected a JSON body with a phase' });
       switch (body.phase) {
         case 'begin':
-          return Response.json(await begin(request, body, details));
+          return answer(await begin(request, body, details));
         case 'parts':
-          return Response.json(await parts(body, details));
+          return answer(await parts(body, details));
         case 'end':
-          return Response.json(await end(request, body, details));
+          return answer(await end(request, body, details));
         case 'cancel':
-          return Response.json(await cancel(body, details));
+          return answer(await cancel(body, details));
         default:
           throw new BlobError('invalid_input', { message: `unknown phase ${String(body.phase)}` });
       }
@@ -207,7 +207,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       }
       throw e;
     }
-    return { protocol: UPLOAD_PROTOCOL, completionToken, path: decided.path, upload: { partSize, multipart, parts } };
+    return { completionToken, path: decided.path, upload: { partSize, multipart, parts } };
   }
 
   async function parts(body: any, details: ErrorDetails): Promise<WirePartsResponse> {
@@ -390,6 +390,14 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
   }
 
   return { GET, POST };
+}
+
+/**
+ * Every successful answer carries the protocol of the server that wrote it. On a deploy, instances of
+ * two releases answer one upload side by side, so the client reads each answer by its own number.
+ */
+function answer(body: object): Response {
+  return Response.json({ ...body, protocol: UPLOAD_PROTOCOL });
 }
 
 /**

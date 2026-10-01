@@ -1,6 +1,6 @@
 import { BlobError } from '../shared/errors.ts';
 import { protocolOf, UPLOAD_PROTOCOL } from '../shared/protocol.ts';
-import type { CompletedBlob, UploadSnapshot, UploadTask, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
+import type { CompletedBlob, UploadSnapshot, UploadTask, WireAnswer, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
 import { SNIFF_BYTES } from '../shared/units.ts';
 import { abortError, clock } from './clock.ts';
 import { acquire } from './pool.ts';
@@ -79,7 +79,10 @@ class Task implements InternalTask {
   private token: string | undefined;
   private storeKey: string;
   private partSize = 0;
-  /** The protocol the route advertised at 'begin'. A resume after a reload never asks, so it stays 1. */
+  /**
+   * The protocol on the last answer to arrive. Calls overlap, so this is not a gate: a feature reads
+   * protocolOf() off the answer it holds, which a deploy may have had a different release write.
+   */
   private protocol = 1;
   // Whether the route cut this file into real multipart parts. False is a single PUT: one url, one
   // object write, and nothing on the other side to pause into or resume from.
@@ -324,7 +327,6 @@ class Task implements InternalTask {
       // Never retried: begin runs onBeforeUpload, which inserts the app's row.
       1,
     )) as WireBeginResponse;
-    this.protocol = protocolOf(res.protocol);
     this.token = res.completionToken;
     this.partSize = res.upload.partSize;
     this.multipart = res.upload.multipart !== false;
@@ -573,7 +575,10 @@ class Task implements InternalTask {
       } catch {
         json = undefined;
       }
-      if (res.ok) return json;
+      if (res.ok) {
+        this.protocol = protocolOf((json as WireAnswer | undefined)?.protocol);
+        return json;
+      }
       const err = BlobError.fromJSON(json, res.status) ?? BlobError.fromStatus(res.status, { message: routeMessage(json, res) });
       if (classify(res.status) !== 'retry') throw err;
       last = err;

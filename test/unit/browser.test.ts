@@ -521,13 +521,15 @@ describe('a single PUT', () => {
     }
   });
 
-  test('a route advertising a newer protocol, or none, is uploaded to the same way', async () => {
-    for (const advertised of [undefined, 2, 'x']) {
+  test('answers from servers of different protocols, as on a deploy, still make one upload', async () => {
+    // begin and end can be answered by two releases: every mix of newer, none and garbage.
+    for (const [atBegin, atEnd] of [[2, undefined], [undefined, 2], [2, 'x'], ['x', 1]]) {
       const from = calls.length;
       const route = defaultRoute(3);
       onPhase = (body) => {
         const out = route(body) as Record<string, unknown>;
-        return body.phase === 'begin' && advertised !== undefined ? { ...out, protocol: advertised } : out;
+        const advertised = body.phase === 'begin' ? atBegin : atEnd;
+        return advertised === undefined ? out : { ...out, protocol: advertised };
       };
       const task = upload(png(), { route: '/api/upload' });
       await settle();
