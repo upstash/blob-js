@@ -1,6 +1,6 @@
 import { BlobError } from '../shared/errors.ts';
 import type { UploadFile, WireBeginResponse, WireEndResponse, WireLanded, ServedConstraints, WireConstraintsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
-import { cacheControl, formatBytes, parseSize, type CacheOption, type Size } from '../shared/units.ts';
+import { cacheControl, overLimit, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
 import { signToken, verifyToken, type TokenPayload } from './completion-token.ts';
 import { metaHeaders, presignableKey } from './keys.ts';
@@ -135,7 +135,13 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
 
     const decided = await options.onBeforeUpload({ request, route: options.route, file, input });
     if (!decided || typeof decided.path !== 'string') throw new TypeError('onBeforeUpload must return { path }');
-    presignableKey(decided.path);
+    try {
+      presignableKey(decided.path);
+    } catch (e) {
+      // uniquePath keeps the browser's filename as given, so a "../" in the path can be the client's.
+      if (BlobError.is(e)) throw e;
+      throw new BlobError('invalid_input', { message: e instanceof Error ? e.message : String(e), cause: e });
+    }
     details.path = decided.path;
     details.state = decided.state;
 
@@ -461,7 +467,7 @@ export function resolveConstraints(constraints: UploadConstraints | undefined): 
 
 export function enforce(constraints: ResolvedConstraints, file: UploadFile, head?: Uint8Array): void {
   if (constraints.maxSize !== undefined && file.size > constraints.maxSize) {
-    throw new BlobError('too_large', { message: `${file.name} is ${formatBytes(file.size)}, over the ${formatBytes(constraints.maxSize)} limit` });
+    throw new BlobError('too_large', { message: `${file.name} is ${overLimit(file.size, constraints.maxSize)}` });
   }
   if (constraints.contentTypes) checkContentType(file.type, head, constraints.contentTypes);
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { cacheControl, formatBytes, parseDuration, parseSize } from '../../src/shared/units.ts';
+import { cacheControl, formatBytes, overLimit, parseDuration, parseSize } from '../../src/shared/units.ts';
 
 describe('parseSize', () => {
   test('is decimal, the way storage is billed', () => {
@@ -24,9 +24,19 @@ describe('parseSize', () => {
     expect(parseSize(10.9)).toBe(10);
   });
 
-  test('binary units are not part of the user-facing vocabulary', () => {
-    expect(() => parseSize('5mib')).toThrow('unknown unit');
-    expect(() => parseSize('5 KiB')).toThrow('unknown unit');
+  test('explicit binary units count bytes with fractions, spacing and case', () => {
+    expect(parseSize('5 KiB')).toBe(5 * 1024);
+    expect(parseSize('32MiB')).toBe(33_554_432);
+    expect(parseSize('32mib')).toBe(33_554_432);
+    expect(parseSize(' 1.5 GiB ')).toBe(1_610_612_736);
+    expect(parseSize('1TiB')).toBe(1_099_511_627_776);
+    expect(parseSize('32MB')).toBe(32_000_000);
+    expect(parseSize('32mb')).toBe(32_000_000);
+  });
+
+  test('rejects bit units rather than treating them as bytes', () => {
+    expect(() => parseSize('32mbit')).toThrow('unknown unit');
+    expect(() => parseSize('32Mbps')).toThrow('unknown unit');
   });
 
   test('rejects junk and negatives, naming the option', () => {
@@ -121,4 +131,11 @@ test('a size just over a limit does not format as the limit', () => {
   expect(formatBytes(1_049_999)).toBe('1.0 MB');
   expect(formatBytes(999_999)).toBe('1.0 MB');
   expect(formatBytes(1_000_000)).toBe('1 MB');
+});
+
+test('a binary limit that rounds like the file falls back to exact bytes', () => {
+  expect(overLimit(33_554_433, parseSize('32MiB'))).toBe('33,554,433 bytes, over the 33,554,432 byte limit');
+  expect(overLimit(3_100_000, parseSize('2MB'))).toBe('3.1 MB, over the 2 MB limit');
+  expect(overLimit(2_000_000, parseSize('1.9MiB'))).toBe('2,000,000 bytes, over the 1,992,294 byte limit');
+  expect(overLimit(1e40, parseSize('1MB'))).toContain('over the 1 MB limit');
 });
