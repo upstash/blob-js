@@ -255,6 +255,30 @@ describe('r2 retries', () => {
     await expect(bucket().exists('a.txt')).rejects.toMatchObject({ code: 'signature_mismatch' });
     expect(r2Calls().length).toBe(1);
   });
+
+  test('messages describe the failure without naming the storage provider', async () => {
+    resetCredentialCaches();
+    const failures: Array<[number, string]> = [
+      [403, '<Error><Code>SignatureDoesNotMatch</Code></Error>'],
+      [429, '<Error><Code>SlowDown</Code></Error>'],
+      [400, '<Error><Code>InvalidArgument</Code><Message>R2 says the argument is invalid</Message></Error>'],
+    ];
+    for (const [status, xml] of failures) {
+      r2Handler = () => new Response(xml, { status });
+      const e = await bucket()
+        .get('a.txt')
+        .catch((x) => x);
+      expect(e.message).not.toMatch(/R2|cloudflare/i);
+      expect(e.hint ?? '').not.toMatch(/R2|cloudflare/i);
+    }
+    // Storage's own wording is kept for debugging, on cause rather than in the message.
+    r2Handler = () => new Response(failures[2]![1], { status: 400 });
+    const e = await bucket()
+      .get('a.txt')
+      .catch((x) => x);
+    expect(e).toMatchObject({ code: 'request_failed', status: 400, message: 'Storage responded 400 InvalidArgument' });
+    expect((e.cause as Error).message).toBe('R2 says the argument is invalid');
+  });
 });
 
 describe('signedReadUrl', () => {
