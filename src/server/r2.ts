@@ -377,11 +377,13 @@ export function errorFromBody(status: number, xml: string): BlobError {
     return new BlobError('unauthorized', { message: 'storage refused the temporary credential', hint: 'it expired mid-request; the SDK re-mints and retries once' });
   }
   if (status === 403) return new BlobError('signature_mismatch');
-  if (status === 429 || code === 'SlowDown' || code === 'TooManyRequests') return new BlobError('rate_limited', { message: 'R2 rate limited the request' });
+  if (status === 429 || code === 'SlowDown' || code === 'TooManyRequests') return new BlobError('rate_limited', { message: 'storage rate limited the request' });
   if (status === 503) return new BlobError('not_ready');
   if (status === 413 || code === 'EntityTooLarge') return new BlobError('too_large');
   return new BlobError('request_failed', {
-    message: `R2 responded ${status}${code ? ` ${code}` : ''}${message ? `: ${message}` : ''}`,
+    // Storage's own message is for whoever debugs the app, not for a user it would be shown to.
+    message: `storage responded ${status}${code ? ` ${code}` : ''}`,
     status: status >= 500 ? 502 : status,
+    cause: message ? new Error(message) : undefined,
   });
 }
