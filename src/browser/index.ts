@@ -8,7 +8,10 @@ export type { BlobErrorCode } from '../shared/errors.ts';
 export type { BlobObject, UploadSnapshot, UploadTask } from '../shared/types.ts';
 export type { UploadOptions, HeadersProvider } from './task.ts';
 
-/** Starts the upload and returns the observable task. `await task.done` for the result. */
+/**
+ * Starts the upload and returns the observable task. `await task.done` for the result.
+ * @see node_modules/@upstash/blob/docs/uploads/upload-client.mdx
+ */
 export function upload<TInput = unknown>(file: File, options: UploadOptions<TInput>): UploadTask {
   return createTask(file, options, true);
 }

@@ -1,6 +1,16 @@
 // Sizes always count bytes. Decimal units match storage billing ('2MB' = 2,000,000);
 // explicit binary units match file limits ('2MiB' = 2,097,152). Unit names ignore case.
+/**
+ * Bytes, or a string with a unit. Decimal units count powers of 1000 and binary units powers of
+ * 1024: '32MB' is 32,000,000 bytes, so `maxSize: '32MB'` refuses a 32 MiB (33,554,432-byte) file.
+ * For a 32 MiB limit pass '32MiB' or 32 * 1024 * 1024.
+ * @see node_modules/@upstash/blob/docs/reference/types.mdx
+ */
 export type Size = string | number;
+/**
+ * A number of seconds, or a string with a unit: '15m', '1h', '7d'.
+ * @see node_modules/@upstash/blob/docs/reference/types.mdx
+ */
 export type Duration = string | number;
 
 const SIZE_UNITS: Record<string, number> = {
@@ -33,6 +43,7 @@ export function parseSize(input: Size, what = 'size'): number {
  * exact multiple of the unit prints whole and anything else keeps a decimal, because rounding both
  * sides independently produced refusals reading "1MB, over the 1MB limit"; past 10 of a unit the
  * decimal is noise and is dropped.
+ * @see node_modules/@upstash/blob/docs/reference/types.mdx
  */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes)) return `${bytes} B`;
@@ -110,6 +121,7 @@ export function parseDuration(input: Duration, what = 'duration'): number {
  *
  * `private` replaces `public` on a private bucket, since a shared cache must not keep a copy of an
  * object only a signed request may read.
+ * @see node_modules/@upstash/blob/docs/bucket/caching.mdx
  */
 export type CacheOption = Duration | 'immutable' | 'revalidate' | 'no-store';
 

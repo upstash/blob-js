@@ -263,9 +263,24 @@ function _escapeHatches() {
   void missing;
 }
 
+// The useUpload caveat, as written in its JSDoc.
+function _useUploadCaveat(value: Bucket) {
+  const _sole = uploadHandler({ bucket: value, onBeforeUpload: () => ({ path: 'x' }), onUploadComplete: () => ({ rowId: '1' }) });
+  // @ts-expect-error the unbound hook needs the handler's URL or a route name
+  useUpload();
+  const plain = useUpload('/api/upload');
+  // @ts-expect-error unbound, blob.data is unknown
+  if (plain.upload?.status === 'done') void plain.upload.blob.data.rowId;
+  const { useUpload: bound } = uploadHooks<typeof _sole>();
+  bound();
+  bound({ onDone: (record) => void (record.blob.data.rowId satisfies string) });
+  // @ts-expect-error bound to a handler without routes, it takes no URL
+  bound('/api/upload');
+}
+
 test('the handler types compile', () => {
   expect(typeof uploadHandler).toBe('function');
   expect(typeof useServerUpload).toBe('function');
-  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _routeUnions, _escapeHatches];
+  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _routeUnions, _escapeHatches, _useUploadCaveat];
   void ({} as UploadCompleteArgs<Uploads>);
 });

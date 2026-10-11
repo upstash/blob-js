@@ -133,16 +133,28 @@ export type UploadSnapshot = {
   | { status: 'error'; error: BlobError; blob?: undefined }
 );
 
+/** @see node_modules/@upstash/blob/docs/uploads/upload-client.mdx */
 export interface UploadTask {
   readonly id: string;
   readonly file: File;
   snapshot(): UploadSnapshot;
   subscribe(onChange: () => void): () => void;
   readonly done: Promise<CompletedBlob & { data: unknown }>;
+  /** @see node_modules/@upstash/blob/docs/uploads/large-files.mdx */
   pause(): boolean;
+  /** @see node_modules/@upstash/blob/docs/uploads/large-files.mdx */
   resume(): boolean;
+  /**
+   * Aborts the requests in flight and has the route abort the multipart upload, or delete a single
+   * PUT that already landed, so onUploadComplete does not run. Once status is 'finishing' the route
+   * is already completing it: the task is canceled locally, but onUploadComplete may still run.
+   * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
+   */
   cancel(): boolean;
-  /** Only from 'error': runs the same upload again from the parts that landed. done is replaced. */
+  /**
+   * Only from 'error': runs the same upload again from the parts that landed. done is replaced.
+   * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
+   */
   retry(): boolean;
 }
 
