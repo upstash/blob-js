@@ -277,21 +277,25 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    */
   endpoint?: string;
   /**
-   * Runs once per request (every request of an upload, not only the first), before the route does
-   * and before any body is read. It may be synchronous
-   * or async; its resolved value is `ctx` in every callback, typed. Throw to refuse: a
-   * BlobError('unauthorized') is the 401.
+   * Runs on every request of an upload, before the route does and before any body is read: the
+   * place for the session check. It may be synchronous or async; its resolved value is `ctx` in
+   * every callback, typed. Throw to refuse: a BlobError('unauthorized') is the 401.
    * Not run for GET, which serves a public, cacheable constraints document and reads nothing.
    *
    * Write it above the callbacks: see the note at the top of this file.
    */
   context?: (request: Request) => TCtx;
+  /**
+   * Who an upload belongs to, read from `ctx`: `owner: (user) => user.id`. Signed into the upload
+   * at its first request; a later request whose `ctx` names someone else is a 403 before storage or
+   * any callback is touched, so one user cannot finish, re-sign or cancel another's upload.
+   */
+  owner?: (ctx: Awaited<TCtx>) => string | number;
   /** Every route inherits it. A Standard Schema for the browser's `input`. */
   input?: TSchema;
   /**
-   * The default. A route with its own onBeforeUpload replaces it. Runs once per upload, at the first
-   * request and before anything is signed: authorize here or in `context`, and throw to refuse.
-   * Once that request succeeded, `retry()` and a resume under the same token do not run it again.
+   * The default. A route with its own onBeforeUpload replaces it. Runs at the first request of an
+   * upload, before anything is signed, and returns the path. Throw to refuse.
    */
   onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<undefined> | Promise<BeforeResult<undefined>>;
   /**
@@ -361,15 +365,10 @@ interface AnyRouteSpec {
 
 /**
  * The server half of a direct browser upload: export `{ GET, POST }` from one route and upload with
- * `useUpload` or `upload`. Do not build your own presign or complete routes. What it guarantees:
- * - It checks no session: authorize in `context` (every request) or `onBeforeUpload` (once per
- *   upload, before anything is signed), and throw to refuse. `GET` serves the constraints, publicly.
- * - Later requests carry an HMAC completion token bound to bucket, route, path, size, type and
- *   metadata, valid 7 days. A forged, expired or foreign token is a 403.
- * - `onUploadComplete` runs only once the stored object has the declared size, and the browser sees
- *   `done` only after it returns. A throw there deletes the object.
- * - Files over 16 MB (`multipart`) go up in parts. A refused CORS preflight for the request's
- *   `Origin` is logged as a warning.
+ * `useUpload`. Check the session in `context`, bind uploads with `owner: (user) => user.id`, return
+ * the path from `onBeforeUpload`, and record the file in `onUploadComplete`, keyed by path. Signing,
+ * multipart, retries, cancel and completion checks are the SDK's: no presign or complete routes.
+ * See "AI agents" in the README for the full recipe.
  *
  * `TRoutes` is first and has no default on purpose: with a default, or behind `TCtx`, TypeScript
  * stops reading the route literal and every route's data comes back `unknown`. Its constraint is
@@ -386,6 +385,7 @@ export function uploadHandler<
 >(options: UploadHandlerOptions<TCtx, TRoutes, TData, TSchema>): UploadHandler<HandlerRoutes<TRoutes, TData, RouteInputOf<TSchema>>, Awaited<TCtx>> {
   const named = options.routes !== undefined;
   const definitions = (options.routes ?? { '': {} }) as unknown as Record<string, unknown>;
+  if (options.owner && !options.context) throw new TypeError('uploadHandler: owner reads ctx, so it needs a context');
   if (named && Object.keys(definitions).length === 0) throw new TypeError('uploadHandler was given an empty routes map: name at least one route, or omit routes to make the handler the route');
 
   // The request is the key, so `ctx` reaches the direct-upload callbacks without entering a
@@ -442,6 +442,7 @@ export function uploadHandler<
       onBeforeUpload: (args: any) => onBeforeUpload({ ...args, ctx: ctxOf(args.request as Request) }),
       onUploadComplete: onUploadComplete ? (args: any) => onUploadComplete({ ...args, ctx: ctxOf(args.request as Request) }) : undefined,
       onError,
+      ownerOf: options.owner ? (request: Request) => String(options.owner!(ctxOf(request) as Awaited<TCtx>)) : undefined,
     };
 
     const handlers = handleUpload(shared);

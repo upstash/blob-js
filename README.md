@@ -69,10 +69,9 @@ await bucket.abortStaleMultipartUploads({ olderThan: '1d', prefix: 'uploads/' })
 ```
 
 Under the threshold there is nothing to abort: the browser's PUT already stored the object, so an
-abandoned upload is an ordinary, billed, listable object. The `upstash-upload` metadata key stays on
-accepted objects too, so it says "came from that upload", never "no callback took it" -- track state
-in your own rows (pending in `onBeforeUpload`, ready last in `onUploadComplete`, sweep the rest), or
-set `multipart: true` so nothing is stored until the handler completes it.
+abandoned upload is an ordinary, billed, listable object. An app that lists files from the rows it
+writes in `onUploadComplete` never shows one; it only costs storage. `multipart: true` stores
+nothing until the handler completes the upload.
 
 ## Direct browser uploads
 
@@ -122,6 +121,8 @@ const { start, upload, accept } = useUpload();
 
 - `routes: { attachment: {...}, large: {...} }` mounts several routes at one endpoint;
   `useUpload('attachment')` picks one. Route options replace handler defaults key by key.
+- `owner: (user) => user.id` binds each upload to whoever began it: another user's request with
+  its token is a 403.
 - `context: (request) => ...` runs once per POST, before any body is read, and its value is `ctx` in
   every callback. `onBeforeUpload` only runs on the first request of an upload, so `context` is how
   the user reaches `onUploadComplete` and `onError` too, and how several routes share one auth check.
@@ -185,49 +186,117 @@ Requests carry the SDK version, runtime, and platform. Set `UPSTASH_DISABLE_TELE
 
 ## AI agents
 
-Everything an upload feature needs is the API below and the guarantees listed here; there is no
-need to read `src/`. Bundled docs are in `node_modules/@upstash/blob/docs/`.
+Use the API below; you do not need to read `src/`. Bundled docs are in
+`node_modules/@upstash/blob/docs/`.
 
 | Task | Use |
 | --- | --- |
-| Browser uploads (progress, cancel, retry, large files) | `uploadHandler` in a route, plus `useUpload` from `@upstash/blob/react`, or `upload` from `@upstash/blob/browser` |
+| Browser uploads (progress, cancel, retry, large files) | `uploadHandler` in a route, plus `useUpload` from `@upstash/blob/react` (the recipe below) |
 | Bytes your server already has | `Bucket.fromEnv().put(path, body)` |
 | Bytes that must pass through your route | an ordinary route with `bucket.put`, plus `useServerUpload` |
 | Private downloads | `bucket.signedReadUrl(path)` (`url` is undefined on a private bucket) |
 | Read, list, delete, copy | `bucket.get`, `info`, `list`, `del`, `copy`, `move` |
-| Abandoned multipart uploads | `bucket.abortStaleMultipartUploads({ olderThan: '1d' })` on a cron |
 
-Do not build your own presign, begin or complete routes, from `signedUploadUrl` or from the S3 client
-of `bucket.s3()`: `uploadHandler` already signs, splits, retries and verifies completion.
+### Recipe: private, signed-in browser uploads
 
-What `uploadHandler` and `useUpload` / `upload` guarantee:
+This is the whole feature: progress, cancel, retry and large files included. Swap `getUser` and
+`db` for your own; `upstash blob create --name files --env-file .env.local` makes the private bucket.
 
-- **Auth is yours.** The SDK checks no session. Throw in `context` (runs on every POST) or
-  `onBeforeUpload` (runs once per upload, before anything is signed) to refuse. `GET` is public.
-- **Completion is signed.** Requests after the first carry an HMAC token bound to bucket, route,
-  path, size, type and metadata, valid 7 days; a forged or foreign one is a 403.
-- **`onUploadComplete` runs on the server**, only once the stored object has the declared size. The
-  browser sees `done` after it returns, with its return value as `blob.data`.
-- **A throw in `onUploadComplete` deletes the object** (kept and logged only if it was replaced,
-  cannot be identified, or the delete failed) and fails the upload. It may run more than once, so dedupe on `uploadId`, or
-  never, if the browser stops before the last request.
-- **Multipart is automatic** over 16 MB (`multipart` moves the line), 4 parts in flight; smaller
-  files are one presigned PUT. Every PUT is retried with backoff on network errors, 408, 429, 500,
-  502, 503 and 504, and re-signed when its URL expires. Only multipart can pause.
-- **`cancel()`** aborts the requests in flight and asks the route, once and best effort, to abort the
-  multipart or delete a PUT that already landed, so `onUploadComplete` does not run. From
-  `finishing` it is local only and the upload may still complete.
-- **`retry()`** (from `error`) continues the same upload: same path and `uploadId`, landed parts
-  kept, `onBeforeUpload` not run again unless the first request failed. After `onUploadComplete`
-  refused it, the object is normally gone and retry fails again. Picking the same file after a failure or a
-  closed tab, in the same browser, resumes under the same token while it is valid, also without
-  `onBeforeUpload`: authorize in `context` if every request must be checked.
-- **CORS:** storage is cross-origin. A PUT the bucket's CORS blocks fails after 3 attempts with a
-  `BlobError` naming the page origin, and the route logs a warning (best effort) when storage
-  refuses the preflight for the request's `Origin`. Fix it in the Upstash Console under the
-  bucket's CORS settings; a bucket created without `--cors` allows all origins.
-- Under the multipart threshold the object exists once its PUT lands, before `onUploadComplete`; a
-  closed tab leaves an object no callback saw, so keep your own rows (see Incomplete uploads).
+```ts
+// lib/uploads.ts
+import 'server-only';
+import { BlobError, uniquePath, uploadHandler } from '@upstash/blob';
+import { db, getUser } from '@/lib/app'; // your session lookup and database
+
+export const uploads = uploadHandler({
+  constraints: { maxSize: '1gb' },
+  // Runs on every request of an upload: a signed-out caller gets a 401.
+  context: async (request: Request) => {
+    const user = await getUser(request);
+    if (!user) throw new BlobError('unauthorized');
+    return user;
+  },
+  // Binds each upload to the user who began it: anyone else replaying its requests gets a 403.
+  owner: (user) => user.id,
+  onBeforeUpload: ({ ctx, file }) => ({ path: uniquePath(`${ctx.id}/${file.name}`) }),
+  // Runs once the file is stored, before the browser sees 'done'. Keyed by path: a repeat is a no-op.
+  onUploadComplete: async ({ ctx, path, size, file }) => {
+    await db.files.upsert({ path, ownerId: ctx.id, name: file.name, size });
+    return { path, name: file.name };
+  },
+});
+
+// app/api/upload/route.ts
+import { uploads } from '@/lib/uploads';
+export const { GET, POST } = uploads;
+
+// app/api/files/route.ts: downloads, checked against the stored owner
+import { Bucket } from '@upstash/blob';
+import { db, getUser } from '@/lib/app';
+
+export async function GET(request: Request) {
+  const user = await getUser(request);
+  if (!user) return new Response('sign in', { status: 401 });
+  const path = new URL(request.url).searchParams.get('path') ?? '';
+  const file = await db.files.get(path);
+  if (file?.ownerId !== user.id) return new Response('not found', { status: 404 });
+  const { url } = await Bucket.fromEnv().signedReadUrl(path, { downloadAs: file.name });
+  return Response.redirect(url);
+}
+```
+
+```tsx
+// app/uploader.tsx
+'use client';
+import { uploadHooks } from '@upstash/blob/react';
+import type { uploads } from '@/lib/uploads';
+
+const { useUpload } = uploadHooks<typeof uploads>();
+
+export function Uploader() {
+  const { start, uploads: list } = useUpload();
+  return (
+    <>
+      <input type="file" multiple onChange={(e) => start({ files: e.target.files })} />
+      {list.map((u) => (
+        <p key={u.id}>
+          {u.file.name} <progress max={100} value={u.percent} /> {u.status}
+          {u.pending && u.status !== 'finishing' && <button onClick={() => u.cancel()}>Cancel</button>}
+          {u.status === 'error' && <> {u.error.message} <button onClick={() => u.retry()}>Retry</button></>}
+          {u.status === 'done' && <a href={`/api/files?path=${encodeURIComponent(u.blob.data.path)}`}>{u.blob.data.name}</a>}
+        </p>
+      ))}
+    </>
+  );
+}
+```
+
+After a reload, list the user's rows from `db.files`: a row exists only for a completed upload.
+
+What the SDK already does, so you do not have to:
+
+- You need no presign, complete or cancel routes and no client-side IDs: every request after the
+  first carries a signed token for that one upload, and `owner` makes it useless to anyone else.
+- You need no pending rows: `onUploadComplete` runs only once the stored object has the declared
+  size, and the record turns `done` only after it returns.
+- You need no multipart code: files over 16 MB go up in parts, 4 at a time, each retried and
+  re-signed on its own.
+- You need no cancel or retry plumbing: `cancel()` aborts what is in flight and has the route
+  remove what landed; `retry()` continues the same upload from the parts that landed.
+- An error saying the browser blocked the request before sending any bytes is CORS: add the page
+  origin in the Upstash Console under the bucket's CORS settings (the route logs this too).
+
+### Edge cases the recipe already handles
+
+- `onUploadComplete` can run twice for one upload when its last request is retried; the upsert keyed
+  by path makes the second run a no-op.
+- `cancel()` during `finishing` is local only and the file may still be recorded, which is why the
+  recipe hides Cancel there.
+- Picking a file again after a failure resumes the same upload; `context` and `owner` still check
+  every request.
+- A closed tab, or a cancel request that never arrives, can leave a stored file with no row (under
+  16 MB) or an unfinished multipart. Neither shows, since the list comes from rows; see
+  [Incomplete uploads](#incomplete-uploads).
 
 For SDK guidance in your coding agent, install the Blob agent skill:
 
