@@ -30,8 +30,8 @@ export interface UploadRecordBase {
   cancel(): boolean;
   /**
    * Only from 'error': continues the same upload (same path and uploadId) from the parts that
-   * landed, without running onBeforeUpload again unless the first request failed. Fails again
-   * after onUploadComplete refused it.
+   * landed, without running onBeforeUpload again unless the first request failed. After
+   * onUploadComplete refused it, the object is normally deleted and this fails again.
    * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
    */
   retry(): boolean;

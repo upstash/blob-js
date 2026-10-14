@@ -208,8 +208,8 @@ What `uploadHandler` and `useUpload` / `upload` guarantee:
   path, size, type and metadata, valid 7 days; a forged or foreign one is a 403.
 - **`onUploadComplete` runs on the server**, only once the stored object has the declared size. The
   browser sees `done` after it returns, with its return value as `blob.data`.
-- **A throw in `onUploadComplete` deletes the object** (kept and logged only if it was replaced or
-  cannot be identified) and fails the upload. It may run more than once, so dedupe on `uploadId`, or
+- **A throw in `onUploadComplete` deletes the object** (kept and logged only if it was replaced,
+  cannot be identified, or the delete failed) and fails the upload. It may run more than once, so dedupe on `uploadId`, or
   never, if the browser stops before the last request.
 - **Multipart is automatic** over 16 MB (`multipart` moves the line), 4 parts in flight; smaller
   files are one presigned PUT. Every PUT is retried with backoff on network errors, 408, 429, 500,
@@ -219,7 +219,7 @@ What `uploadHandler` and `useUpload` / `upload` guarantee:
   `finishing` it is local only and the upload may still complete.
 - **`retry()`** (from `error`) continues the same upload: same path and `uploadId`, landed parts
   kept, `onBeforeUpload` not run again unless the first request failed. After `onUploadComplete`
-  refused it, the object is gone and retry fails again. Picking the same file after a failure or a
+  refused it, the object is normally gone and retry fails again. Picking the same file after a failure or a
   closed tab, in the same browser, resumes under the same token while it is valid, also without
   `onBeforeUpload`: authorize in `context` if every request must be checked.
 - **CORS:** storage is cross-origin. A PUT the bucket's CORS blocks fails after 3 attempts with a
