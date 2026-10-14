@@ -527,7 +527,7 @@ class Task implements InternalTask {
       throw new BlobError('request_failed', {
         message: `upload failed after ${httpAttempts + netAttempts} attempts${lastStatus ? ` (last status ${lastStatus})` : ''}`,
         status: 503,
-        hint: netAttempts > 0 && !sentBytes ? CORS_HINT : 'the parts that landed are kept: task.retry(), or pick the same file again',
+        hint: netAttempts > 0 && !sentBytes ? corsHint() : 'the parts that landed are kept: task.retry(), or pick the same file again',
       });
     } finally {
       cancel.removeEventListener('abort', onCancel);
@@ -582,8 +582,21 @@ class Task implements InternalTask {
 
 // A PUT that fails with no status and no bytes sent was refused by the browser, not by storage, and
 // the reason is never visible to script: the preflight is what failed. Retrying it for four minutes
-// only delays the same answer.
-const CORS_HINT = 'the browser blocked the request before sending any bytes, which is almost always CORS: the bucket has to allow PUT and the signed headers from this origin';
+// only delays the same answer. The fix is the bucket's CORS list, so the hint names the origin that
+// has to be on it and where to put it.
+function corsHint(origin = pageOrigin()): string {
+  const who = origin ?? "this page's origin";
+  return `the browser blocked the request before sending any bytes, which is almost always CORS: the bucket's CORS origins must include ${who}; add it in the Upstash Console under the bucket's CORS settings, or recreate the bucket without --cors to allow all origins`;
+}
+
+function pageOrigin(): string | undefined {
+  try {
+    const origin = typeof location === 'undefined' ? undefined : location.origin;
+    return origin && origin !== 'null' ? origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function networkAttemptCap(sentBytes: boolean): number {
   if (sentBytes) return MAX_NETWORK_ATTEMPTS;

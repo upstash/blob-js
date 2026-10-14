@@ -6,6 +6,7 @@ import { signToken, verifyToken, type TokenPayload } from './completion-token.ts
 import { metaHeaders, presignableKey } from './keys.ts';
 import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
 import { MAX_PRESIGN_SECONDS } from './r2.ts';
+import { corsProbe } from './cors-probe.ts';
 import { checkContentType, expandContentTypes, SNIFF_BYTES } from './sniff.ts';
 
 /**
@@ -101,6 +102,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
   const routeConstraints = resolveConstraints(options.constraints);
   const routeId = options.id;
   const GET = constraintsEndpoint(routeConstraints);
+  const probeCors = corsProbe();
 
   const POST = async (request: Request): Promise<Response> => {
     const details: ErrorDetails = {};
@@ -217,6 +219,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       }
       throw e;
     }
+    if (parts[0]) probeCors(request, parts[0].url, parts[0].headers);
     return { completionToken, path: decided.path, upload: { partSize, multipart, parts } };
   }
 
