@@ -370,7 +370,7 @@ describe('a single PUT', () => {
       expect(e.code).toBe('request_failed');
       expect(e.message).toContain("the bucket's CORS origins must include http://localhost:3001");
       expect(e.message).toContain('Upstash Console');
-      expect(e.message).toContain('without --cors');
+      expect(e.message).toContain("the bucket's CORS settings");
       expect(e.hint).toContain('http://localhost:3001');
     } finally {
       if (had) Object.defineProperty(globalThis, 'location', had);

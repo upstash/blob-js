@@ -10,14 +10,16 @@
  * Diagnostic only: never awaited by the request, never thrown, and once per origin per process.
  */
 
-/** Origins already probed. Bounded, since the Origin header is the client's to choose. */
+/** Origins remembered as probed. Bounded, since the Origin header is the client's to choose. */
 const MAX_PROBED = 64;
 
 export function corsProbe(): (request: Request, url: string, headers: Record<string, string> | undefined) => void {
   const probed = new Set<string>();
   return (request, url, headers) => {
     const origin = request.headers?.get?.('origin');
-    if (!origin || !/^https?:\/\/[^/]+$/i.test(origin) || probed.has(origin) || probed.size >= MAX_PROBED) return;
+    if (!origin || !/^https?:\/\/[^/]+$/i.test(origin) || probed.has(origin)) return;
+    // Forgetting is the cheap way to stay bounded: a forgotten origin is only probed once more.
+    if (probed.size >= MAX_PROBED) probed.clear();
     probed.add(origin);
     void preflight(origin, url, headers).then(
       (allowed) => {
@@ -31,7 +33,7 @@ export function corsProbe(): (request: Request, url: string, headers: Record<str
 }
 
 export function corsWarning(origin: string): string {
-  return `[upstash-blob] storage refused the CORS preflight from ${origin}, so the browser upload will be blocked before any bytes are sent. Add ${origin} to the bucket's CORS origins in the Upstash Console (the bucket's CORS settings), or recreate the bucket without --cors to allow all origins.`;
+  return `[upstash-blob] storage refused the CORS preflight from ${origin}, so the browser upload will be blocked before any bytes are sent. Add ${origin} to the bucket's CORS origins in the Upstash Console, under the bucket's CORS settings.`;
 }
 
 /** true or false when storage answered the preflight; undefined when it could not be asked. */

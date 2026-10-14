@@ -220,10 +220,12 @@ What `uploadHandler` and `useUpload` / `upload` guarantee:
 - **`retry()`** (from `error`) continues the same upload: same path and `uploadId`, landed parts
   kept, `onBeforeUpload` not run again unless the first request failed. After `onUploadComplete`
   refused it, the object is gone and retry fails again. Picking the same file after a failure or a
-  closed tab resumes it the same way, in the same browser.
+  closed tab, in the same browser, resumes under the same token while it is valid, also without
+  `onBeforeUpload`: authorize in `context` if every request must be checked.
 - **CORS:** storage is cross-origin. A PUT the bucket's CORS blocks fails after 3 attempts with a
-  `BlobError` naming the page origin, and the route logs a warning when storage refuses the
-  preflight for the request's `Origin`. A bucket created without `--cors` allows all origins.
+  `BlobError` naming the page origin, and the route logs a warning (best effort) when storage
+  refuses the preflight for the request's `Origin`. Fix it in the Upstash Console under the
+  bucket's CORS settings; a bucket created without `--cors` allows all origins.
 - Under the multipart threshold the object exists once its PUT lands, before `onUploadComplete`; a
   closed tab leaves an object no callback saw, so keep your own rows (see Incomplete uploads).
 

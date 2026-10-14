@@ -291,7 +291,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
   /**
    * The default. A route with its own onBeforeUpload replaces it. Runs once per upload, at the first
    * request and before anything is signed: authorize here or in `context`, and throw to refuse.
-   * `retry()` and a resumed upload do not run it again.
+   * Once that request succeeded, `retry()` and a resume under the same token do not run it again.
    */
   onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<undefined> | Promise<BeforeResult<undefined>>;
   /**

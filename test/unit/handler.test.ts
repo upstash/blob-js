@@ -571,6 +571,17 @@ describe('CORS probe', () => {
     });
   });
 
+  test('many origins keep being probed rather than filling the memory for good', async () => {
+    r2Handler = storage(['*']);
+    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    for (let i = 0; i < 65; i++) await fromOrigin(uploads, `https://t${i}.example.com`);
+    await fromOrigin(uploads, 'http://localhost:3001');
+    await settle();
+    const probed = r2Calls().filter((c) => c.method === 'OPTIONS').map((c) => c.headers.get('origin'));
+    expect(probed).toHaveLength(66);
+    expect(probed.at(-1)).toBe('http://localhost:3001');
+  });
+
   test('a refused begin never probes', async () => {
     const uploads = uploadHandler({
       bucket: bucket(),

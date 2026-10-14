@@ -30,7 +30,8 @@ export interface UploadRecordBase {
   cancel(): boolean;
   /**
    * Only from 'error': continues the same upload (same path and uploadId) from the parts that
-   * landed, without running onBeforeUpload again. Fails again after onUploadComplete refused it.
+   * landed, without running onBeforeUpload again unless the first request failed. Fails again
+   * after onUploadComplete refused it.
    * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
    */
   retry(): boolean;
@@ -140,12 +141,13 @@ function refusedEntry(file: File, error: BlobError): ListEntry<AnyRecord> {
  * - Over the route's `multipart` threshold (16 MB) the file goes up in parts, 4 in flight; smaller
  *   files are one presigned PUT. Every PUT is retried on network errors, 408, 429, 500, 502, 503 and
  *   504, and re-signed when its url expires.
- * - `done` arrives only after the route's onUploadComplete returned; its value is `blob.data`.
+ * - A record reaches status 'done' (and onDone fires) only after the route's onUploadComplete
+ *   returned; its return value is `blob.data`.
  * - `cancel()` aborts what is in flight and asks the route, once, to abort the multipart or delete a
  *   PUT that landed, so onUploadComplete does not run. From 'finishing' it is local only.
  * - `retry()` continues the same upload: same path and uploadId, landed parts kept, onBeforeUpload
- *   not run again unless the first request failed. Picking the same file after a failure resumes
- *   it the same way.
+ *   not run again unless the first request failed. Picking the same file after a failure, in the
+ *   same browser, resumes under the same token while it is valid, also without onBeforeUpload.
  * - A PUT the bucket's CORS blocks fails after 3 attempts with a BlobError naming the page origin.
  *
  * `route` is required: the handler's URL (`'/api/upload'`) or a route name. Here `blob.data` is
