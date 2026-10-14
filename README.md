@@ -185,8 +185,51 @@ Requests carry the SDK version, runtime, and platform. Set `UPSTASH_DISABLE_TELE
 
 ## AI agents
 
-Read bundled docs in `node_modules/@upstash/blob/docs/` and source in
-`node_modules/@upstash/blob/src/`. For SDK guidance in your coding agent, install the Blob agent skill:
+Everything an upload feature needs is the API below and the guarantees listed here; there is no
+need to read `src/`. Bundled docs are in `node_modules/@upstash/blob/docs/`.
+
+| Task | Use |
+| --- | --- |
+| Browser uploads (progress, cancel, retry, large files) | `uploadHandler` in a route, plus `useUpload` from `@upstash/blob/react`, or `upload` from `@upstash/blob/browser` |
+| Bytes your server already has | `Bucket.fromEnv().put(path, body)` |
+| Bytes that must pass through your route | an ordinary route with `bucket.put`, plus `useServerUpload` |
+| Private downloads | `bucket.signedReadUrl(path)` (`url` is undefined on a private bucket) |
+| Read, list, delete, copy | `bucket.get`, `info`, `list`, `del`, `copy`, `move` |
+| Abandoned multipart uploads | `bucket.abortStaleMultipartUploads({ olderThan: '1d' })` on a cron |
+
+Do not build your own presign, begin or complete routes, from `signedUploadUrl` or from the S3 client
+of `bucket.s3()`: `uploadHandler` already signs, splits, retries and verifies completion.
+
+What `uploadHandler` and `useUpload` / `upload` guarantee:
+
+- **Auth is yours.** The SDK checks no session. Throw in `context` (runs on every POST) or
+  `onBeforeUpload` (runs once per upload, before anything is signed) to refuse. `GET` is public.
+- **Completion is signed.** Requests after the first carry an HMAC token bound to bucket, route,
+  path, size, type and metadata, valid 7 days; a forged or foreign one is a 403.
+- **`onUploadComplete` runs on the server**, only once the stored object has the declared size. The
+  browser sees `done` after it returns, with its return value as `blob.data`.
+- **A throw in `onUploadComplete` deletes the object** (kept and logged only if it was replaced,
+  cannot be identified, or the delete failed) and fails the upload. It may run more than once, so dedupe on `uploadId`, or
+  never, if the browser stops before the last request.
+- **Multipart is automatic** over 16 MB (`multipart` moves the line), 4 parts in flight; smaller
+  files are one presigned PUT. Every PUT is retried with backoff on network errors, 408, 429, 500,
+  502, 503 and 504, and re-signed when its URL expires. Only multipart can pause.
+- **`cancel()`** aborts the requests in flight and asks the route, once and best effort, to abort the
+  multipart or delete a PUT that already landed, so `onUploadComplete` does not run. From
+  `finishing` it is local only and the upload may still complete.
+- **`retry()`** (from `error`) continues the same upload: same path and `uploadId`, landed parts
+  kept, `onBeforeUpload` not run again unless the first request failed. After `onUploadComplete`
+  refused it, the object is normally gone and retry fails again. Picking the same file after a failure or a
+  closed tab, in the same browser, resumes under the same token while it is valid, also without
+  `onBeforeUpload`: authorize in `context` if every request must be checked.
+- **CORS:** storage is cross-origin. A PUT the bucket's CORS blocks fails after 3 attempts with a
+  `BlobError` naming the page origin, and the route logs a warning (best effort) when storage
+  refuses the preflight for the request's `Origin`. Fix it in the Upstash Console under the
+  bucket's CORS settings; a bucket created without `--cors` allows all origins.
+- Under the multipart threshold the object exists once its PUT lands, before `onUploadComplete`; a
+  closed tab leaves an object no callback saw, so keep your own rows (see Incomplete uploads).
+
+For SDK guidance in your coding agent, install the Blob agent skill:
 
 ```bash
 pnpx skills add upstash/skills --skill upstash-blob-js

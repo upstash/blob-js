@@ -20,7 +20,7 @@ export interface UploadDefaults {
   onError?: (upload: FailedAnyUpload) => void;
 }
 
-/** `useUpload` bound to the route names and data carried by an upload handler type. */
+/** `useUpload` bound to the route names and data carried by an upload handler type. Same guarantees as `useUpload`. */
 export interface BoundUseUpload<T> {
   (...args: [SoleRoute<T>] extends [never] ? [route: never] : [options?: UseUploadOptions<SoleRoute<T>>]): UseUploadResult<SoleRoute<T>>;
   <K extends RouteKey<T>>(route: K, options?: UseUploadOptions<RouteAt<T, K>>): UseUploadResult<RouteAt<T, K>>;

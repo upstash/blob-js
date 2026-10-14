@@ -496,3 +496,101 @@ test('a filename that climbs out of the route prefix is refused as invalid input
   expect((await res.json()).code).toBe('invalid_input');
   expect(r2Calls()).toHaveLength(0);
 });
+
+describe('CORS probe', () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+  const fromOrigin = (handler: { POST: (r: Request) => Promise<Response> }, origin: string | undefined, size = 4) =>
+    handler.POST(new Request(url(), { method: 'POST', body: JSON.stringify({ phase: 'begin', file: { name: 'a.png', type: 'image/png', size } }), headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}) } }));
+
+  function withWarnings<T>(fn: (warnings: string[]) => Promise<T>): Promise<T> {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(' '));
+    return fn(warnings).finally(() => {
+      console.warn = original;
+    });
+  }
+
+  function storage(allowed: string[]) {
+    return (call: Call): Response => {
+      if (call.method !== 'OPTIONS') return scriptedR2()(call);
+      const origin = call.headers.get('origin')!;
+      if (allowed.includes('*') || allowed.includes(origin)) return new Response(null, { status: 204, headers: { 'access-control-allow-origin': allowed.includes('*') ? '*' : origin } });
+      return new Response('', { status: 403 });
+    };
+  }
+
+  test('warns once when storage refuses the preflight for the page origin', async () => {
+    r2Handler = storage(['http://localhost:3000']);
+    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    await withWarnings(async (warnings) => {
+      expect((await fromOrigin(uploads, 'http://localhost:3001')).status).toBe(200);
+      await settle();
+      const probes = r2Calls().filter((c) => c.method === 'OPTIONS');
+      expect(probes).toHaveLength(1);
+      expect(probes[0]!.headers.get('access-control-request-method')).toBe('PUT');
+      expect(probes[0]!.headers.get('access-control-request-headers')).toContain('content-type');
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('http://localhost:3001');
+      expect(warnings[0]).toContain("bucket's CORS origins");
+
+      await fromOrigin(uploads, 'http://localhost:3001');
+      await settle();
+      expect(r2Calls().filter((c) => c.method === 'OPTIONS')).toHaveLength(1);
+      expect(warnings).toHaveLength(1);
+    });
+  });
+
+  test('stays quiet for an allowed origin, a wildcard, a multipart upload it allows, and no origin', async () => {
+    await withWarnings(async (warnings) => {
+      r2Handler = storage(['http://localhost:3000']);
+      const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+      await fromOrigin(uploads, 'http://localhost:3000');
+      await fromOrigin(uploads, undefined);
+      await fromOrigin(uploads, 'null');
+      await fromOrigin(uploads, 'http://localhost:3000', 40_000_000);
+      r2Handler = storage(['*']);
+      await fromOrigin(uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'b.png' }) }), 'https://app.example.com');
+      await settle();
+      expect(r2Calls().filter((c) => c.method === 'OPTIONS')).toHaveLength(2);
+      expect(warnings).toEqual([]);
+    });
+  });
+
+  test('storage that cannot answer is neither a warning nor a failed upload', async () => {
+    r2Handler = (call) => (call.method === 'OPTIONS' ? new Response('', { status: 503 }) : scriptedR2()(call));
+    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    await withWarnings(async (warnings) => {
+      expect((await fromOrigin(uploads, 'http://localhost:3001')).status).toBe(200);
+      await settle();
+      expect(warnings).toEqual([]);
+      // Not cached: the next upload from that origin asks again.
+      await fromOrigin(uploads, 'http://localhost:3001');
+      await settle();
+      expect(r2Calls().filter((c) => c.method === 'OPTIONS')).toHaveLength(2);
+    });
+  });
+
+  test('many origins keep being probed rather than filling the memory for good', async () => {
+    r2Handler = storage(['*']);
+    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    for (let i = 0; i < 65; i++) await fromOrigin(uploads, `https://t${i}.example.com`);
+    await fromOrigin(uploads, 'http://localhost:3001');
+    await settle();
+    const probed = r2Calls().filter((c) => c.method === 'OPTIONS').map((c) => c.headers.get('origin'));
+    expect(probed).toHaveLength(66);
+    expect(probed.at(-1)).toBe('http://localhost:3001');
+  });
+
+  test('a refused begin never probes', async () => {
+    const uploads = uploadHandler({
+      bucket: bucket(),
+      onBeforeUpload: () => {
+        throw new BlobError('unauthorized');
+      },
+    });
+    expect((await fromOrigin(uploads, 'http://localhost:3001')).status).toBe(401);
+    await settle();
+    expect(r2Calls().filter((c) => c.method === 'OPTIONS')).toHaveLength(0);
+  });
+});
