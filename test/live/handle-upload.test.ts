@@ -32,7 +32,7 @@ const chat = uploadHandler({
     if (input.threadId.startsWith('00000000')) throw new BlobError('forbidden');
     const path = root + uniquePath(`chat/${ctx.id}/${input.threadId}/${file.name}`);
     rows[path] = { status: 'pending', owner: ctx.id };
-    return { path, cache: 'immutable', metadata: { uploadedBy: ctx.id, originalName: file.name } };
+    return { path, cache: 'immutable', metadata: { uploadedby: ctx.id, originalname: file.name } };
   },
   onUploadComplete: ({ ctx, route, file, path, size, contentType, metadata }) => {
     lastChatCompleted = { route, name: file.name, contentType };
@@ -47,7 +47,7 @@ const chat = uploadHandler({
 const fileRoute = uploadRoute()({
   onBeforeUpload: ({ file }) => ({
     path: p(`large/${crypto.randomUUID()}-${file.name}`),
-    metadata: { originalName: file.name },
+    metadata: { originalname: file.name },
     state: { declared: file.size },
   }),
   onUploadComplete: ({ path, size, etag, file, state, uploadId, multipartUploadId }) => {

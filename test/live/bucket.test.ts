@@ -12,7 +12,7 @@ afterAll(async () => {
 
 describe('put', () => {
   test('bytes, then get/info/exists', async () => {
-    const blob = await pub.put(p('a.txt'), 'hello', { contentType: 'text/plain', metadata: { uploadedBy: 'u1' } });
+    const blob = await pub.put(p('a.txt'), 'hello', { contentType: 'text/plain', metadata: { uploadedby: 'u1' } });
     expect(blob.path).toBe(p('a.txt'));
     expect(blob.size).toBe(5);
     expect(blob.etag).toMatch(/^"[0-9a-f]{32}"$/);

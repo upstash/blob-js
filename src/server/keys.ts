@@ -56,6 +56,11 @@ export function metaHeaders(metadata: Record<string, string> | undefined): Recor
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(metadata ?? {})) {
     if (!HEADER_NAME_RE.test(k)) throw new BlobError('invalid_input', { message: `metadata key "${k}" is not a valid header name` });
+    // Storage hands keys back lowercased, so `recordId` would be written and `recordid` read back:
+    // refused here, where it is the caller's mistake, rather than as an undefined field much later.
+    if (k !== k.toLowerCase()) {
+      throw new BlobError('invalid_input', { message: `metadata key "${k}" must be lowercase`, hint: `storage returns keys lowercased; write "${k.toLowerCase()}"` });
+    }
     if (typeof v !== 'string') throw new BlobError('invalid_input', { message: `metadata.${k} must be a string` });
     if (!ASCII_RE.test(v)) {
       throw new BlobError('invalid_input', {
@@ -63,7 +68,7 @@ export function metaHeaders(metadata: Record<string, string> | undefined): Recor
         hint: 'metadata is printable ASCII; percent-encode anything else with encodeURIComponent',
       });
     }
-    out[`x-amz-meta-${k.toLowerCase()}`] = v;
+    out[`x-amz-meta-${k}`] = v;
   }
   return out;
 }

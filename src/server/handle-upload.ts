@@ -56,6 +56,7 @@ interface Decided {
   path: string;
   /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
+  /** Lowercase keys (storage reads them back lowercased) and printable ASCII values. */
   metadata?: Record<string, string>;
   constraints?: UploadConstraints;
   state?: unknown;
