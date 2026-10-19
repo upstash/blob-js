@@ -29,7 +29,7 @@ export interface UploadRecordBase {
    */
   cancel(): boolean;
   /**
-   * Only from 'error': runs the same upload again from the parts that landed.
+   * Only from 'error': continues the same upload from the parts that landed.
    * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
    */
   retry(): boolean;
@@ -135,6 +135,11 @@ function refusedEntry(file: File, error: BlobError): ListEntry<AnyRecord> {
 
 /**
  * Direct browser upload: the handler presigns and the bytes go straight to storage.
+ * Against an `uploadHandler` route; no presign or complete routes of your own. Render
+ * `uploads.map((u) => ...)` with `u.percent`, `u.cancel()` while `u.pending` and not 'finishing',
+ * `u.retry()` on 'error', and `u.blob.data` (what onUploadComplete returned) on 'done'. Files over
+ * 16 MB go up in parts and every PUT is retried; the hook handles the rest. See "AI agents" in the
+ * README.
  *
  * `route` is required: the handler's URL (`'/api/upload'`) or a route name. Here `blob.data` is
  * `unknown`. For typed data bind the hook: `const { useUpload } = uploadHooks<typeof uploads>()`.

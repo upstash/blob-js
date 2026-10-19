@@ -60,6 +60,7 @@ interface BeforeResult<TState> {
   path: string;
   /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
+  /** Lowercase keys (storage reads them back lowercased) and printable ASCII values. */
   metadata?: Record<string, string>;
   /** May narrow the route's constraints per user, never widen them. */
   constraints?: UploadConstraints;
@@ -133,16 +134,17 @@ interface PlainRouteBase<TCtx, TInput> {
   constraints?: RouteConstraints;
   /** Replaces the handler's. Where this route's uploads start going up in parts. */
   multipart?: MultipartOption;
-  /** Replaces the handler's. */
+  /** Replaces the handler's. Runs once per upload, before anything is signed: throw to refuse. */
   onBeforeUpload?: (args: BeforeArgs<TCtx, TInput>) => BeforeResult<undefined> | Promise<BeforeResult<undefined>>;
   /**
    * Replaces the handler's. What it returns is `upload.blob.data` in the browser, typed.
    * Runs only after the route verified its signed completion token and that the stored object has
-   * the declared size. A forged or expired token is a 403, as is one from another route of this
-   * handler or from a handler with a different `endpoint`. Throw to refuse: the object is deleted,
-   * unless it cannot be identified as this upload's (a retried multipart 'end', or a newer upload
-   * replaced it), in which case it is kept and logged. It may run more than once, or never if the
-   * browser stops before 'end', so write idempotently on `uploadId`.
+   * the declared size, and the browser sees `done` only after it returns. A forged or expired token
+   * is a 403, as is one from another route of this handler or from a handler with a different
+   * `endpoint`. Throw to refuse: the object is deleted, unless it cannot be identified as this
+   * upload's (a retried multipart 'end', or a newer upload replaced it), in which case it is kept
+   * and logged. It may run more than once, or never if the browser stops before 'end', so write
+   * idempotently on `uploadId`.
    * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
    */
   onUploadComplete?: (args: CompleteBase<TCtx, undefined> & DirectCompleteExtras) => unknown;
@@ -186,15 +188,17 @@ export interface UploadRouteOptions<TCtx, TSchema extends StandardSchema<any, an
   multipart?: MultipartOption;
   /** A Standard Schema the browser's `input` is validated against before onBeforeUpload runs. */
   input?: TSchema;
+  /** Runs once per upload, before anything is signed: throw to refuse. */
   onBeforeUpload?: (args: BeforeArgs<TCtx, RouteInputOf<TSchema>>) => BeforeResult<TState> | Promise<BeforeResult<TState>>;
   /**
    * What it returns is `upload.blob.data` in the browser, typed.
    * Runs only after the route verified its signed completion token and that the stored object has
-   * the declared size. A forged or expired token is a 403, as is one from another route of this
-   * handler or from a handler with a different `endpoint`. Throw to refuse: the object is deleted,
-   * unless it cannot be identified as this upload's (a retried multipart 'end', or a newer upload
-   * replaced it), in which case it is kept and logged. It may run more than once, or never if the
-   * browser stops before 'end', so write idempotently on `uploadId`.
+   * the declared size, and the browser sees `done` only after it returns. A forged or expired token
+   * is a 403, as is one from another route of this handler or from a handler with a different
+   * `endpoint`. Throw to refuse: the object is deleted, unless it cannot be identified as this
+   * upload's (a retried multipart 'end', or a newer upload replaced it), in which case it is kept
+   * and logged. It may run more than once, or never if the browser stops before 'end', so write
+   * idempotently on `uploadId`.
    * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
    */
   onUploadComplete?: (args: CompleteBase<TCtx, TState> & DirectCompleteExtras) => TData | Promise<TData>;
@@ -274,27 +278,37 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    */
   endpoint?: string;
   /**
-   * Runs once per request, before the route does and before any body is read. It may be synchronous
-   * or async; its resolved value is `ctx` in every callback, typed. Throw to refuse: a
-   * BlobError('unauthorized') is the 401.
+   * Runs on every request of an upload, before the route does and before any body is read: the
+   * place for the session check. It may be synchronous or async; its resolved value is `ctx` in
+   * every callback, typed. Throw to refuse: a BlobError('unauthorized') is the 401.
    * Not run for GET, which serves a public, cacheable constraints document and reads nothing.
    *
    * Write it above the callbacks: see the note at the top of this file.
    */
   context?: (request: Request) => TCtx;
+  /**
+   * Who an upload belongs to, read from `ctx`: `owner: (user) => user.id`. Signed into the upload
+   * at its first request; a later request whose `ctx` names someone else is a 403 before storage or
+   * any callback is touched, so one user cannot finish, re-sign or cancel another's upload.
+   */
+  owner?: (ctx: Awaited<TCtx>) => string | number | null | undefined;
   /** Every route inherits it. A Standard Schema for the browser's `input`. */
   input?: TSchema;
-  /** The default. A route with its own onBeforeUpload replaces it. */
+  /**
+   * The default. A route with its own onBeforeUpload replaces it. Runs at the first request of an
+   * upload, before anything is signed, and returns the path. Throw to refuse.
+   */
   onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<undefined> | Promise<BeforeResult<undefined>>;
   /**
    * The default. A route with its own onUploadComplete replaces it, and answers the browser with its
    * own return instead of this one.
    * Runs only after the route verified its signed completion token and that the stored object has
-   * the declared size. A forged or expired token is a 403, as is one from another route of this
-   * handler or from a handler with a different `endpoint`. Throw to refuse: the object is deleted,
-   * unless it cannot be identified as this upload's (a retried multipart 'end', or a newer upload
-   * replaced it), in which case it is kept and logged. It may run more than once, or never if the
-   * browser stops before 'end', so write idempotently on `uploadId`.
+   * the declared size, and the browser sees `done` only after it returns. A forged or expired token
+   * is a 403, as is one from another route of this handler or from a handler with a different
+   * `endpoint`. Throw to refuse: the object is deleted, unless it cannot be identified as this
+   * upload's (a retried multipart 'end', or a newer upload replaced it), in which case it is kept
+   * and logged. It may run more than once, or never if the browser stops before 'end', so write
+   * idempotently on `uploadId`.
    */
   onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, undefined> & DirectCompleteExtras) => TData | Promise<TData>;
   /**
@@ -350,7 +364,19 @@ interface AnyRouteSpec {
   onError?: (args: any) => ErrorReturn;
 }
 
+// A session lookup that found nobody reads as `user?.id`: that is a 401, never an upload owned by "undefined".
+function ownerString(owner: string | number | null | undefined): string {
+  if (owner === null || owner === undefined || owner === '') throw new BlobError('unauthorized', { message: 'no signed-in user to own this upload' });
+  return String(owner);
+}
+
 /**
+ * The server half of a direct browser upload: export `{ GET, POST }` from one route and upload with
+ * `useUpload`. Check the session in `context`, bind uploads with `owner: (user) => user.id`, return
+ * the path from `onBeforeUpload`, and record the file in `onUploadComplete`, keyed by path. Signing,
+ * multipart, retries, cancel and completion checks are the SDK's: no presign or complete routes.
+ * See "AI agents" in the README for the full recipe.
+ *
  * `TRoutes` is first and has no default on purpose: with a default, or behind `TCtx`, TypeScript
  * stops reading the route literal and every route's data comes back `unknown`. Its constraint is
  * deliberately shapeless: the route shape, with the ctx, is the `UploadRoutes` half of `routes`,
@@ -366,6 +392,7 @@ export function uploadHandler<
 >(options: UploadHandlerOptions<TCtx, TRoutes, TData, TSchema>): UploadHandler<HandlerRoutes<TRoutes, TData, RouteInputOf<TSchema>>, Awaited<TCtx>> {
   const named = options.routes !== undefined;
   const definitions = (options.routes ?? { '': {} }) as unknown as Record<string, unknown>;
+  if (options.owner && !options.context) throw new TypeError('uploadHandler: owner reads ctx, so it needs a context');
   if (named && Object.keys(definitions).length === 0) throw new TypeError('uploadHandler was given an empty routes map: name at least one route, or omit routes to make the handler the route');
 
   // The request is the key, so `ctx` reaches the direct-upload callbacks without entering a
@@ -422,6 +449,7 @@ export function uploadHandler<
       onBeforeUpload: (args: any) => onBeforeUpload({ ...args, ctx: ctxOf(args.request as Request) }),
       onUploadComplete: onUploadComplete ? (args: any) => onUploadComplete({ ...args, ctx: ctxOf(args.request as Request) }) : undefined,
       onError,
+      ownerOf: options.owner ? (request: Request) => ownerString(options.owner!(ctxOf(request) as Awaited<TCtx>)) : undefined,
     };
 
     const handlers = handleUpload(shared);

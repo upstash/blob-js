@@ -20,6 +20,8 @@ interface TokenBase {
   ctx: unknown;
   /** Unix ms. */
   exp: number;
+  /** The handler's `owner` of whoever began the upload; every later request must match it. */
+  o?: string;
 }
 
 export interface TokenPayload extends TokenBase {
