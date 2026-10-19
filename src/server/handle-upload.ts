@@ -141,6 +141,8 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     enforce(routeConstraints, file, head);
 
     const input = await validateInput(options.input, body.input);
+    // Before onBeforeUpload and storage: a request with no owner must leave no row and no multipart behind.
+    const owner = options.ownerOf?.(request);
 
     const decided = await options.onBeforeUpload({ request, route: options.route, file, input });
     if (!decided || typeof decided.path !== 'string') throw new TypeError('onBeforeUpload must return { path }');
@@ -192,7 +194,6 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     // One part covering the whole file is how a single PUT is expressed: the browser runs the same
     // loop over one url, and only this side knows the url is an object PUT and not a part.
     const partSize = multipart ? partSizeFor(file.size) : file.size;
-    const owner = options.ownerOf?.(request);
     const payload: TokenPayload = {
       v: 1,
       b: r2.bucketId,

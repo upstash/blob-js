@@ -648,6 +648,26 @@ describe('owner', () => {
     });
   }
 
+  for (const size of [4, 40_000_000]) {
+    test(`a begin with no owner is a 401 before onBeforeUpload or storage (${size > 4 ? 'multipart' : 'single PUT'})`, async () => {
+      let before = 0;
+      const uploads = uploadHandler({
+        bucket: bucket(),
+        context: (request) => (request.headers.get('x-user') ? { id: request.headers.get('x-user')! } : null),
+        owner: (user) => user?.id,
+        onBeforeUpload: () => {
+          before++;
+          return { path: 'a.png' };
+        },
+      });
+      calls = [];
+      const res = await uploads.POST(as(undefined, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size } }));
+      expect(res.status).toBe(401);
+      expect(before).toBe(0);
+      expect(r2Calls()).toHaveLength(0);
+    });
+  }
+
   test('owner needs a context', () => {
     expect(() => uploadHandler({ bucket: bucket(), owner: () => 'x', onBeforeUpload: () => ({ path: 'a' }) } as any)).toThrow(/needs a context/);
   });

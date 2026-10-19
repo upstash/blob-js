@@ -290,7 +290,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    * at its first request; a later request whose `ctx` names someone else is a 403 before storage or
    * any callback is touched, so one user cannot finish, re-sign or cancel another's upload.
    */
-  owner?: (ctx: Awaited<TCtx>) => string | number;
+  owner?: (ctx: Awaited<TCtx>) => string | number | null | undefined;
   /** Every route inherits it. A Standard Schema for the browser's `input`. */
   input?: TSchema;
   /**
@@ -377,6 +377,12 @@ interface AnyRouteSpec {
  * contextual type.
  * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
  */
+// A session lookup that found nobody reads as `user?.id`: that is a 401, never an upload owned by "undefined".
+function ownerString(owner: string | number | null | undefined): string {
+  if (owner === null || owner === undefined || owner === '') throw new BlobError('unauthorized', { message: 'no signed-in user to own this upload' });
+  return String(owner);
+}
+
 export function uploadHandler<
   TRoutes extends Record<string, object>,
   TCtx = undefined,
@@ -442,7 +448,7 @@ export function uploadHandler<
       onBeforeUpload: (args: any) => onBeforeUpload({ ...args, ctx: ctxOf(args.request as Request) }),
       onUploadComplete: onUploadComplete ? (args: any) => onUploadComplete({ ...args, ctx: ctxOf(args.request as Request) }) : undefined,
       onError,
-      ownerOf: options.owner ? (request: Request) => String(options.owner!(ctxOf(request) as Awaited<TCtx>)) : undefined,
+      ownerOf: options.owner ? (request: Request) => ownerString(options.owner!(ctxOf(request) as Awaited<TCtx>)) : undefined,
     };
 
     const handlers = handleUpload(shared);
