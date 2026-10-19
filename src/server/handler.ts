@@ -363,6 +363,12 @@ interface AnyRouteSpec {
   onError?: (args: any) => ErrorReturn;
 }
 
+// A session lookup that found nobody reads as `user?.id`: that is a 401, never an upload owned by "undefined".
+function ownerString(owner: string | number | null | undefined): string {
+  if (owner === null || owner === undefined || owner === '') throw new BlobError('unauthorized', { message: 'no signed-in user to own this upload' });
+  return String(owner);
+}
+
 /**
  * The server half of a direct browser upload: export `{ GET, POST }` from one route and upload with
  * `useUpload`. Check the session in `context`, bind uploads with `owner: (user) => user.id`, return
@@ -377,12 +383,6 @@ interface AnyRouteSpec {
  * contextual type.
  * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
  */
-// A session lookup that found nobody reads as `user?.id`: that is a 401, never an upload owned by "undefined".
-function ownerString(owner: string | number | null | undefined): string {
-  if (owner === null || owner === undefined || owner === '') throw new BlobError('unauthorized', { message: 'no signed-in user to own this upload' });
-  return String(owner);
-}
-
 export function uploadHandler<
   TRoutes extends Record<string, object>,
   TCtx = undefined,
