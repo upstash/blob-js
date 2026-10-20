@@ -237,7 +237,7 @@ describe('r2 retries', () => {
     const custom = new Bucket({ token: TOKEN, retry: { retries: 4, backoff: (n) => (waits.push(n), 0) } });
     await expect(custom.exists('a.txt')).rejects.toMatchObject({ code: 'request_failed' });
     expect(r2Calls().length).toBe(5);
-    expect(waits).toEqual([1, 2, 3, 4]);
+    expect(waits).toEqual([0, 1, 2, 3]);
 
     // A Retry-After from storage still wins over the backoff.
     calls = [];
@@ -257,6 +257,15 @@ describe('r2 retries', () => {
     mintResponse = () => new Response('', { status: 429, headers: { 'retry-after': '1' } });
     await expect(new Bucket({ token: TOKEN, retry: false }).exists('a.txt')).rejects.toMatchObject({ code: 'rate_limited' });
     expect(mints).toBe(1);
+
+    // Without a Retry-After the credential wait is the caller's backoff, counted the same way.
+    resetCredentialCaches();
+    mints = 0;
+    const waits: number[] = [];
+    mintResponse = () => new Response('', { status: 503 });
+    await expect(new Bucket({ token: TOKEN, retry: { retries: 2, backoff: (n) => (waits.push(n), 0) } }).exists('a.txt')).rejects.toBeInstanceOf(BlobError);
+    expect(mints).toBe(3);
+    expect(waits).toEqual([0, 1]);
   });
 
   test('a retry option that cannot be honoured is refused at construction', () => {

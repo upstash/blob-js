@@ -59,7 +59,7 @@ export const MAX_PRESIGN_SECONDS = 600;
  * `false` sends everything once.
  * @see node_modules/@upstash/blob/docs/bucket/connecting.mdx
  */
-export type RetryOptions =
+export type RetryConfig =
   | false
   | {
       /**
@@ -68,20 +68,20 @@ export type RetryOptions =
        */
       retries?: number;
       /**
-       * Milliseconds to wait before retry `retryCount`, counted from 1. A Retry-After from the
+       * Milliseconds to wait before retry `retryCount`, counted from 0. A Retry-After from the
        * service wins over it.
        * @default full jitter, doubling from 200 ms and capped at 4 s; 2 s for a credential
        */
       backoff?: (retryCount: number) => number;
     };
 
-/** RetryOptions with the shorthand resolved, so every retry loop reads the same two fields. */
+/** RetryConfig with the shorthand resolved, so every retry loop reads the same two fields. */
 export interface RetryPolicy {
   retries?: number;
   backoff?: (retryCount: number) => number;
 }
 
-export function retryPolicy(options: RetryOptions | undefined): RetryPolicy {
+export function retryPolicy(options: RetryConfig | undefined): RetryPolicy {
   if (options === undefined) return {};
   if (options === false) return { retries: 0 };
   if (typeof options !== 'object' || options === null) throw new TypeError('retry: expected false or { retries, backoff }');
@@ -255,7 +255,7 @@ export class R2 {
   private wait(attempt: number, retryAfter: string | null): number {
     if (!this.retry.backoff) return backoff(attempt, retryAfter);
     const secs = retryAfter ? Number(retryAfter) : NaN;
-    return Number.isFinite(secs) && secs >= 0 ? backoff(attempt, retryAfter) : waitMs(this.retry.backoff(attempt));
+    return Number.isFinite(secs) && secs >= 0 ? backoff(attempt, retryAfter) : waitMs(this.retry.backoff(attempt - 1));
   }
 
   async head(path: string): Promise<BlobHead | undefined> {

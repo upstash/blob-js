@@ -75,7 +75,7 @@ export class CredentialCache {
         throw new BlobError('mint_backoff', { message: `the credential service asked for ${asked}s of backoff`, retryAfter: asked });
       }
       if (attempt < (retry.retries ?? MINT_RETRIES)) {
-        await new Promise((r) => setTimeout(r, given || !retry.backoff ? asked * 1000 : waitMs(retry.backoff(attempt + 1))));
+        await new Promise((r) => setTimeout(r, given || !retry.backoff ? asked * 1000 : waitMs(retry.backoff(attempt))));
         return this.mint(retry, attempt + 1);
       }
     }

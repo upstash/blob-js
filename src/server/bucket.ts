@@ -4,11 +4,11 @@ import { cacheControl, overLimit, parseDuration, parseSize, type CacheOption, ty
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, presignableKey, tag } from './keys.ts';
 import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
-import { backoff, errorFromBody, errorFromResponse, headFromHeaders, MAX_PRESIGN_SECONDS, R2, retryPolicy, sleep, type MultipartUpload, type RetryOptions } from './r2.ts';
+import { backoff, errorFromBody, errorFromResponse, headFromHeaders, MAX_PRESIGN_SECONDS, R2, retryPolicy, sleep, type MultipartUpload, type RetryConfig } from './r2.ts';
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
 
-export type { MultipartUpload, RetryOptions };
+export type { MultipartUpload, RetryConfig };
 
 export interface BucketOptions {
   token: string;
@@ -25,9 +25,9 @@ export interface BucketOptions {
   enableTelemetry?: boolean;
   /**
    * Retries for failed requests, or `false` to send each one once.
-   * @see RetryOptions
+   * @see RetryConfig
    */
-  retry?: RetryOptions;
+  retry?: RetryConfig;
 }
 
 export interface PutOptions {
