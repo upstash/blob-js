@@ -46,8 +46,13 @@ export class CredentialCache {
     return this.current;
   }
 
-  /** After a 403 that named the credential itself: the next get() mints. */
-  invalidate(): void {
+  /**
+   * After a 403 that named the credential itself: the next get() mints. Given the credential the
+   * request was signed with, a newer one is kept, so parts refused together re-mint once rather
+   * than each wiping the credential the first one fetched.
+   */
+  invalidate(stale?: TempCredentials): void {
+    if (stale !== undefined && this.current !== stale) return;
     this.current = undefined;
     this.refreshAt = 0;
   }
