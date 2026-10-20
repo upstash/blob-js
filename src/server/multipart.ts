@@ -60,7 +60,7 @@ export function partCount(size: number, partSize: number): number {
 // Every part is buffered whole so a failed one can be sent again, and one more fills while the rest
 // are in flight, so each costs its size in memory. Four overlap the round trips the way the aws-sdk
 // does; past 12 MiB parts (bodies over about 3 GB) fewer go at once to stay within the budget, down to
-// one past 32 MiB parts (about 8 GB), where the part filling and the one in flight already exceed it.
+// one from 22 MiB parts (about 5.5 GB), and one past 32 MiB, where even that pair exceeds it.
 const PART_CONCURRENCY = 4;
 const PART_BUFFER_BUDGET = 64 * MIB;
 
