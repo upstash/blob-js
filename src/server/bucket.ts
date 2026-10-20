@@ -4,11 +4,11 @@ import { cacheControl, overLimit, parseDuration, parseSize, type CacheOption, ty
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, presignableKey, tag } from './keys.ts';
 import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
-import { backoff, errorFromBody, errorFromResponse, headFromHeaders, MAX_PRESIGN_SECONDS, R2, sleep, type MultipartUpload } from './r2.ts';
+import { backoff, errorFromBody, errorFromResponse, headFromHeaders, MAX_PRESIGN_SECONDS, R2, retryPolicy, sleep, type MultipartUpload, type RetryOptions } from './r2.ts';
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
 
-export type { MultipartUpload };
+export type { MultipartUpload, RetryOptions };
 
 export interface BucketOptions {
   token: string;
@@ -23,6 +23,11 @@ export interface BucketOptions {
    * @default true
    */
   enableTelemetry?: boolean;
+  /**
+   * Retries for failed requests, or `false` to send each one once.
+   * @see RetryOptions
+   */
+  retry?: RetryOptions;
 }
 
 export interface PutOptions {
@@ -217,7 +222,7 @@ export class Bucket {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
     this.defaultCache = options.cache;
-    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true);
+    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true, retryPolicy(options.retry));
     INTERNALS.set(this, this.r2);
   }
 

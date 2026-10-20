@@ -14,6 +14,7 @@ export type {
   ListMultipartOptions,
   AbortStaleMultipartOptions,
   MultipartUpload,
+  RetryOptions,
   DeleteTarget,
   S3Config,
   CopyOptions,
