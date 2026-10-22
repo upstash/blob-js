@@ -253,7 +253,8 @@ export type HandlerRoutes<TRoutes, TData, TInput> = string extends keyof TRoutes
  * the argument's own type (`unknown` when it was left out), not off `TRoutes`' keys: a
  * `Record<string, ...>` or `any` has no keys to tell it from no routes at all.
  * Only onBeforeUpload's return reads it: in a callback parameter, `TRoutesArg` would be fixed before
- * `routes` is read. onUploadComplete takes `NoInferState<TState>`, so annotating it cannot type it either.
+ * `routes` is read. onUploadComplete takes `NoInferState<TState>`, so annotating it cannot type it either,
+ * and an `any` state, which onBeforeUpload's return accepts even with routes, reads as `unknown` there.
  */
 type HandlerState<TRoutesArg, TState> = 0 extends 1 & TRoutesArg ? undefined : unknown extends TRoutesArg ? TState : undefined;
 
@@ -267,8 +268,12 @@ type NoInferState<T> = [T][T extends unknown ? 0 : never];
  */
 type RoutesArg<T> = T extends unknown ? T : never;
 
-/** @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx */
-export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends StandardSchema<any, any> | undefined, TState = undefined, TRoutesArg = string extends keyof TRoutes ? unknown : TRoutes> {
+/**
+ * For a wrapper: `TRoutes` of `never` is a handler without routes, whose `state` is typed; any other
+ * `TRoutes` counts as routes, so a wrapper that forwards `routes` keeps the handler's state `undefined`.
+ * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
+ */
+export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends StandardSchema<any, any> | undefined, TState = undefined, TRoutesArg = [TRoutes] extends [never] ? unknown : TRoutes> {
   /**
    * Every route inherits it; a route may name its own. Omit it and the handler builds one from
    * `UPSTASH_BLOB_TOKEN`, once, the way `Bucket.fromEnv()` does -- so name a bucket when the token
@@ -317,7 +322,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    * replaced it), in which case it is kept and logged. It may run more than once, or never if the
    * browser stops before 'end', so write idempotently on `uploadId`.
    */
-  onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, NoInferState<TState>> & DirectCompleteExtras) => TData | Promise<TData>;
+  onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, NoInferState<0 extends 1 & TState ? unknown : TState>> & DirectCompleteExtras) => TData | Promise<TData>;
   /**
    * The default. Sees every refusal, this handler's own included: return a BlobError or a Response to
    * answer with it, return nothing to leave the answer alone. It is the one place to log.
