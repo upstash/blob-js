@@ -127,6 +127,15 @@ export function installXhr(cls: typeof FetchXhr | typeof ManualXhr): () => void 
   };
 }
 
+/** A runtime with no XMLHttpRequest at all, as in Node: deleted, not stubbed, and put back after. */
+export function removeXhr(): () => void {
+  const prev = Object.getOwnPropertyDescriptor(globalThis, 'XMLHttpRequest');
+  delete (globalThis as any).XMLHttpRequest;
+  return () => {
+    if (prev) Object.defineProperty(globalThis, 'XMLHttpRequest', prev);
+  };
+}
+
 /** Routes fetch(route) to in-process handlers; anything else goes to the real fetch. */
 export function installRouter(routes: Record<string, { GET?: (r: Request) => Promise<Response>; POST: (r: Request) => Promise<Response> }>): () => void {
   const real = globalThis.fetch;

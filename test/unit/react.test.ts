@@ -5,7 +5,7 @@ import { clock } from '../../src/browser/clock.ts';
 import { poolState } from '../../src/browser/pool.ts';
 import { BlobError, uploadHooks, useServerUpload, useUpload } from '../../src/react/index.ts';
 import type { UploadRoute } from '../../src/shared/types.ts';
-import { installRouter, installXhr, ManualXhr } from '../helpers/xhr.ts';
+import { installRouter, installXhr, ManualXhr, removeXhr } from '../helpers/xhr.ts';
 
 // bun imports every test file before running any of them, and happy-dom's globals are read-only
 // once installed, so registering at import time breaks a sibling file that stubs localStorage.
@@ -846,6 +846,22 @@ test('a throw from headers ends a server upload before any bytes are sent', asyn
   const upload = hook.current.upload!;
   expect(upload.status === 'error' && upload.error.code).toBe('forbidden');
   expect(xhrs).toHaveLength(0);
+});
+
+/* ------------------------------------------------------- not a browser -- */
+
+test('without XMLHttpRequest, both hooks throw invalid_input from start and list nothing', async () => {
+  const hook = await render(() => ({ direct: useUpload<UploadRoute<undefined, unknown>>(route), proxied: useServerUpload('/api/avatar') }));
+  await flush();
+  calls = [];
+  restore.push(removeXhr());
+  expect(typeof XMLHttpRequest).toBe('undefined');
+  expect(() => hook.current.direct.start({ file: png() })).toThrow(expect.objectContaining({ code: 'invalid_input', status: 400 }));
+  expect(() => hook.current.proxied.start({ file: png() })).toThrow(expect.objectContaining({ code: 'invalid_input', status: 400 }));
+  await flush();
+  expect(hook.current.direct.uploads).toHaveLength(0);
+  expect(hook.current.proxied.uploads).toHaveLength(0);
+  expect(calls).toHaveLength(0);
 });
 
 /* ------------------------------------------------------------- finishing -- */

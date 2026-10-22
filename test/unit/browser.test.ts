@@ -4,7 +4,7 @@ import { upload } from '../../src/browser/index.ts';
 import { clock } from '../../src/browser/clock.ts';
 import { poolState, GLOBAL_REQUEST_CAP } from '../../src/browser/pool.ts';
 import { backoffMs, classify } from '../../src/browser/retry.ts';
-import { flush, installXhr, ManualXhr } from '../helpers/xhr.ts';
+import { flush, installXhr, ManualXhr, removeXhr } from '../helpers/xhr.ts';
 
 const MIB = 1024 * 1024;
 const memory = new Map<string, string>();
@@ -449,6 +449,52 @@ describe('a single PUT', () => {
     await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'forbidden', status: 403 });
     onPhase = () => Response.json({ error: 'nope' }, { status: 418 });
     await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'request_failed', status: 418, message: 'Nope' });
+  });
+
+  test('without XMLHttpRequest, upload() throws invalid_input before calling the route', () => {
+    onPhase = defaultRoute(3);
+    const put = removeXhr();
+    let thrown: unknown;
+    try {
+      expect(typeof XMLHttpRequest).toBe('undefined');
+      // Canceled at once if it ever stops throwing, so a regression fails here and not in every later test.
+      upload(png(), { route: '/api/upload' }).cancel();
+    } catch (e) {
+      thrown = e;
+    } finally {
+      put();
+    }
+    expect(BlobError.is(thrown)).toBe(true);
+    expect(thrown).toMatchObject({ code: 'invalid_input', status: 400 });
+    expect((thrown as BlobError).message).toContain('XMLHttpRequest');
+    expect((thrown as BlobError).message).toContain('Bucket.fromEnv().put(path, body)');
+    expect(calls).toEqual([]);
+  });
+
+  test('a bug is not reported as a 503, and an input JSON cannot carry never reaches the route', async () => {
+    onPhase = defaultRoute(3);
+    const failed = await upload(png(), { route: '/api/upload', input: { n: 1n } }).done.catch((e) => e);
+    expect(failed).toMatchObject({ code: 'request_failed', status: 500 });
+    expect(failed.cause).toBeInstanceOf(TypeError);
+    expect(calls).toEqual([]);
+    expect(sleeps).toEqual([]);
+  });
+
+  test('a response that drops mid-body is a network failure, retried like one', async () => {
+    let ends = 0;
+    const base = defaultRoute(3);
+    const dropped = () => new Response(new ReadableStream({ start: (c) => c.error(new TypeError('terminated')) }));
+    onPhase = (body) => (body.phase === 'end' && ends++ === 0 ? dropped() : base(body));
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await settle();
+    await wake();
+    await task.done;
+    expect(ends).toBe(2);
+
+    onPhase = (body) => (body.phase === 'begin' ? dropped() : base(body));
+    await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'request_failed', status: 503, message: 'Could not reach the upload route' });
   });
 
   test('the controls answer false instead of throwing when they cannot act', async () => {

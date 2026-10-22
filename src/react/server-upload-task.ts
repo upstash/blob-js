@@ -1,6 +1,6 @@
 import { clock } from '../browser/clock.ts';
 import { resolveHeaders, routeMessage, type HeadersProvider } from '../browser/task.ts';
-import { NetworkError, sendXhr, type XhrResponse } from '../browser/xhr.ts';
+import { NetworkError, requireXhr, sendXhr, type XhrResponse } from '../browser/xhr.ts';
 import { BlobError, PLATFORM_BODY_CAP_HINT } from '../shared/errors.ts';
 
 export type ServerUploadSnapshot<TResponse> = {
@@ -50,6 +50,7 @@ export class ServerUploadTask<TResponse = unknown> {
   private frameQueued = false;
 
   constructor(private readonly options: ServerUploadTaskOptions) {
+    requireXhr();
     this.file = options.file;
     this.total = options.total;
   }
@@ -139,8 +140,10 @@ export class ServerUploadTask<TResponse = unknown> {
       });
     } catch (e) {
       if (this.isCanceled()) return;
-      const message = e instanceof NetworkError ? 'could not reach the route' : e instanceof Error ? e.message : String(e);
-      this.fail(new BlobError('request_failed', { message, status: 503, cause: e }));
+      // Only a NetworkError is the network. Anything else sendXhr throws is a bug, not a 503 to wait out.
+      const network = e instanceof NetworkError;
+      const message = network ? 'could not reach the route' : e instanceof Error ? e.message : String(e);
+      this.fail(new BlobError('request_failed', { message, status: network ? 503 : undefined, cause: e }));
       return;
     }
     if (this.isCanceled()) return;
