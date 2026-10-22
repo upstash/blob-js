@@ -369,6 +369,7 @@ describe('a single PUT', () => {
       const e = await task.done.catch((x) => x);
       expect(e.code).toBe('request_failed');
       expect(e.message).toContain("the bucket's CORS origins must include http://localhost:3001");
+      expect(e.message).toContain('`upstash blob cors <bucket> http://localhost:3001`');
       expect(e.message).toContain('Upstash Console');
       expect(e.message).toContain("the bucket's CORS settings");
       expect(e.hint).toContain('http://localhost:3001');

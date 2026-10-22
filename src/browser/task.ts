@@ -586,7 +586,7 @@ class Task implements InternalTask {
 // has to be on it and where to put it.
 function corsHint(origin = pageOrigin()): string {
   const who = origin ?? "this page's origin";
-  return `the browser blocked the request before sending any bytes, which is almost always CORS: the bucket's CORS origins must include ${who}; add it in the Upstash Console under the bucket's CORS settings`;
+  return `the browser blocked the request before sending any bytes, which is almost always CORS: the bucket's CORS origins must include ${who}; add it with \`upstash blob cors <bucket> ${origin ?? '<origin>'}\` followed by any origins to keep, or in the Upstash Console under the bucket's CORS settings`;
 }
 
 function pageOrigin(): string | undefined {

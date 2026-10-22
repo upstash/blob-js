@@ -284,7 +284,8 @@ What the SDK already does, so you do not have to:
 - You need no cancel or retry plumbing: `cancel()` aborts what is in flight and has the route
   remove what landed; `retry()` continues the same upload from the parts that landed.
 - An error saying the browser blocked the request before sending any bytes is CORS: add the page
-  origin in the Upstash Console under the bucket's CORS settings (the route logs this too).
+  origin with `upstash blob cors <bucket> <origins...>`, which replaces the bucket's list, or in the
+  Upstash Console under the bucket's CORS settings (the route logs this too).
 
 ### Edge cases the recipe already handles
 
