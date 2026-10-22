@@ -5,10 +5,12 @@ import {
   uploadHandler,
   type BeforeUploadArgs,
   type Bucket,
+  type DirectUploadRoute,
   type UploadCompleteArgs,
   type UploadContext,
   type UploadFile,
   type UploadRoute,
+  type UploadRoutes,
 } from '../../src/index.ts';
 import { uploadHooks, useServerUpload, useUpload, type RoutesOf } from '../../src/react/index.ts';
 
@@ -287,6 +289,59 @@ function _singleState(value: Bucket) {
     onBeforeUpload: () => ({ path: 'p', state: { n: 'x' } }),
     onUploadComplete: ({ state }) => void (state.n satisfies number),
   });
+  uploadHandler<{ a: object }, undefined, void, undefined, { n: number }>({
+    bucket: value,
+    // @ts-expect-error explicit generics with named routes do not type it either
+    onBeforeUpload: () => ({ path: 'p', state: { n: 1 } }),
+    routes: { a: {} },
+  });
+}
+
+// Routes whose keys cannot be read are still routes: whether `routes` was passed decides it.
+function _routesState(value: Bucket, flag: boolean, loose: Record<string, DirectUploadRoute<undefined>>, open: UploadRoutes, anything: any) {
+  const before = () => ({ path: 'p', state: { owner: 'u' } });
+  const mixed: { a: DirectUploadRoute<undefined> } & Record<string, DirectUploadRoute<undefined>> = loose as never;
+  const maybe: typeof loose | undefined = flag ? loose : undefined;
+  const fixed = { a: {}, b: { onBeforeUpload: () => ({ path: 'other' }) } } as const;
+  // @ts-expect-error a Record-typed map
+  uploadHandler({ bucket: value, onBeforeUpload: before, onUploadComplete: ({ state }) => void state.owner, routes: loose });
+  // @ts-expect-error the exported UploadRoutes
+  uploadHandler({ bucket: value, onBeforeUpload: before, onUploadComplete: ({ state }) => void state.owner, routes: open });
+  // @ts-expect-error named keys and an index signature
+  uploadHandler({ bucket: value, onBeforeUpload: before, onUploadComplete: ({ state }) => void state.owner, routes: mixed });
+  // @ts-expect-error any
+  uploadHandler({ bucket: value, onBeforeUpload: before, onUploadComplete: ({ state }) => void state.owner, routes: anything });
+  // @ts-expect-error a map that may be undefined
+  uploadHandler({ bucket: value, onBeforeUpload: before, onUploadComplete: ({ state }) => void state.owner, routes: maybe });
+  // @ts-expect-error a map or undefined, inline
+  uploadHandler({ bucket: value, onBeforeUpload: before, onUploadComplete: ({ state }) => void state.owner, routes: flag ? { a: {} } : undefined });
+  // @ts-expect-error one of two maps
+  uploadHandler({ bucket: value, onBeforeUpload: before, onUploadComplete: ({ state }) => void state.owner, routes: flag ? { a: {} } : { b: {} } });
+  // @ts-expect-error a spread
+  uploadHandler({ bucket: value, onBeforeUpload: before, onUploadComplete: ({ state }) => void state.owner, routes: { ...fixed, c: {} } });
+  // @ts-expect-error an as-const map
+  uploadHandler({ bucket: value, onBeforeUpload: before, onUploadComplete: ({ state }) => void state.owner, routes: fixed });
+  uploadHandler({
+    bucket: value,
+    context: (request) => requireUser(request),
+    routes: { a: {}, b: { onBeforeUpload: ({ ctx }) => ({ path: ctx.id }) } },
+    // @ts-expect-error routes above, with a callback typed by ctx
+    onBeforeUpload: ({ ctx }) => ({ path: 'p', state: { owner: ctx.id } }),
+    onUploadComplete: ({ state }) => void state.owner,
+  });
+  uploadHandler({
+    bucket: value,
+    context: (request) => requireUser(request),
+    // @ts-expect-error routes below, with a callback typed by ctx
+    onBeforeUpload: ({ ctx }) => ({ path: 'p', state: { owner: ctx.id } }),
+    onUploadComplete: ({ state }) => void state.owner,
+    routes: { a: {}, b: { onBeforeUpload: ({ ctx }) => ({ path: ctx.id }) } },
+  });
+}
+
+function _routesStateGeneric<R extends Record<string, object>>(value: Bucket, routes: R & UploadRoutes<undefined>) {
+  // @ts-expect-error a generic map
+  return uploadHandler({ bucket: value, onBeforeUpload: () => ({ path: 'p', state: { owner: 'u' } }), onUploadComplete: ({ state }) => void state.owner, routes });
 }
 
 type Legacy = UploadRoute<undefined, { legacy: boolean }, '/api/legacy'>;
@@ -350,6 +405,6 @@ function _useUploadCaveat(value: Bucket) {
 test('the handler types compile', () => {
   expect(typeof uploadHandler).toBe('function');
   expect(typeof useServerUpload).toBe('function');
-  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _singleState, _routeUnions, _escapeHatches, _useUploadCaveat];
+  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _singleState, _routesState, _routesStateGeneric, _routeUnions, _escapeHatches, _useUploadCaveat];
   void ({} as UploadCompleteArgs<Uploads>);
 });
