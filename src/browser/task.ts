@@ -6,7 +6,7 @@ import { abortError, clock } from './clock.ts';
 import { acquire } from './pool.ts';
 import { backoffMs, classify, MAX_ATTEMPTS, MAX_NETWORK_ATTEMPTS, NO_BYTES_NETWORK_ATTEMPTS, STALL_TIMEOUT_MS } from './retry.ts';
 import { clearPending, fingerprint, readPending, writePending } from './store.ts';
-import { NetworkError, sendXhr } from './xhr.ts';
+import { NetworkError, requireXhr, sendXhr } from './xhr.ts';
 
 export type HeadersProvider = () => Record<string, string> | Promise<Record<string, string>>;
 
@@ -61,6 +61,7 @@ interface InFlight {
 let counter = 0;
 
 export function createTask(file: File, options: UploadOptions, autoStart: boolean): InternalTask {
+  requireXhr();
   const task = new Task(file, options);
   if (autoStart) task.start();
   return task;
@@ -277,7 +278,9 @@ class Task implements InternalTask {
       },
       (e) => {
         if (this.status === 'canceled' || isAbort(e)) return;
-        this.error = BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), status: 503, cause: e });
+        // A network failure is a BlobError by the time it gets here. What is not is the app's own
+        // headers() throw or a bug, and neither is a 503 the caller should wait out.
+        this.error = BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), cause: e });
         this.status = 'error';
         this.inflight.clear();
         this.notify();
@@ -546,6 +549,8 @@ class Task implements InternalTask {
 
   private async routeCall(body: Record<string, unknown>, signal: AbortSignal | undefined, attempts = ROUTE_ATTEMPTS): Promise<unknown> {
     let last: BlobError | undefined;
+    // Outside the try too: an input JSON cannot carry is the caller's bug, not an unreachable route.
+    const payload = JSON.stringify({ ...body, protocol: UPLOAD_PROTOCOL });
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (signal?.aborted) throw abortError();
       // Outside the try on purpose. headers() is the app's own hook and is re-read per attempt, so a
@@ -554,13 +559,16 @@ class Task implements InternalTask {
       // three times; here it ends the upload immediately carrying the app's error.
       const authored = await resolveHeaders(this.options.headers);
       let res: Response;
+      let text: string;
       try {
         res = await fetch(this.options.route, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...authored },
-          body: JSON.stringify({ ...body, protocol: UPLOAD_PROTOCOL }),
+          body: payload,
           signal,
         });
+        // A connection that drops mid-response is the same failure as one that drops before it.
+        text = await res.text();
       } catch (e) {
         if (isAbort(e) || signal?.aborted) throw abortError();
         last = new BlobError('request_failed', { message: 'could not reach the upload route', status: 503, cause: e });
@@ -568,7 +576,6 @@ class Task implements InternalTask {
         await clock.sleep(backoffMs(attempt), signal);
         continue;
       }
-      const text = await res.text();
       let json: unknown;
       try {
         json = text ? JSON.parse(text) : undefined;

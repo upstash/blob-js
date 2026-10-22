@@ -1,3 +1,4 @@
+import { BlobError } from '../shared/errors.ts';
 import { abortError, clock } from './clock.ts';
 
 export interface XhrRequest {
@@ -22,6 +23,16 @@ export interface XhrResponse {
 
 export class NetworkError extends Error {
   override readonly name = 'NetworkError';
+}
+
+// Checked when a task is created, before the route is called: without it a Node script got through
+// phase 'begin' and then failed on the first PUT with a ReferenceError, reported as a 503.
+export function requireXhr(): void {
+  if (typeof XMLHttpRequest !== 'undefined') return;
+  throw new BlobError('invalid_input', {
+    message: 'browser uploads need XMLHttpRequest, which this runtime does not have',
+    hint: 'server code uploads with Bucket instead: Bucket.fromEnv().put(path, body) from @upstash/blob',
+  });
 }
 
 // XHR and not fetch: fetch has no upload progress event, and request streams need duplex:'half'
