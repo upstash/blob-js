@@ -533,6 +533,8 @@ describe('CORS probe', () => {
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain('http://localhost:3001');
       expect(warnings[0]).toContain("bucket's CORS origins");
+      expect(warnings[0]).toContain("`upstash blob cors bucket-id 'http://localhost:3001'`");
+      expect(warnings[0]).toContain('Upstash Console');
 
       await fromOrigin(uploads, 'http://localhost:3001');
       await settle();
@@ -592,6 +594,19 @@ describe('CORS probe', () => {
     expect((await fromOrigin(uploads, 'http://localhost:3001')).status).toBe(401);
     await settle();
     expect(r2Calls().filter((c) => c.method === 'OPTIONS')).toHaveLength(0);
+  });
+
+  test('the CLI command in the warning never carries an origin unsafe to paste into a shell', async () => {
+    r2Handler = storage([]);
+    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    await withWarnings(async (warnings) => {
+      await fromOrigin(uploads, 'http://[::1]:3000');
+      await fromOrigin(uploads, 'https://a.example.com$(id)');
+      await settle();
+      expect(warnings).toHaveLength(2);
+      expect(warnings[0]).toContain("`upstash blob cors bucket-id 'http://[::1]:3000'`");
+      expect(warnings[1]).toContain('`upstash blob cors bucket-id <origin>`');
+    });
   });
 });
 

@@ -1,3 +1,5 @@
+import { corsCommand } from '../shared/errors.ts';
+
 /**
  * A browser upload PUTs straight to storage, so a bucket whose CORS list leaves out the page's origin
  * fails in the browser alone: the route answers 200, a curl against it succeeds, and the only trace
@@ -13,7 +15,7 @@
 /** Origins remembered as probed. Bounded, since the Origin header is the client's to choose. */
 const MAX_PROBED = 64;
 
-export function corsProbe(): (request: Request, url: string, headers: Record<string, string> | undefined) => void {
+export function corsProbe(bucketId: string): (request: Request, url: string, headers: Record<string, string> | undefined) => void {
   const probed = new Set<string>();
   return (request, url, headers) => {
     const origin = request.headers?.get?.('origin');
@@ -25,15 +27,16 @@ export function corsProbe(): (request: Request, url: string, headers: Record<str
       (allowed) => {
         // Storage that could not be asked is asked again on the next upload from this origin.
         if (allowed === undefined) probed.delete(origin);
-        else if (!allowed) console.warn(corsWarning(origin));
+        else if (!allowed) console.warn(corsWarning(origin, bucketId));
       },
       () => probed.delete(origin),
     );
   };
 }
 
-export function corsWarning(origin: string): string {
-  return `[upstash-blob] storage refused the CORS preflight from ${origin}, so a browser upload from that origin will be blocked before any bytes are sent. If ${origin} is your app, add it to the bucket's CORS origins in the Upstash Console, under the bucket's CORS settings.`;
+export function corsWarning(origin: string, bucketId: string): string {
+  const command = corsCommand(bucketId, origin);
+  return `[upstash-blob] storage refused the CORS preflight from ${origin}, so a browser upload from that origin will be blocked before any bytes are sent. If ${origin} is your app, add it to the bucket's CORS origins: run \`${command}\` followed by any origins to keep (it replaces the list), or use the Upstash Console under the bucket's CORS settings.`;
 }
 
 /** true or false when storage answered the preflight; undefined when it could not be asked. */
