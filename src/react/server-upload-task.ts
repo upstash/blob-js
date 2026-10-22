@@ -1,5 +1,5 @@
 import { clock } from '../browser/clock.ts';
-import { resolveHeaders, routeMessage, type HeadersProvider } from '../browser/task.ts';
+import { isAbort, resolveHeaders, routeMessage, type HeadersProvider } from '../browser/task.ts';
 import { NetworkError, requireXhr, sendXhr, type XhrResponse } from '../browser/xhr.ts';
 import { BlobError, PLATFORM_BODY_CAP_HINT } from '../shared/errors.ts';
 
@@ -140,10 +140,11 @@ export class ServerUploadTask<TResponse = unknown> {
       });
     } catch (e) {
       if (this.isCanceled()) return;
-      // Only a NetworkError is the network. Anything else sendXhr throws is a bug, not a 503 to wait out.
+      // A NetworkError, or an abort the browser made itself (page unload, window.stop()), is the
+      // network. Anything else sendXhr throws is a bug, not a 503 to wait out.
       const network = e instanceof NetworkError;
       const message = network ? 'could not reach the route' : e instanceof Error ? e.message : String(e);
-      this.fail(new BlobError('request_failed', { message, status: network ? 503 : undefined, cause: e }));
+      this.fail(new BlobError('request_failed', { message, status: network || isAbort(e) ? 503 : undefined, cause: e }));
       return;
     }
     if (this.isCanceled()) return;
