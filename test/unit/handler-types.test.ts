@@ -220,6 +220,53 @@ function _single(value: Bucket) {
   hooks.useUpload({ concurrency: 2, onDone: (record) => void (record.blob.data.path satisfies string) });
 }
 
+function _singleState(value: Bucket) {
+  uploadHandler({
+    bucket: value,
+    onBeforeUpload: ({ file: picked }) => ({ path: picked.name, metadata: { owner: 'u' }, state: { id: 1, owner: 'u', key: picked.name } }),
+    onUploadComplete: ({ state }) => state.owner satisfies string,
+  });
+  uploadHandler({
+    bucket: value,
+    onBeforeUpload: async ({ file: picked }) => {
+      await Promise.resolve();
+      return { path: picked.name, state: { id: 1, owner: 'u' } };
+    },
+    onUploadComplete: ({ state }) => state.id satisfies number,
+  });
+  uploadHandler({
+    bucket: value,
+    context: (request) => requireUser(request),
+    onBeforeUpload: ({ ctx, file: picked }) => ({ path: `${ctx.id}/${picked.name}`, state: { owner: ctx.id } }),
+    onUploadComplete: ({ ctx, state }) => [ctx.id, state.owner satisfies string],
+  });
+  uploadHandler({
+    bucket: value,
+    context: (request) => requireUser(request),
+    onBeforeUpload: async ({ ctx }) => ({ path: ctx.id, state: { owner: ctx.id } }),
+    // @ts-expect-error state is what onBeforeUpload returned, and has no such member
+    onUploadComplete: ({ state }) => state.nope,
+  });
+  uploadHandler({
+    bucket: value,
+    onBeforeUpload: () => ({ path: 'p' }),
+    onUploadComplete: ({ state }) => state satisfies undefined,
+  });
+  uploadHandler({
+    bucket: value,
+    context: (request) => requireUser(request),
+    onBeforeUpload: ({ ctx }) => ({ path: ctx.id, state: { owner: ctx.id } }),
+    onUploadComplete: ({ state }) => state.owner satisfies string,
+    routes: { a: {}, b: { constraints: { maxSize: '1mb' } }, c: { onUploadComplete: ({ ctx }) => ctx.id } },
+  });
+  uploadHandler<Record<string, object>, undefined, void, undefined, { n: number }>({
+    bucket: value,
+    // @ts-expect-error an explicit state type is checked against what onBeforeUpload returns
+    onBeforeUpload: () => ({ path: 'p', state: { n: 'x' } }),
+    onUploadComplete: ({ state }) => void (state.n satisfies number),
+  });
+}
+
 type Legacy = UploadRoute<undefined, { legacy: boolean }, '/api/legacy'>;
 type Unnamed = UploadRoute<undefined, { any: true }>;
 type Dynamic = UploadRoute<undefined, { legacy: boolean }>;
@@ -281,6 +328,6 @@ function _useUploadCaveat(value: Bucket) {
 test('the handler types compile', () => {
   expect(typeof uploadHandler).toBe('function');
   expect(typeof useServerUpload).toBe('function');
-  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _routeUnions, _escapeHatches, _useUploadCaveat];
+  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _singleState, _routeUnions, _escapeHatches, _useUploadCaveat];
   void ({} as UploadCompleteArgs<Uploads>);
 });

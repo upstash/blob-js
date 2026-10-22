@@ -247,7 +247,7 @@ export type HandlerRoutes<TRoutes, TData, TInput> = string extends keyof TRoutes
   : { readonly [K in keyof TRoutes]: RouteBrand<InputOf<TRoutes[K], TInput>, DataOf<TRoutes[K], TData>> };
 
 /** @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx */
-export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends StandardSchema<any, any> | undefined> {
+export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends StandardSchema<any, any> | undefined, TState = undefined> {
   /**
    * Every route inherits it; a route may name its own. Omit it and the handler builds one from
    * `UPSTASH_BLOB_TOKEN`, once, the way `Bucket.fromEnv()` does -- so name a bucket when the token
@@ -285,7 +285,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
   /** Every route inherits it. A Standard Schema for the browser's `input`. */
   input?: TSchema;
   /** The default. A route with its own onBeforeUpload replaces it. */
-  onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<undefined> | Promise<BeforeResult<undefined>>;
+  onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<TState> | Promise<BeforeResult<TState>>;
   /**
    * The default. A route with its own onUploadComplete replaces it, and answers the browser with its
    * own return instead of this one.
@@ -296,7 +296,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    * replaced it), in which case it is kept and logged. It may run more than once, or never if the
    * browser stops before 'end', so write idempotently on `uploadId`.
    */
-  onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, undefined> & DirectCompleteExtras) => TData | Promise<TData>;
+  onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, TState> & DirectCompleteExtras) => TData | Promise<TData>;
   /**
    * The default. Sees every refusal, this handler's own included: return a BlobError or a Response to
    * answer with it, return nothing to leave the answer alone. It is the one place to log.
@@ -363,7 +363,8 @@ export function uploadHandler<
   TCtx = undefined,
   TData = void,
   TSchema extends StandardSchema<any, any> | undefined = undefined,
->(options: UploadHandlerOptions<TCtx, TRoutes, TData, TSchema>): UploadHandler<HandlerRoutes<TRoutes, TData, RouteInputOf<TSchema>>, Awaited<TCtx>> {
+  TState = undefined,
+>(options: UploadHandlerOptions<TCtx, TRoutes, TData, TSchema, TState>): UploadHandler<HandlerRoutes<TRoutes, TData, RouteInputOf<TSchema>>, Awaited<TCtx>> {
   const named = options.routes !== undefined;
   const definitions = (options.routes ?? { '': {} }) as unknown as Record<string, unknown>;
   if (named && Object.keys(definitions).length === 0) throw new TypeError('uploadHandler was given an empty routes map: name at least one route, or omit routes to make the handler the route');
