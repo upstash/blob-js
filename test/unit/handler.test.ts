@@ -533,7 +533,7 @@ describe('CORS probe', () => {
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain('http://localhost:3001');
       expect(warnings[0]).toContain("bucket's CORS origins");
-      expect(warnings[0]).toContain('`upstash blob cors bucket-id http://localhost:3001`');
+      expect(warnings[0]).toContain("`upstash blob cors bucket-id 'http://localhost:3001'`");
       expect(warnings[0]).toContain('Upstash Console');
 
       await fromOrigin(uploads, 'http://localhost:3001');
@@ -604,7 +604,7 @@ describe('CORS probe', () => {
       await fromOrigin(uploads, 'https://a.example.com$(id)');
       await settle();
       expect(warnings).toHaveLength(2);
-      expect(warnings[0]).toContain('`upstash blob cors bucket-id http://[::1]:3000`');
+      expect(warnings[0]).toContain("`upstash blob cors bucket-id 'http://[::1]:3000'`");
       expect(warnings[1]).toContain('`upstash blob cors bucket-id <origin>`');
     });
   });

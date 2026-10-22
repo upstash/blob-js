@@ -1,3 +1,5 @@
+import { corsCommand } from '../shared/errors.ts';
+
 /**
  * A browser upload PUTs straight to storage, so a bucket whose CORS list leaves out the page's origin
  * fails in the browser alone: the route answers 200, a curl against it succeeds, and the only trace
@@ -32,11 +34,8 @@ export function corsProbe(bucketId: string): (request: Request, url: string, hea
   };
 }
 
-/** The CLI command goes in the log only for an origin that is safe to paste into a shell. */
-const PLAIN_ORIGIN = /^https?:\/\/([a-z0-9.-]+|\[[0-9a-f:.]+\])(:\d+)?$/i;
-
 export function corsWarning(origin: string, bucketId: string): string {
-  const command = `upstash blob cors ${bucketId} ${PLAIN_ORIGIN.test(origin) ? origin : '<origin>'}`;
+  const command = corsCommand(bucketId, origin);
   return `[upstash-blob] storage refused the CORS preflight from ${origin}, so a browser upload from that origin will be blocked before any bytes are sent. If ${origin} is your app, add it to the bucket's CORS origins: run \`${command}\` followed by any origins to keep (it replaces the list), or use the Upstash Console under the bucket's CORS settings.`;
 }
 
