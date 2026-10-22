@@ -480,7 +480,7 @@ describe('a single PUT', () => {
     expect(sleeps).toEqual([]);
   });
 
-  test('a response that drops mid-body is a network failure, retried like one', async () => {
+  test('a success that drops mid-body is a network failure, retried like one', async () => {
     let ends = 0;
     const base = defaultRoute(3);
     const dropped = () => new Response(new ReadableStream({ start: (c) => c.error(new TypeError('terminated')) }));
@@ -494,7 +494,39 @@ describe('a single PUT', () => {
     expect(ends).toBe(2);
 
     onPhase = (body) => (body.phase === 'begin' ? dropped() : base(body));
-    await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'request_failed', status: 503, message: 'Could not reach the upload route' });
+    await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'request_failed', status: 503, message: "The upload route's response was cut off" });
+  });
+
+  test('a refusal that drops mid-body keeps its status and is not retried', async () => {
+    let ends = 0;
+    const base = defaultRoute(3);
+    const dropped = () => new Response(new ReadableStream({ start: (c) => c.error(new TypeError('terminated')) }), { status: 403 });
+    onPhase = (body) => {
+      if (body.phase !== 'end') return base(body);
+      ends++;
+      return dropped();
+    };
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await settle();
+    await expect(task.done).rejects.toMatchObject({ code: 'forbidden', status: 403 });
+    expect(ends).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  test('a throw from headers is a 400 carrying the app error, and the route is never called', async () => {
+    onPhase = defaultRoute(3);
+    const cause = new Error('no token');
+    const failed = await upload(png(), {
+      route: '/api/upload',
+      headers: () => {
+        throw cause;
+      },
+    }).done.catch((e) => e);
+    expect(failed).toMatchObject({ code: 'request_failed', status: 400, message: 'No token' });
+    expect(failed.cause).toBe(cause);
+    expect(calls).toEqual([]);
   });
 
   test('the controls answer false instead of throwing when they cannot act', async () => {

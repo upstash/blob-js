@@ -659,6 +659,20 @@ test('server upload cancel aborts the request and reports canceled', async () =>
   expect(hook.current.upload!.cancel()).toBe(false);
 });
 
+test('an abort the browser made itself, not cancel(), fails a server upload as a 503', async () => {
+  const hook = await render(() => useServerUpload('/api/avatar'));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const xhr = await nextXhr();
+  // Page unload or window.stop(): onabort fires with no signal of ours behind it.
+  xhr.onabort?.({});
+  await flush();
+  const upload = hook.current.upload!;
+  expect(upload.status === 'error' && upload.error.code).toBe('request_failed');
+  expect(upload.status === 'error' && upload.error.status).toBe(503);
+});
+
 test('server upload start with a nullish file or body returns null', async () => {
   const hook = await render(() => useServerUpload('/api/avatar'));
   let a: unknown = 'unset';
