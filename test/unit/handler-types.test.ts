@@ -252,12 +252,34 @@ function _singleState(value: Bucket) {
     onBeforeUpload: () => ({ path: 'p' }),
     onUploadComplete: ({ state }) => state satisfies undefined,
   });
+  // With routes, a route may replace onBeforeUpload alone, so the handler's state is not typed there.
   uploadHandler({
     bucket: value,
-    context: (request) => requireUser(request),
-    onBeforeUpload: ({ ctx }) => ({ path: ctx.id, state: { owner: ctx.id } }),
-    onUploadComplete: ({ state }) => state.owner satisfies string,
-    routes: { a: {}, b: { constraints: { maxSize: '1mb' } }, c: { onUploadComplete: ({ ctx }) => ctx.id } },
+    // @ts-expect-error route b returns no state to the handler's onUploadComplete
+    onBeforeUpload: () => ({ path: 'p', state: { owner: 'u' } }),
+    onUploadComplete: ({ state }) => void state.owner.toUpperCase(),
+    routes: { a: {}, b: { onBeforeUpload: () => ({ path: 'other' }) } },
+  });
+  const other = uploadRoute()({ onBeforeUpload: () => ({ path: 'x', state: { count: 1 } }) });
+  uploadHandler({
+    bucket: value,
+    // @ts-expect-error route other returns its own state to the handler's onUploadComplete
+    onBeforeUpload: () => ({ path: 'p', state: { owner: 'u' } }),
+    onUploadComplete: ({ state }) => void state.owner.toUpperCase(),
+    routes: { a: {}, other },
+  });
+  uploadHandler({
+    bucket: value,
+    // @ts-expect-error a plain route's onUploadComplete is typed state: undefined
+    onBeforeUpload: () => ({ path: 'p', state: { owner: 'u' } }),
+    routes: { a: { onUploadComplete: ({ state }) => state satisfies undefined } },
+  });
+  uploadHandler({
+    bucket: value,
+    onBeforeUpload: () => ({ path: 'p' }),
+    // @ts-expect-error an annotation does not type the handler's state either
+    onUploadComplete: ({ state }: UploadCompleteArgs<undefined, string, { owner: string }>) => state.owner,
+    routes: { a: {} },
   });
   uploadHandler<Record<string, object>, undefined, void, undefined, { n: number }>({
     bucket: value,

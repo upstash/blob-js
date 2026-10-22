@@ -246,6 +246,14 @@ export type HandlerRoutes<TRoutes, TData, TInput> = string extends keyof TRoutes
   ? { readonly '': RouteBrand<TInput, TData> }
   : { readonly [K in keyof TRoutes]: RouteBrand<InputOf<TRoutes[K], TInput>, DataOf<TRoutes[K], TData>> };
 
+/**
+ * The handler's own `state` is typed only when the handler is the route. With `routes`, a route may
+ * replace onBeforeUpload alone and hand the default onUploadComplete another state, or none.
+ * Only onBeforeUpload's return reads it: in a callback parameter, `TRoutes` would be fixed before
+ * `routes` is read. onUploadComplete takes `NoInfer<TState>`, so annotating it cannot type it either.
+ */
+type HandlerState<TRoutes, TState> = string extends keyof TRoutes ? TState : undefined;
+
 /** @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx */
 export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends StandardSchema<any, any> | undefined, TState = undefined> {
   /**
@@ -285,7 +293,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
   /** Every route inherits it. A Standard Schema for the browser's `input`. */
   input?: TSchema;
   /** The default. A route with its own onBeforeUpload replaces it. */
-  onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<TState> | Promise<BeforeResult<TState>>;
+  onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<HandlerState<TRoutes, TState>> | Promise<BeforeResult<HandlerState<TRoutes, TState>>>;
   /**
    * The default. A route with its own onUploadComplete replaces it, and answers the browser with its
    * own return instead of this one.
@@ -296,7 +304,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    * replaced it), in which case it is kept and logged. It may run more than once, or never if the
    * browser stops before 'end', so write idempotently on `uploadId`.
    */
-  onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, TState> & DirectCompleteExtras) => TData | Promise<TData>;
+  onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, NoInfer<TState>> & DirectCompleteExtras) => TData | Promise<TData>;
   /**
    * The default. Sees every refusal, this handler's own included: return a BlobError or a Response to
    * answer with it, return nothing to leave the answer alone. It is the one place to log.
