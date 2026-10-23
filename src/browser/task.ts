@@ -5,7 +5,7 @@ import { abortError, clock } from './clock.ts';
 import { acquire } from './pool.ts';
 import { backoffMs, classify, MAX_ATTEMPTS, MAX_NETWORK_ATTEMPTS, NO_BYTES_NETWORK_ATTEMPTS, STALL_TIMEOUT_MS } from './retry.ts';
 import { clearPending, fingerprint, readPending, writePending } from './store.ts';
-import { NetworkError, sendXhr } from './xhr.ts';
+import { NetworkError, requireXhr, sendXhr } from './xhr.ts';
 
 export type HeadersProvider = () => Record<string, string> | Promise<Record<string, string>>;
 
@@ -60,12 +60,13 @@ interface InFlight {
 let counter = 0;
 
 export function createTask(file: File, options: UploadOptions, autoStart: boolean): InternalTask {
+  requireXhr();
   const task = new Task(file, options);
   if (autoStart) task.start();
   return task;
 }
 
-function isAbort(e: unknown): boolean {
+export function isAbort(e: unknown): boolean {
   return typeof e === 'object' && e !== null && (e as { name?: string }).name === 'AbortError';
 }
 
@@ -271,7 +272,9 @@ class Task implements InternalTask {
       },
       (e) => {
         if (this.status === 'canceled' || isAbort(e)) return;
-        this.error = BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), status: 503, cause: e });
+        // A network failure or the app's own headers() throw is a BlobError by the time it gets here.
+        // What is not is a bug, and that is not a 503 the caller should wait out.
+        this.error = BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), cause: e });
         this.status = 'error';
         this.inflight.clear();
         this.notify();
@@ -540,19 +543,27 @@ class Task implements InternalTask {
 
   private async routeCall(body: Record<string, unknown>, signal: AbortSignal | undefined, attempts = ROUTE_ATTEMPTS): Promise<unknown> {
     let last: BlobError | undefined;
+    // Outside the try too: an input JSON cannot carry is the caller's bug, not an unreachable route.
+    const payload = JSON.stringify(body);
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (signal?.aborted) throw abortError();
-      // Outside the try on purpose. headers() is the app's own hook and is re-read per attempt, so a
+      // Outside the fetch try on purpose. headers() is the app's own hook and is re-read per attempt, so a
       // throw from it is how an app refuses its own upload -- a token it could not refresh, a
       // precondition that failed. Caught below it would be reworded as a network fault and retried
-      // three times; here it ends the upload immediately carrying the app's error.
-      const authored = await resolveHeaders(this.options.headers);
+      // three times; here it ends the upload immediately carrying the app's error, a 400 like the
+      // same throw under useServerUpload.
+      let authored: Record<string, string>;
+      try {
+        authored = await resolveHeaders(this.options.headers);
+      } catch (e) {
+        throw BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), status: 400, cause: e });
+      }
       let res: Response;
       try {
         res = await fetch(this.options.route, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...authored },
-          body: JSON.stringify(body),
+          body: payload,
           signal,
         });
       } catch (e) {
@@ -562,7 +573,21 @@ class Task implements InternalTask {
         await clock.sleep(backoffMs(attempt), signal);
         continue;
       }
-      const text = await res.text();
+      let text: string;
+      try {
+        text = await res.text();
+      } catch (e) {
+        if (isAbort(e) || signal?.aborted) throw abortError();
+        // A refusal whose body dropped is still that refusal. Only a success cut off mid-body is a
+        // network failure, retried like one.
+        if (res.ok) {
+          last = new BlobError('request_failed', { message: "the upload route's response was cut off", status: 503, cause: e });
+          if (attempt === attempts - 1) break;
+          await clock.sleep(backoffMs(attempt), signal);
+          continue;
+        }
+        text = '';
+      }
       let json: unknown;
       try {
         json = text ? JSON.parse(text) : undefined;

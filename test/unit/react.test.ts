@@ -5,7 +5,7 @@ import { clock } from '../../src/browser/clock.ts';
 import { poolState } from '../../src/browser/pool.ts';
 import { BlobError, uploadHooks, useServerUpload, useUpload } from '../../src/react/index.ts';
 import type { UploadRoute } from '../../src/shared/types.ts';
-import { installRouter, installXhr, ManualXhr } from '../helpers/xhr.ts';
+import { installRouter, installXhr, ManualXhr, removeXhr } from '../helpers/xhr.ts';
 
 // bun imports every test file before running any of them, and happy-dom's globals are read-only
 // once installed, so registering at import time breaks a sibling file that stubs localStorage.
@@ -659,6 +659,20 @@ test('server upload cancel aborts the request and reports canceled', async () =>
   expect(hook.current.upload!.cancel()).toBe(false);
 });
 
+test('an abort the browser made itself, not cancel(), fails a server upload as a 503', async () => {
+  const hook = await render(() => useServerUpload('/api/avatar'));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const xhr = await nextXhr();
+  // Page unload or window.stop(): onabort fires with no signal of ours behind it.
+  xhr.onabort?.({});
+  await flush();
+  const upload = hook.current.upload!;
+  expect(upload.status === 'error' && upload.error.code).toBe('request_failed');
+  expect(upload.status === 'error' && upload.error.status).toBe(503);
+});
+
 test('server upload start with a nullish file or body returns null', async () => {
   const hook = await render(() => useServerUpload('/api/avatar'));
   let a: unknown = 'unset';
@@ -846,6 +860,22 @@ test('a throw from headers ends a server upload before any bytes are sent', asyn
   const upload = hook.current.upload!;
   expect(upload.status === 'error' && upload.error.code).toBe('forbidden');
   expect(xhrs).toHaveLength(0);
+});
+
+/* ------------------------------------------------------- not a browser -- */
+
+test('without XMLHttpRequest, both hooks throw invalid_input from start and list nothing', async () => {
+  const hook = await render(() => ({ direct: useUpload<UploadRoute<undefined, unknown>>(route), proxied: useServerUpload('/api/avatar') }));
+  await flush();
+  calls = [];
+  restore.push(removeXhr());
+  expect(typeof XMLHttpRequest).toBe('undefined');
+  expect(() => hook.current.direct.start({ file: png() })).toThrow(expect.objectContaining({ code: 'invalid_input', status: 400 }));
+  expect(() => hook.current.proxied.start({ file: png() })).toThrow(expect.objectContaining({ code: 'invalid_input', status: 400 }));
+  await flush();
+  expect(hook.current.direct.uploads).toHaveLength(0);
+  expect(hook.current.proxied.uploads).toHaveLength(0);
+  expect(calls).toHaveLength(0);
 });
 
 /* ------------------------------------------------------------- finishing -- */
