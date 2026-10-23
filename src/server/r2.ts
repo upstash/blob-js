@@ -160,13 +160,15 @@ export class R2 {
     let refreshed = false;
     for (let attempt = 1; ; attempt++) {
       let res: Response;
+      let signedWith: TempCredentials;
       try {
-        res = await this.send(init);
+        [res, signedWith] = await this.send(init);
       } catch (e) {
         // A BlobError here came from minting a credential, which has its own retry policy and its
         // own verdict; only a dropped connection is this loop's to retry.
         if (BlobError.is(e) || attempt >= attempts || init.signal?.aborted) throw e;
-        await sleep(this.wait(attempt, null));
+        await sleep(this.wait(attempt, null), init.signal);
+        if (init.signal?.aborted) throw init.signal.reason;
         continue;
       }
       if (res.status === 403 && !refreshed && !streaming) {
@@ -176,22 +178,23 @@ export class R2 {
         const text = res.body ? await res.text() : '';
         if (outlived || CREDENTIAL_REJECTED.test(text)) {
           refreshed = true;
-          this.creds.invalidate();
+          this.creds.invalidate(signedWith);
           continue;
         }
         return new Response(text, { status: res.status, statusText: res.statusText, headers: { 'content-type': res.headers.get('content-type') ?? 'application/xml' } });
       }
       if (attempt < attempts && (res.status === 429 || res.status >= 500) && !init.signal?.aborted) {
         await res.body?.cancel();
-        await sleep(this.wait(attempt, res.headers.get('retry-after')));
+        await sleep(this.wait(attempt, res.headers.get('retry-after')), init.signal);
+        if (init.signal?.aborted) throw init.signal.reason;
         continue;
       }
       return res;
     }
   }
 
-  private async send(init: R2RequestInit): Promise<Response> {
-    const c = await this.creds.get(this.retry);
+  private async send(init: R2RequestInit): Promise<[Response, TempCredentials]> {
+    const c = await untilAborted(this.creds.get(this.retry), init.signal);
     const url = await this.objectUrl(init.path, init.query);
     const headers = await signHeaders(
       { accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, sessionToken: c.sessionToken, region: c.region },
@@ -203,7 +206,7 @@ export class R2 {
     const body = init.body ?? undefined;
     const extra: RequestInit & { duplex?: 'half' } = {};
     if (body instanceof ReadableStream) extra.duplex = 'half';
-    return fetch(url, { method: init.method, headers, body, signal: init.signal, ...extra });
+    return [await fetch(url, { method: init.method, headers, body, signal: init.signal, ...extra }), c];
   }
 
   /**
@@ -377,8 +380,32 @@ async function presignedFrom(res: Response): Promise<Presigned> {
   return { url: body!.url as string, expiresAt: new Date(expiresAt * 1000) };
 }
 
-export function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+/**
+ * Stops waiting on `p` when `signal` aborts, without cancelling it: a credential fetch is shared by
+ * every request on the token, and the others still want its answer.
+ */
+function untilAborted<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+/** Resolves early when `signal` aborts, so a cancelled request does not wait out its backoff. */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((r) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      r();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 }
 
 /** Full jitter, doubling from `base` ms per attempt and capped at 4 s; a Retry-After wins when given. */
