@@ -1,5 +1,6 @@
 import { BlobError } from '../shared/errors.ts';
 import { telemetryHeaders } from '../shared/telemetry.ts';
+import type { RetryPolicy } from './r2.ts';
 import { AGENT_URL } from './token.ts';
 
 export interface TempCredentials {
@@ -22,6 +23,7 @@ const MINT_TIMEOUT_MS = 10_000;
 // A Retry-After longer than this is the agent asking for a pause no request can wait out: the caller
 // is told to come back rather than blocked for the whole of it.
 const MAX_MINT_WAIT_S = 10;
+const MINT_RETRIES = 3;
 
 export class CredentialCache {
   private current: TempCredentials | undefined;
@@ -33,9 +35,13 @@ export class CredentialCache {
     private readonly enableTelemetry = true,
   ) {}
 
-  get(): Promise<TempCredentials> {
+  /**
+   * Buckets on one token share this cache, so a mint already in flight is joined under the retry
+   * policy of the request that started it.
+   */
+  get(retry: RetryPolicy = {}): Promise<TempCredentials> {
     if (this.current && Date.now() < this.refreshAt) return Promise.resolve(this.current);
-    this.inflight ??= this.mint().finally(() => {
+    this.inflight ??= this.mint(retry).finally(() => {
       this.inflight = undefined;
     });
     return this.inflight;
@@ -57,7 +63,7 @@ export class CredentialCache {
     this.refreshAt = 0;
   }
 
-  private async mint(attempt = 0): Promise<TempCredentials> {
+  private async mint(retry: RetryPolicy, attempt = 0): Promise<TempCredentials> {
     const res = await fetch(`${AGENT_URL}/v1/credentials`, {
       method: 'POST',
       headers: { authorization: `Bearer ${this.token}`, ...(this.enableTelemetry ? telemetryHeaders() : {}) },
@@ -67,14 +73,15 @@ export class CredentialCache {
     if (res.status === 429 || res.status === 503) {
       // Number(null) is 0, so a missing Retry-After would otherwise retry immediately, three times.
       const parsed = Number(res.headers.get('retry-after'));
-      const asked = Number.isFinite(parsed) && parsed > 0 ? parsed : 2;
+      const given = Number.isFinite(parsed) && parsed > 0;
+      const asked = given ? parsed : 2;
       await res.body?.cancel();
       if (asked > MAX_MINT_WAIT_S) {
         throw new BlobError('mint_backoff', { message: `the credential service asked for ${asked}s of backoff`, retryAfter: asked });
       }
-      if (attempt < 3) {
-        await new Promise((r) => setTimeout(r, asked * 1000));
-        return this.mint(attempt + 1);
+      if (attempt < (retry.retries ?? MINT_RETRIES)) {
+        await new Promise((r) => setTimeout(r, given || !retry.backoff ? asked * 1000 : waitMs(retry.backoff(attempt))));
+        return this.mint(retry, attempt + 1);
       }
     }
 
@@ -101,6 +108,14 @@ export class CredentialCache {
     this.current = creds;
     return creds;
   }
+}
+
+// setTimeout fires at once past this, rather than waiting.
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/** A caller's backoff as a delay setTimeout takes as meant: not a positive number is no wait. */
+export function waitMs(ms: number): number {
+  return Number.isFinite(ms) && ms > 0 ? Math.min(ms, MAX_TIMEOUT_MS) : 0;
 }
 
 // Keyed by token rather than held per Bucket: `Bucket.fromEnv()` per request is the documented shape
