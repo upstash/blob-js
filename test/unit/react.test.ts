@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:te
 import { act, createElement, StrictMode } from 'react';
 import { clock } from '../../src/browser/clock.ts';
 import { poolState } from '../../src/browser/pool.ts';
+import { loadFacts } from '../../src/react/constraints.ts';
 import { BlobError, uploadHooks, useServerUpload, useUpload } from '../../src/react/index.ts';
 import type { UploadRoute } from '../../src/shared/types.ts';
 import { installRouter, installXhr, ManualXhr } from '../helpers/xhr.ts';
@@ -864,6 +865,20 @@ test('a direct upload is finishing between the last byte and the end response', 
   const upload = hook.current.upload!;
   // Every byte is sent, phase 'end' is in flight, and percent is clamped to 99 for this stretch.
   expect(upload.status === 'done' || upload.status === 'finishing').toBe(true);
+});
+
+test("the route's protocol is read off its constraints, and 1 when it sends none", async () => {
+  const unused = async () => jsonResponse({}, 405);
+  const cases: [unknown, number][] = [[2, 2], [undefined, 1], ['2', 1], [0, 1]];
+  const urls = cases.map(() => `/api/protocol/${++routeId}`);
+  const missing = `/api/protocol/${++routeId}`;
+  const routes: Parameters<typeof installRouter>[0] = { [missing]: { GET: async () => jsonResponse({}, 404), POST: unused } };
+  cases.forEach(([served], i) => {
+    routes[urls[i]!] = { GET: async () => jsonResponse({ ...(served === undefined ? {} : { protocol: served }), constraints: {} }), POST: unused };
+  });
+  restore.push(installRouter(routes));
+  for (const [i, [, expected]] of cases.entries()) expect((await loadFacts(urls[i]!, undefined)).protocol).toBe(expected);
+  expect(await loadFacts(missing, undefined)).toEqual({ constraints: undefined, protocol: 1 });
 });
 
 /* -------------------------------------------------------- uploadHooks -- */
