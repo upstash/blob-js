@@ -477,7 +477,7 @@ test('a 32MiB upload limit accepts the exact file size and rejects one byte over
     constraints: { maxSize: '32MiB' },
     onBeforeUpload: () => ({ path: 'large/file.bin' }),
   });
-  expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ constraints: { maxSize: 33_554_432 } });
+  expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ protocol: 1, constraints: { maxSize: 33_554_432 } });
   const begin = await post(uploads, undefined, { phase: 'begin', file: { name: 'file.bin', type: 'application/octet-stream', size: 33_554_432 } });
   expect(begin.status).toBe(200);
   expect((await begin.json()).upload.multipart).toBe(true);

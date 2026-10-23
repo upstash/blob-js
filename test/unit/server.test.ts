@@ -921,7 +921,8 @@ describe('uploadHandler: the direct transport', () => {
 
   test('the protocol is on GET and every answer, and nothing is refused over it', async () => {
     resetCredentialCaches();
-    r2Handler = beginR2;
+    // cancel HEADs a single-PUT upload's object: answer that nothing was stored.
+    r2Handler = (call) => (call.method === 'HEAD' ? new Response(null, { status: 404 }) : beginR2(call));
     const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
     expect((await (await route.GET(new Request('https://app.test/api/upload'))).json()).protocol).toBe(1);
     const file = { name: 'a.png', type: 'image/png', size: 10 };
