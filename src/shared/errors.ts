@@ -1,3 +1,4 @@
+/** @see node_modules/@upstash/blob/docs/reference/errors.mdx */
 export type BlobErrorCode =
   | 'not_found'
   | 'already_exists'
@@ -61,7 +62,7 @@ const DEFAULT_MESSAGE: Record<BlobErrorCode, string> = {
 };
 
 const DEFAULT_HINT: Partial<Record<BlobErrorCode, string>> = {
-  signature_mismatch: 'a 403 from R2 usually means the body length or type differs from the signature',
+  signature_mismatch: 'the upload did not match what was authorized, usually a different size or content type',
   length_required: 'pass { size } or { maxSize } so the length is known before the first byte',
 };
 
@@ -120,6 +121,7 @@ function sentenceCase(message: string): string {
 // e.message never carries a credential, a token, or an internal path. Every message assembled
 // here comes from a code, a caller-supplied string, an HTTP status, or the signing service's reason;
 // a suspended or read-only bucket's notice is on cause instead, since it is for the owner.
+/** @see node_modules/@upstash/blob/docs/reference/errors.mdx */
 export class BlobError extends Error {
   readonly code: BlobErrorCode;
   readonly status: number;

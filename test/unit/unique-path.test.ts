@@ -1,85 +1,107 @@
 import { describe, expect, test } from 'bun:test';
 import { uniquePath } from '../../src/server/unique-path.ts';
+import { encodeKey } from '../../src/server/keys.ts';
 
 const B58 = '[1-9A-HJ-NP-Za-km-z]';
 const SUFFIX = `${B58}{8}`;
-const stripSuffix = (path: string) => path.replace(new RegExp(`-${SUFFIX}`), '');
+const stripSuffix = (path: string) => path.replace(new RegExp(`-${SUFFIX}(?=\\.[a-z0-9]{1,8}$|$)`, 'i'), '');
 
 describe('uniquePath', () => {
-  test('slugs a browser filename and keeps its extension', () => {
-    expect(uniquePath`${'Q3 Report (final).pdf'}`).toMatch(new RegExp(`^q3-report-final-${SUFFIX}\\.pdf$`));
+  test('preserves a browser filename and keeps its extension', () => {
+    expect(uniquePath`${'Q3 Report (final).pdf'}`).toMatch(new RegExp(`^Q3 Report \\(final\\)-${SUFFIX}\\.pdf$`));
+  });
+
+  test('preserves the exact owner prefix used for authorization', () => {
+    const owner = 'Alice_123';
+    const path = uniquePath`users/${owner}/${'Q3 Report.pdf'}`;
+    expect(path.startsWith(`users/${owner}/`)).toBe(true);
+    expect(stripSuffix(path)).toBe('users/Alice_123/Q3 Report.pdf');
+    expect(stripSuffix(uniquePath`users/${'alice-123'}/${'Q3 Report.pdf'}`)).not.toBe(stripSuffix(path));
   });
 
   test('literal slashes are structure, values fill the segments', () => {
     expect(uniquePath`chat/${'42'}/${'q3-report.pdf'}`).toMatch(new RegExp(`^chat/42/q3-report-${SUFFIX}\\.pdf$`));
   });
 
-  test('a value cannot contribute directory structure', () => {
-    expect(uniquePath`chat/${'../admin/x.png'}`).toMatch(new RegExp(`^chat/x-${SUFFIX}\\.png$`));
-    expect(uniquePath`a/${'b/c'}`).toMatch(new RegExp(`^a/c-${SUFFIX}$`));
-    expect(uniquePath`${'a/b\\c.tar.gz'}`).toMatch(new RegExp(`^c-tar-${SUFFIX}\\.gz$`));
+  test('accepts a plain string', () => {
+    expect(uniquePath('chat/42/q3-report.pdf')).toMatch(new RegExp(`^chat/42/q3-report-${SUFFIX}\\.pdf$`));
   });
 
-  test('unicode letters and digits survive', () => {
-    expect(uniquePath`${'café.pdf'}`).toMatch(new RegExp(`^café-${SUFFIX}\\.pdf$`));
-    expect(uniquePath`${'Ünïcode ٣.pdf'}`).toMatch(new RegExp(`^ünïcode-٣-${SUFFIX}\\.pdf$`));
+  test('a prefix with a trailing slash can be interpolated', () => {
+    const prefix = 'agent-bench/run-1/';
+    expect(stripSuffix(uniquePath`${prefix}${'alice'}/${'a.png'}`)).toBe('agent-bench/run-1/alice/a.png');
+    expect(stripSuffix(uniquePath(`${prefix}alice/a.png`))).toBe('agent-bench/run-1/alice/a.png');
   });
 
-  test('composed and decomposed forms give the same path', () => {
-    const composed = stripSuffix(uniquePath`${'caf\u00e9.pdf'}`);
-    const decomposed = stripSuffix(uniquePath`${'cafe\u0301.pdf'}`);
-    expect(composed).toBe('café.pdf');
-    expect(decomposed).toBe(composed);
+  test('does not rewrite or reject slashes in values; the suffix goes on the final segment', () => {
+    expect(stripSuffix(uniquePath`chat/${'b/c.png'}`)).toBe('chat/b/c.png');
+    expect(uniquePath`chat/${'b/c.png'}`).toMatch(new RegExp(`^chat/b/c-${SUFFIX}\\.png$`));
   });
 
-  test('non-latin scripts keep their stem; symbols and emoji separate', () => {
-    expect(uniquePath`${'a日本b.pdf'}`).toMatch(new RegExp(`^a日本b-${SUFFIX}\\.pdf$`));
-    expect(uniquePath`${'日本語.pdf'}`).toMatch(new RegExp(`^日本語-${SUFFIX}\\.pdf$`));
-    expect(uniquePath`${'a🙂b&c.pdf'}`).toMatch(new RegExp(`^a-b-c-${SUFFIX}\\.pdf$`));
+  test('traversal is refused where the key is used, not here', () => {
+    for (const path of [uniquePath`uploads/${'..'}/${'x.png'}`, uniquePath('a/./b.png'), uniquePath('../x.png')]) {
+      expect(() => encodeKey(path)).toThrow(TypeError);
+    }
+    // An invalid escape leaves the cooked chunk undefined; it must not print as "undefined".
+    expect(uniquePath`up\users/${'a.png'}`).toMatch(new RegExp(`^a-${SUFFIX}\\.png$`));
+    expect(uniquePath('a/..')).toMatch(new RegExp(`^a/\\.\\.-${SUFFIX}$`));
+    expect(encodeKey(uniquePath`${'a\\b'}/${'c\nd.png'}`)).not.toMatch(/[\\\n]/);
   });
 
-  test('a value that slugs to empty becomes file', () => {
+  test('preserves unicode, punctuation, emoji and format characters', () => {
+    for (const name of ['café.pdf', 'Ünïcode ٣.pdf', '日本語.pdf', 'a🙂b&c.pdf', '👩‍💻.png', 'a\u200bb.png', '!!! ***']) {
+      expect(stripSuffix(uniquePath`${name}`)).toBe(name);
+    }
+  });
+
+  test('preserves distinct Unicode normalization forms in owner IDs and filenames', () => {
+    for (const owner of ['caf\u00e9', 'cafe\u0301']) {
+      const filename = `${owner}.pdf`;
+      const path = uniquePath`users/${owner}/${filename}`;
+      expect(path.startsWith(`users/${owner}/`)).toBe(true);
+      expect(stripSuffix(path)).toBe(`users/${owner}/${filename}`);
+    }
+  });
+
+  test('an empty final filename becomes file', () => {
     expect(uniquePath`${''}`).toMatch(new RegExp(`^file-${SUFFIX}$`));
-    expect(uniquePath`${'!!! ***'}`).toMatch(new RegExp(`^file-${SUFFIX}$`));
+    expect(uniquePath``).toMatch(new RegExp(`^file-${SUFFIX}$`));
   });
 
-  test('the stem is capped at 64 chars', () => {
-    const path = uniquePath`${`${'a'.repeat(900)}.png`}`;
-    expect(path).toMatch(new RegExp(`^a{64}-${SUFFIX}\\.png$`));
-    expect(stripSuffix(path)).toBe(`${'a'.repeat(64)}.png`);
+  test('a leading dot alone does not make a filename an empty stem', () => {
+    expect(uniquePath`${'.env'}`).toMatch(new RegExp(`^\\.env-${SUFFIX}$`));
+    expect(uniquePath`${'.env.local'}`).toMatch(new RegExp(`^\\.env-${SUFFIX}\\.local$`));
   });
 
-  test('the cap does not leave a trailing separator', () => {
-    expect(uniquePath`${`${'a'.repeat(63)} b`}`).toMatch(new RegExp(`^a{63}-${SUFFIX}$`));
+  test('does not truncate long owner IDs or filenames', () => {
+    const owner = 'A_'.repeat(80);
+    const filename = `${'a'.repeat(900)}.png`;
+    expect(stripSuffix(uniquePath`${owner}/${filename}`)).toBe(`${owner}/${filename}`);
   });
 
-  test('extensions are lowercased', () => {
-    expect(uniquePath`${'REPORT.PDF'}`).toMatch(new RegExp(`^report-${SUFFIX}\\.pdf$`));
+  test('preserves extension case', () => {
+    expect(uniquePath`${'REPORT.PDF'}`).toMatch(new RegExp(`^REPORT-${SUFFIX}\\.PDF$`));
   });
 
-  test('only the final extension survives', () => {
-    expect(uniquePath`${'x.exe.png'}`).toMatch(new RegExp(`^x-exe-${SUFFIX}\\.png$`));
+  test('adds the suffix before the final extension, preserving earlier dots', () => {
+    expect(uniquePath`${'x.exe.png'}`).toMatch(new RegExp(`^x\\.exe-${SUFFIX}\\.png$`));
   });
 
-  test('an extension longer than 8 chars is not an extension', () => {
-    expect(uniquePath`${'x.superlongext'}`).toMatch(new RegExp(`^x-superlongext-${SUFFIX}$`));
+  test('an extension longer than 8 chars is kept in the stem', () => {
+    expect(uniquePath`${'x.superlongext'}`).toMatch(new RegExp(`^x\\.superlongext-${SUFFIX}$`));
   });
 
   test('a value with no extension gets no dot', () => {
-    expect(uniquePath`avatar/${'user name'}`).toMatch(new RegExp(`^avatar/user-name-${SUFFIX}$`));
+    expect(uniquePath`avatar/${'user name'}`).toMatch(new RegExp(`^avatar/user name-${SUFFIX}$`));
   });
 
   test('a literal basename extension is recognised', () => {
     expect(uniquePath`foo/${'x'}/bar.png`).toMatch(new RegExp(`^foo/x/bar-${SUFFIX}\\.png$`));
   });
 
-  test('control and format characters are stripped', () => {
-    expect(uniquePath`${'a\u200bb\u202ec.png'}`).toMatch(new RegExp(`^abc-${SUFFIX}\\.png$`));
-    expect(uniquePath`${'a\nb.png'}`).toMatch(new RegExp(`^ab-${SUFFIX}\\.png$`));
-  });
-
-  test('literal chunks are trimmed of surrounding whitespace', () => {
-    expect(uniquePath`  photos/${'a.png'}  `).toMatch(new RegExp(`^photos/a-${SUFFIX}\\.png$`));
+  test('preserves whitespace in literal chunks and interpolations', () => {
+    expect(stripSuffix(uniquePath`  photos/${' a.png'}  `)).toBe('  photos/ a.png  ');
+    expect(stripSuffix(uniquePath`photo ${'a'}.png`)).toBe('photo a.png');
   });
 
   test('non-string values are stringified', () => {

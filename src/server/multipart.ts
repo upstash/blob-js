@@ -2,7 +2,7 @@ import { BlobError } from '../shared/errors.ts';
 import { formatBytes, parseSize, type Size } from '../shared/units.ts';
 
 /**
- * Decimal, like every user-facing size. One line for both halves of the SDK: `bucket.put()` and a
+ * The default threshold is decimal. One line for both halves of the SDK: `bucket.put()` and a
  * direct browser upload each send a body under this as a single PUT and split anything over it.
  *
  * Parts are three round trips and one more per chunk where a PUT is one, and an upload begun and
@@ -18,6 +18,7 @@ export const SINGLE_PUT_MAX = 5 * 1024 * 1024 * 1024;
 /**
  * `true` always parts, `false` never does, a size is the threshold to use instead of the default.
  * @see MULTIPART_THRESHOLD
+ * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
  */
 export type MultipartOption = boolean | Size;
 
@@ -54,4 +55,16 @@ export function partSizeFor(size: number): number {
 
 export function partCount(size: number, partSize: number): number {
   return Math.max(1, Math.ceil(size / partSize));
+}
+
+// Every part is buffered whole so a failed one can be sent again, and one more fills while the rest
+// are in flight, so each costs its size in memory. Four overlap the round trips the way the aws-sdk
+// does; past 12 MiB parts (bodies over about 3 GB) fewer go at once to stay within the budget, down to
+// one from 22 MiB parts (about 5.5 GB), and one past 32 MiB, where even that pair exceeds it.
+const PART_CONCURRENCY = 4;
+const PART_BUFFER_BUDGET = 64 * MIB;
+
+/** Parts sent at once for this part size: up to four, with the one filling, within 64 MiB; never under one. */
+export function partConcurrencyFor(partSize: number): number {
+  return Math.max(1, Math.min(PART_CONCURRENCY, Math.floor(PART_BUFFER_BUDGET / partSize) - 1));
 }

@@ -35,7 +35,10 @@ export interface UnboundUploadHooks {
   useUpload: typeof useUpload;
 }
 
-/** Configure defaults and, optionally, bind `useUpload` to an upload handler's route map. */
+/**
+ * Configure defaults and, optionally, bind `useUpload` to an upload handler's route map.
+ * @see node_modules/@upstash/blob/docs/uploads/upload-client.mdx
+ */
 export function uploadHooks<T = never>(defaults?: UploadDefaults): [T] extends [never] ? UnboundUploadHooks : UploadHooks<T>;
 export function uploadHooks(defaults: UploadDefaults = {}): any {
   const merge = (options: any) => ({

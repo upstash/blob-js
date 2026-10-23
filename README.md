@@ -89,7 +89,7 @@ export const uploads = uploadHandler({
   onBeforeUpload: async ({ request, file }) => {
     const user = await getUser(request);
     if (!user) throw new BlobError('unauthorized'); // the 401; nothing is signed
-    return { path: uniquePath`${user.id}/${file.name}`, metadata: { owner: user.id } };
+    return { path: uniquePath(`${user.id}/${file.name}`), metadata: { owner: user.id } };
   },
 
   onUploadComplete: async ({ metadata, url, uploadId }) => {
@@ -103,6 +103,13 @@ export const uploads = uploadHandler({
 // app/api/upload/route.ts
 export const { GET, POST } = uploads;
 ```
+
+`uniquePath` adds an eight-character random suffix to the final filename and keeps everything
+else as given: `Alice_123/Q3 Report.pdf` becomes `Alice_123/Q3 Report-<random>.pdf`. It does not
+lowercase, normalize Unicode, trim or truncate values, and it accepts slashes anywhere, so a
+prefix goes in as is: ``uniquePath(`${prefix}${user.id}/${file.name}`)``. Paths with `.` or `..` segments are refused
+when used. Store the returned path and authorize reads and deletes using the stored owner and
+exact path.
 
 ```tsx
 'use client';
@@ -160,7 +167,12 @@ the bucket until it expires. Use `signedReadUrl()` and `signedUploadUrl()`.
 Everything throws a `BlobError` with a `code` from a closed list, a `status`, and a printable
 `message`. Use `BlobError.is(e)`, not `instanceof`: an ESM and a CJS copy are two classes. A route
 answers with `e.toJSON()` and the browser rebuilds it, so `error.code` in a hook is the code the
-server raised. `formatBytes` is exported from all three entrypoints; sizes are decimal.
+server raised. `formatBytes` is exported from all three entrypoints and displays decimal byte units.
+
+Size options always count bytes, never bits. Decimal units (`KB`, `MB`, `GB`, `TB`) use powers of
+1,000; explicit binary units (`KiB`, `MiB`, `GiB`, `TiB`) use powers of 1,024. Unit names ignore
+case. For a 32 MiB file limit, use `constraints: { maxSize: '32MiB' }` or `maxSize: 33_554_432`.
+`'32mb'` remains 32,000,000 bytes; it is not large enough for a 32 MiB file.
 
 ```ts
 if (BlobError.is(e) && e.code === 'too_large') showError(e.message);

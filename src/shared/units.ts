@@ -1,6 +1,16 @@
-// Sizes are decimal ('2mb' = 2,000,000), matching how storage is billed. The only binary math in
-// the SDK is multipart part sizing, because R2's part floor is 5 MiB.
+// Sizes always count bytes. Decimal units match storage billing ('2MB' = 2,000,000);
+// explicit binary units match file limits ('2MiB' = 2,097,152). Unit names ignore case.
+/**
+ * Bytes, or a string with a unit. Decimal units count powers of 1000 and binary units powers of
+ * 1024: '32MB' is 32,000,000 bytes, so `maxSize: '32MB'` refuses a 32 MiB (33,554,432-byte) file.
+ * For a 32 MiB limit pass '32MiB' or 32 * 1024 * 1024.
+ * @see node_modules/@upstash/blob/docs/reference/types.mdx
+ */
 export type Size = string | number;
+/**
+ * A number of seconds, or a string with a unit: '15m', '1h', '7d'.
+ * @see node_modules/@upstash/blob/docs/reference/types.mdx
+ */
 export type Duration = string | number;
 
 const SIZE_UNITS: Record<string, number> = {
@@ -9,6 +19,10 @@ const SIZE_UNITS: Record<string, number> = {
   mb: 1e6,
   gb: 1e9,
   tb: 1e12,
+  kib: 1024,
+  mib: 1024 ** 2,
+  gib: 1024 ** 3,
+  tib: 1024 ** 4,
 };
 
 export function parseSize(input: Size, what = 'size'): number {
@@ -17,18 +31,19 @@ export function parseSize(input: Size, what = 'size'): number {
     return Math.floor(input);
   }
   const m = /^\s*(\d+(?:\.\d+)?)\s*([a-z]*)\s*$/i.exec(input);
-  if (!m) throw new TypeError(`${what}: cannot parse "${input}" (try '2mb', '500kb', '5gb')`);
+  if (!m) throw new TypeError(`${what}: cannot parse "${input}" (try '2MB', '32MiB', '500KB')`);
   const unit = (m[2] || 'b').toLowerCase();
   const mult = SIZE_UNITS[unit];
-  if (mult === undefined) throw new TypeError(`${what}: unknown unit "${m[2]}" in "${input}" (b, kb, mb, gb, tb)`);
+  if (mult === undefined) throw new TypeError(`${what}: unknown unit "${m[2]}" in "${input}" (b, kb, mb, gb, tb, kib, mib, gib, tib)`);
   return Math.floor(Number(m[1]) * mult);
 }
 
 /**
- * Decimal, the same way parseSize reads them, so a limit written '2mb' is refused as "2 MB". An
+ * Always formats decimal byte units, including values parsed from binary units. An
  * exact multiple of the unit prints whole and anything else keeps a decimal, because rounding both
  * sides independently produced refusals reading "1MB, over the 1MB limit"; past 10 of a unit the
  * decimal is noise and is dropped.
+ * @see node_modules/@upstash/blob/docs/reference/types.mdx
  */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes)) return `${bytes} B`;
@@ -41,6 +56,18 @@ export function formatBytes(bytes: number): string {
     unit++;
   }
   return `${Number.isInteger(n) ? n : n.toFixed(n < 10 ? 1 : 0)} ${units[unit]}`;
+}
+
+/**
+ * The "X, over the Y limit" half of a size refusal. A limit in binary units is rarely a whole
+ * decimal unit, so both sides can round to the same amount ("34 MB, over the 34 MB limit", or
+ * "2 MB, over the 2.0 MB limit"); then exact byte counts are shown instead.
+ */
+export function overLimit(size: number, limit: number): string {
+  const [s, l] = [formatBytes(size), formatBytes(limit)];
+  // toFixed(1) is the only way two texts can name one amount: "2 MB" and "2.0 MB".
+  if (s.replace('.0 ', ' ') !== l.replace('.0 ', ' ')) return `${s}, over the ${l} limit`;
+  return `${size.toLocaleString('en-US')} bytes, over the ${limit.toLocaleString('en-US')} byte limit`;
 }
 
 const DURATION_UNITS: Record<string, number> = {
@@ -94,6 +121,7 @@ export function parseDuration(input: Duration, what = 'duration'): number {
  *
  * `private` replaces `public` on a private bucket, since a shared cache must not keep a copy of an
  * object only a signed request may read.
+ * @see node_modules/@upstash/blob/docs/bucket/caching.mdx
  */
 export type CacheOption = Duration | 'immutable' | 'revalidate' | 'no-store';
 

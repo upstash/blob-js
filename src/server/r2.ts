@@ -2,7 +2,7 @@ import { BlobError } from '../shared/errors.ts';
 import { telemetryHeaders } from '../shared/telemetry.ts';
 import type { BlobObject } from '../shared/types.ts';
 import type { CacheOption } from '../shared/units.ts';
-import { credentialCacheFor, type CredentialCache, type TempCredentials } from './credentials.ts';
+import { credentialCacheFor, waitMs, type CredentialCache, type TempCredentials } from './credentials.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, presignableKey, tag } from './keys.ts';
 import { signHeaders } from './sigv4.ts';
 import { AGENT_URL, DOMAIN_SUFFIX } from './token.ts';
@@ -53,6 +53,44 @@ export interface Presigned {
 /** The agent refuses a longer url: it is also how long one outlives a suspension or a password rotation. */
 export const MAX_PRESIGN_SECONDS = 600;
 
+/**
+ * How the server SDK retries a failed request: a 5xx, a 429 or a dropped connection on a request
+ * that is safe to send twice, a signing call, and a credential the service asked to wait for.
+ * `false` sends everything once.
+ * @see node_modules/@upstash/blob/docs/bucket/connecting.mdx
+ */
+export type RetryConfig =
+  | false
+  | {
+      /**
+       * Retries after the first attempt.
+       * @default 2 for object and signing requests, 3 for a credential the service asked to wait for
+       */
+      retries?: number;
+      /**
+       * Milliseconds to wait before retry `retryCount`, counted from 0. A Retry-After from the
+       * service wins over it.
+       * @default full jitter, doubling from 200 ms and capped at 4 s; 2 s for a credential
+       */
+      backoff?: (retryCount: number) => number;
+    };
+
+/** RetryConfig with the shorthand resolved, so every retry loop reads the same two fields. */
+export interface RetryPolicy {
+  retries?: number;
+  backoff?: (retryCount: number) => number;
+}
+
+export function retryPolicy(options: RetryConfig | undefined): RetryPolicy {
+  if (options === undefined) return {};
+  if (options === false) return { retries: 0 };
+  if (typeof options !== 'object' || options === null) throw new TypeError('retry: expected false or { retries, backoff }');
+  const { retries, backoff } = options;
+  if (retries !== undefined && !(Number.isSafeInteger(retries) && retries >= 0)) throw new TypeError(`retry.retries: expected a whole number of 0 or more, got ${String(retries)}`);
+  if (backoff !== undefined && typeof backoff !== 'function') throw new TypeError('retry.backoff: expected a function');
+  return { retries, backoff };
+}
+
 const RETRIABLE_METHODS = new Set(['GET', 'HEAD', 'PUT', 'DELETE']);
 const RETRY_ATTEMPTS = 3;
 // R2 answers a temporary credential that has expired with a 403 naming it, which is indistinguishable
@@ -73,13 +111,14 @@ export class R2 {
     readonly signingSecret: string,
     readonly defaultCache: CacheOption | undefined,
     private readonly enableTelemetry = true,
+    private readonly retry: RetryPolicy = {},
   ) {
     this.creds = credentialCacheFor(token, enableTelemetry);
     this.hostname = `${hashForDomain}.${DOMAIN_SUFFIX}`;
   }
 
   credentials(): Promise<TempCredentials> {
-    return this.creds.get();
+    return this.creds.get(this.retry);
   }
 
   /**
@@ -104,7 +143,7 @@ export class R2 {
   }
 
   async objectUrl(path?: string, query?: Record<string, string>): Promise<string> {
-    const c = await this.creds.get();
+    const c = await this.creds.get(this.retry);
     const url = new URL(`${c.endpoint}/${c.bucket}${path === undefined ? '' : '/' + encodeKey(path)}`);
     for (const [k, v] of Object.entries(query ?? {})) url.searchParams.set(k, v);
     return url.toString();
@@ -117,17 +156,19 @@ export class R2 {
    */
   async fetch(init: R2RequestInit): Promise<Response> {
     const streaming = init.body instanceof ReadableStream;
-    const attempts = !streaming && RETRIABLE_METHODS.has(init.method.toUpperCase()) ? RETRY_ATTEMPTS : 1;
+    const attempts = !streaming && RETRIABLE_METHODS.has(init.method.toUpperCase()) ? this.attempts() : 1;
     let refreshed = false;
     for (let attempt = 1; ; attempt++) {
       let res: Response;
+      let signedWith: TempCredentials;
       try {
-        res = await this.send(init);
+        [res, signedWith] = await this.send(init);
       } catch (e) {
         // A BlobError here came from minting a credential, which has its own retry policy and its
         // own verdict; only a dropped connection is this loop's to retry.
         if (BlobError.is(e) || attempt >= attempts || init.signal?.aborted) throw e;
-        await sleep(backoff(attempt, null));
+        await sleep(this.wait(attempt, null), init.signal);
+        if (init.signal?.aborted) throw init.signal.reason;
         continue;
       }
       if (res.status === 403 && !refreshed && !streaming) {
@@ -137,31 +178,35 @@ export class R2 {
         const text = res.body ? await res.text() : '';
         if (outlived || CREDENTIAL_REJECTED.test(text)) {
           refreshed = true;
-          this.creds.invalidate();
+          this.creds.invalidate(signedWith);
           continue;
         }
         return new Response(text, { status: res.status, statusText: res.statusText, headers: { 'content-type': res.headers.get('content-type') ?? 'application/xml' } });
       }
       if (attempt < attempts && (res.status === 429 || res.status >= 500) && !init.signal?.aborted) {
         await res.body?.cancel();
-        await sleep(backoff(attempt, res.headers.get('retry-after')));
+        await sleep(this.wait(attempt, res.headers.get('retry-after')), init.signal);
+        if (init.signal?.aborted) throw init.signal.reason;
         continue;
       }
       return res;
     }
   }
 
-  private async send(init: R2RequestInit): Promise<Response> {
-    const c = await this.creds.get();
+  private async send(init: R2RequestInit): Promise<[Response, TempCredentials]> {
+    const c = await untilAborted(this.creds.get(this.retry), init.signal);
     const url = await this.objectUrl(init.path, init.query);
     const headers = await signHeaders(
       { accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, sessionToken: c.sessionToken, region: c.region },
       { method: init.method, url, headers: init.headers },
     );
+    // Fetch otherwise negotiates compression, which can omit Content-Length and weaken ETags.
+    // Object reads need the stored representation for size checks and conditional writes.
+    if (init.method.toUpperCase() === 'GET' || init.method.toUpperCase() === 'HEAD') headers['accept-encoding'] = 'identity';
     const body = init.body ?? undefined;
     const extra: RequestInit & { duplex?: 'half' } = {};
     if (body instanceof ReadableStream) extra.duplex = 'half';
-    return fetch(url, { method: init.method, headers, body, signal: init.signal, ...extra });
+    return [await fetch(url, { method: init.method, headers, body, signal: init.signal, ...extra }), c];
   }
 
   /**
@@ -192,18 +237,28 @@ export class R2 {
       } catch (e) {
         // A hung agent is not asked again: three timeouts would hold a serverless begin for 30 s.
         const timedOut = (e as Error)?.name === 'TimeoutError';
-        if (timedOut || attempt >= RETRY_ATTEMPTS) throw new BlobError('request_failed', { message: 'could not reach the signing service', status: 502, cause: e });
-        await sleep(backoff(attempt, null));
+        if (timedOut || attempt >= this.attempts()) throw new BlobError('request_failed', { message: 'could not reach the signing service', status: 502, cause: e });
+        await sleep(this.wait(attempt, null));
         continue;
       }
       // Signing has no side effect, so every 429 and 5xx is safe to ask again.
-      if (attempt < RETRY_ATTEMPTS && (res.status === 429 || res.status >= 500)) {
+      if (attempt < this.attempts() && (res.status === 429 || res.status >= 500)) {
         await res.body?.cancel();
-        await sleep(backoff(attempt, res.headers.get('retry-after')));
+        await sleep(this.wait(attempt, res.headers.get('retry-after')));
         continue;
       }
       return presignedFrom(res);
     }
+  }
+
+  private attempts(): number {
+    return (this.retry.retries ?? RETRY_ATTEMPTS - 1) + 1;
+  }
+
+  private wait(attempt: number, retryAfter: string | null): number {
+    if (!this.retry.backoff) return backoff(attempt, retryAfter);
+    const secs = retryAfter ? Number(retryAfter) : NaN;
+    return Number.isFinite(secs) && secs >= 0 ? backoff(attempt, retryAfter) : waitMs(this.retry.backoff(attempt - 1));
   }
 
   async head(path: string): Promise<BlobHead | undefined> {
@@ -325,8 +380,32 @@ async function presignedFrom(res: Response): Promise<Presigned> {
   return { url: body!.url as string, expiresAt: new Date(expiresAt * 1000) };
 }
 
-export function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+/**
+ * Stops waiting on `p` when `signal` aborts, without cancelling it: a credential fetch is shared by
+ * every request on the token, and the others still want its answer.
+ */
+function untilAborted<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+/** Resolves early when `signal` aborts, so a cancelled request does not wait out its backoff. */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((r) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      r();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 }
 
 /** Full jitter, doubling from `base` ms per attempt and capped at 4 s; a Retry-After wins when given. */
@@ -339,13 +418,18 @@ export function backoff(attempt: number, retryAfter: string | null, base = 200):
 }
 
 export function headFromHeaders(h: Headers): BlobHead {
+  const length = h.get('content-length');
+  const size = length !== null && /^\d+$/.test(length) ? Number(length) : NaN;
+  if (!Number.isSafeInteger(size)) {
+    throw new BlobError('request_failed', { message: 'storage returned a missing or invalid Content-Length' });
+  }
   const metadata: Record<string, string> = {};
   h.forEach((v, k) => {
     if (k.startsWith('x-amz-meta-')) metadata[k.slice(11)] = v;
   });
   const lm = h.get('last-modified');
   return {
-    size: Number(h.get('content-length') ?? 0),
+    size,
     etag: h.get('etag') ?? '',
     contentType: h.get('content-type') ?? 'application/octet-stream',
     cacheControl: h.get('cache-control') ?? undefined,
@@ -369,11 +453,13 @@ export function errorFromBody(status: number, xml: string): BlobError {
     return new BlobError('unauthorized', { message: 'storage refused the temporary credential', hint: 'it expired mid-request; the SDK re-mints and retries once' });
   }
   if (status === 403) return new BlobError('signature_mismatch');
-  if (status === 429 || code === 'SlowDown' || code === 'TooManyRequests') return new BlobError('rate_limited', { message: 'R2 rate limited the request' });
+  if (status === 429 || code === 'SlowDown' || code === 'TooManyRequests') return new BlobError('rate_limited', { message: 'storage rate limited the request' });
   if (status === 503) return new BlobError('not_ready');
   if (status === 413 || code === 'EntityTooLarge') return new BlobError('too_large');
   return new BlobError('request_failed', {
-    message: `R2 responded ${status}${code ? ` ${code}` : ''}${message ? `: ${message}` : ''}`,
+    // Storage's own message is for whoever debugs the app, not for a user it would be shown to.
+    message: `storage responded ${status}${code ? ` ${code}` : ''}`,
     status: status >= 500 ? 502 : status,
+    cause: message ? new Error(message) : undefined,
   });
 }

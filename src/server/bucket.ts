@@ -1,14 +1,14 @@
 import { BlobError } from '../shared/errors.ts';
 import type { BlobObject, CompletedBlob } from '../shared/types.ts';
-import { cacheControl, formatBytes, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
+import { cacheControl, overLimit, parseDuration, parseSize, type CacheOption, type Duration, type Size } from '../shared/units.ts';
 import { limit, peek, readAll, resolveBody, type PutBody } from './body.ts';
 import { blocks, decodeEntities, encodeKey, escapeXml, metaHeaders, presignableKey, tag } from './keys.ts';
-import { partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
-import { backoff, errorFromBody, errorFromResponse, headFromHeaders, MAX_PRESIGN_SECONDS, R2, sleep, type MultipartUpload } from './r2.ts';
+import { partConcurrencyFor, partCount, partSizeFor, wantsMultipart, type MultipartOption } from './multipart.ts';
+import { backoff, errorFromBody, errorFromResponse, headFromHeaders, MAX_PRESIGN_SECONDS, R2, retryPolicy, sleep, type MultipartUpload, type RetryConfig } from './r2.ts';
 import { checkContentType, expandContentTypes } from './sniff.ts';
 import { decodeToken } from './token.ts';
 
-export type { MultipartUpload };
+export type { MultipartUpload, RetryConfig };
 
 export interface BucketOptions {
   token: string;
@@ -23,11 +23,17 @@ export interface BucketOptions {
    * @default true
    */
   enableTelemetry?: boolean;
+  /**
+   * Retries for failed requests, or `false` to send each one once.
+   * @see RetryConfig
+   */
+  retry?: RetryConfig;
 }
 
 export interface PutOptions {
   contentType?: string;
   contentTypes?: readonly string[];
+  /** Decimal: '32MB' is 32,000,000 bytes. For 32 MiB pass '32MiB' or 32 * 1024 * 1024. See Size. */
   maxSize?: Size;
   /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
@@ -206,21 +212,29 @@ export function r2Of(bucket: Bucket): R2 {
   return r2;
 }
 
+/** @see node_modules/@upstash/blob/docs/bucket/connecting.mdx */
 export class Bucket {
   private readonly r2: R2;
   private readonly defaultCache: CacheOption | undefined;
 
+  /** @see node_modules/@upstash/blob/docs/bucket/connecting.mdx */
   constructor(options: BucketOptions) {
     if (typeof options?.token !== 'string' || !options.token) throw new TypeError('new Bucket({ token }): token is required');
     const decoded = decodeToken(options.token);
     this.defaultCache = options.cache;
-    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true);
+    this.r2 = new R2(decoded.bucketId, options.token, decoded.hashForDomain, decoded.password, options.cache, options.enableTelemetry ?? true, retryPolicy(options.retry));
     INTERNALS.set(this, this.r2);
   }
 
-  /** Reads `UPSTASH_BLOB_TOKEN`; the options are the constructor's, minus the token. */
+  /**
+   * Reads `UPSTASH_BLOB_TOKEN`; the options are the constructor's, minus the token.
+   * @see node_modules/@upstash/blob/docs/bucket/connecting.mdx
+   */
   static fromEnv(options?: FromEnvOptions): Bucket;
-  /** Reads the token from `name` instead of `UPSTASH_BLOB_TOKEN`. */
+  /**
+   * Reads the token from `name` instead of `UPSTASH_BLOB_TOKEN`.
+   * @see node_modules/@upstash/blob/docs/bucket/connecting.mdx
+   */
   static fromEnv(name: string | undefined, options?: FromEnvOptions): Bucket;
   static fromEnv(nameOrOptions: string | FromEnvOptions = TOKEN_ENV, options: FromEnvOptions = {}): Bucket {
     const name = typeof nameOrOptions === 'string' ? nameOrOptions : TOKEN_ENV;
@@ -234,6 +248,7 @@ export class Bucket {
    * The public object URL. Undefined on a private bucket: nothing serves its objects over the public
    * host, so use `signedReadUrl()` there. Whether the bucket is private comes from the backend, not
    * the token, so the first call on a fresh bucket fetches credentials; after that it is local.
+   * @see node_modules/@upstash/blob/docs/bucket/reading.mdx
    */
   async publicUrl(path: string): Promise<string | undefined> {
     encodeKey(path);
@@ -243,6 +258,7 @@ export class Bucket {
 
   /* ------------------------------------------------------------------ put */
 
+  /** @see node_modules/@upstash/blob/docs/bucket/writing.mdx */
   async put(path: string, body: PutBody, options: PutOptions = {}): Promise<CompletedBlob> {
     encodeKey(path);
     const allowed = options.contentTypes === undefined ? undefined : expandContentTypes(options.contentTypes);
@@ -254,7 +270,7 @@ export class Bucket {
 
     if (size === undefined && options.size !== undefined) size = parseSize(options.size, 'size');
     if (maxSize !== undefined && size !== undefined && size > maxSize) {
-      throw new BlobError('too_large', { message: `the body is ${formatBytes(size)}, over the ${formatBytes(maxSize)} limit` });
+      throw new BlobError('too_large', { message: `the body is ${overLimit(size, maxSize)}` });
     }
     if (size === undefined) {
       if (maxSize === undefined) throw new BlobError('length_required');
@@ -319,22 +335,67 @@ export class Bucket {
   }
 
   /**
-   * One part at a time: a part is buffered whole so it can be retried, and holding several of them
-   * would multiply that by the concurrency. An error anywhere aborts the upload rather than leaving
-   * parts behind that nothing can see.
+   * Up to four parts in flight, each buffered whole so it can be retried. Reading waits for a free
+   * slot, so the body is never read further ahead than the parts being sent and the one filling. An
+   * error cancels the parts still in flight and waits for them, then aborts the upload rather than
+   * leaving parts behind that nothing can see.
    */
   private async putMultipart(path: string, stream: ReadableStream<Uint8Array>, size: number, headers: Record<string, string>, contentType: string): Promise<CompletedBlob> {
     const partSize = partSizeFor(size);
     const expected = partCount(size, partSize);
-    const uploadId = await this.r2.createMultipart(path, headers);
+    const concurrency = partConcurrencyFor(partSize);
+    // Locked before the upload exists, so a body that is already being read fails without leaving one.
+    const reader = stream.getReader();
+    let uploadId: string;
     try {
-      const reader = stream.getReader();
-      const parts: { n: number; etag: string }[] = [];
+      uploadId = await this.r2.createMultipart(path, headers);
+    } catch (e) {
+      reader.releaseLock();
+      throw e;
+    }
+    const inflight = new Set<Promise<void>>();
+    const cancel = new AbortController();
+    let failure: { error: unknown } | undefined;
+    // The first failure is the one reported. Cancelling the parts in flight and the body wakes every
+    // wait below: a part's fetch or backoff, the wait for a free slot, and a read of a slow body.
+    const fail = (error: unknown): void => {
+      if (failure) return;
+      failure = { error };
+      cancel.abort();
+      void reader.cancel(error).catch(() => {});
+    };
+    // A function rather than inline checks: failure is set from callbacks TypeScript cannot see.
+    const throwIfFailed = (): void => {
+      if (failure) throw failure.error;
+    };
+    try {
+      const etags: string[] = [];
       let pending: Uint8Array[] = [];
       let pendingBytes = 0;
       let sent = 0;
+      let started = 0;
 
-      const sendPart = async (length: number): Promise<void> => {
+      const sendPart = async (n: number, chunk: Uint8Array<ArrayBuffer>): Promise<void> => {
+        const res = await this.r2.fetch({
+          method: 'PUT',
+          path,
+          query: { partNumber: String(n), uploadId },
+          headers: { 'content-length': String(chunk.byteLength) },
+          body: chunk,
+          signal: cancel.signal,
+        });
+        if (!res.ok) throw errorFromBody(res.status, await res.text());
+        await res.body?.cancel();
+        const etag = res.headers.get('etag');
+        if (!etag) throw new BlobError('request_failed', { message: `part ${n} landed without an etag`, status: 502 });
+        etags[n - 1] = etag;
+      };
+
+      const startPart = async (length: number): Promise<void> => {
+        while (inflight.size >= concurrency) await Promise.race(inflight);
+        throwIfFailed();
+        const n = started + 1;
+        if (n > expected) throw new BlobError('invalid_input', { message: `body is longer than the declared ${size} bytes` });
         const chunk = new Uint8Array(length);
         let filled = 0;
         while (filled < length) {
@@ -346,41 +407,40 @@ export class Bucket {
           else pending[0] = head.subarray(take);
         }
         pendingBytes -= length;
-        const n = parts.length + 1;
-        if (n > expected) throw new BlobError('invalid_input', { message: `body is longer than the declared ${size} bytes` });
-        const res = await this.r2.fetch({
-          method: 'PUT',
-          path,
-          query: { partNumber: String(n), uploadId },
-          headers: { 'content-length': String(length) },
-          body: chunk,
-        });
-        if (!res.ok) throw errorFromBody(res.status, await res.text());
-        await res.body?.cancel();
-        const etag = res.headers.get('etag');
-        if (!etag) throw new BlobError('request_failed', { message: `part ${n} landed without an etag`, status: 502 });
-        parts.push({ n, etag });
         sent += length;
+        started = n;
+        const task: Promise<void> = sendPart(n, chunk)
+          .catch(fail)
+          .finally(() => inflight.delete(task));
+        inflight.add(task);
       };
 
       for (;;) {
         const { done, value } = await reader.read();
+        throwIfFailed();
         if (value && value.byteLength) {
           pending.push(value);
           pendingBytes += value.byteLength;
         }
-        while (pendingBytes >= partSize) await sendPart(partSize);
+        while (pendingBytes >= partSize) await startPart(partSize);
         if (done) break;
       }
-      if (pendingBytes > 0) await sendPart(pendingBytes);
+      if (pendingBytes > 0) await startPart(pendingBytes);
       pending = [];
+      await Promise.all(inflight);
+      throwIfFailed();
       if (sent !== size) throw new BlobError('invalid_input', { message: `body was ${sent} bytes, ${size} were declared` });
+      const parts = etags.map((etag, i) => ({ n: i + 1, etag }));
 
       const etag = await this.r2.completeMultipart(path, uploadId, parts);
       return { ...this.r2.blobObject(path, size, etag, new Date()), contentType };
     } catch (e) {
+      // A part still in flight would land after the abort and be billed with nothing to list it.
+      fail(e);
+      await Promise.all(inflight);
       // Nothing lists an incomplete upload, so a failure that left one behind is invisible billing.
       await this.r2.abortMultipart(path, uploadId).catch(() => {});
+      e = failure!.error;
       if (BlobError.is(e)) throw e;
       if (e && typeof e === 'object' && BlobError.is((e as { cause?: unknown }).cause)) throw (e as { cause: BlobError }).cause;
       throw e;
@@ -389,14 +449,21 @@ export class Bucket {
 
   /* ----------------------------------------------------------------- read */
 
+  /** @see node_modules/@upstash/blob/docs/bucket/reading.mdx */
   async get(path: string): Promise<BlobDownload> {
     const res = await this.r2.fetch({ method: 'GET', path });
     if (!res.ok) throw await errorFromResponse(res);
-    const head = headFromHeaders(res.headers);
-    const blob = this.r2.blobObject(path, head.size, head.etag, head.uploadedAt);
-    return { ...blob, contentType: head.contentType, metadata: head.metadata, body: res.body ?? new Blob([]).stream() };
+    try {
+      const head = headFromHeaders(res.headers);
+      const blob = this.r2.blobObject(path, head.size, head.etag, head.uploadedAt);
+      return { ...blob, contentType: head.contentType, metadata: head.metadata, body: res.body ?? new Blob([]).stream() };
+    } catch (error) {
+      await res.body?.cancel().catch(() => {});
+      throw error;
+    }
   }
 
+  /** @see node_modules/@upstash/blob/docs/bucket/reading.mdx */
   async info(path: string): Promise<BlobInfo> {
     const head = await this.r2.head(path);
     if (!head) throw new BlobError('not_found', { message: `${path} not found` });
@@ -404,10 +471,12 @@ export class Bucket {
     return { ...blob, contentType: head.contentType, metadata: head.metadata };
   }
 
+  /** @see node_modules/@upstash/blob/docs/bucket/reading.mdx */
   async exists(path: string): Promise<boolean> {
     return (await this.r2.head(path)) !== undefined;
   }
 
+  /** @see node_modules/@upstash/blob/docs/bucket/reading.mdx */
   async list(options: ListOptions = {}): Promise<ListPage> {
     const query: Record<string, string> = { 'list-type': '2' };
     if (options.prefix) query.prefix = options.prefix;
@@ -427,7 +496,10 @@ export class Bucket {
     return { blobs, cursor: tag(xml, 'IsTruncated') === 'true' && next ? decodeEntities(next) : undefined };
   }
 
-  /** The link and when it dies, so a caller can cache it until then rather than guess. */
+  /**
+   * The link and when it dies, so a caller can cache it until then rather than guess.
+   * @see node_modules/@upstash/blob/docs/bucket/reading.mdx
+   */
   async signedReadUrl(path: string, options: SignedReadUrlOptions = {}): Promise<SignedReadUrl> {
     const expiresIn = options.expiresIn === undefined ? DEFAULT_READ_SECONDS : Math.floor(parseDuration(options.expiresIn, 'expiresIn') / 1000);
     const query: Record<string, string> = {};
@@ -440,6 +512,8 @@ export class Bucket {
    * A url someone else can PUT one object to: the counterpart of signedReadUrl, for a CLI or a
    * server-to-server job. A browser upload wants uploadRoute() instead, which also handles
    * multipart and the completion callback this cannot.
+   * @see node_modules/@upstash/blob/docs/bucket/writing.mdx
+   * @see node_modules/@upstash/blob/docs/reference/signing.mdx
    */
   async signedUploadUrl(path: string, options: SignedUploadUrlOptions = {}): Promise<SignedUploadUrl> {
     presignableKey(path);
@@ -460,6 +534,7 @@ export class Bucket {
 
   /* ---------------------------------------------------------------- write */
 
+  /** @see node_modules/@upstash/blob/docs/bucket/deleting.mdx */
   async del(target: DeleteTarget): Promise<void> {
     if (typeof target === 'string') {
       const res = await this.r2.fetch({ method: 'DELETE', path: target });
@@ -512,6 +587,7 @@ export class Bucket {
   /**
    * Multipart uploads that were started and never completed or aborted. They are billed storage that
    * list() cannot see, and a bucket cannot be deleted while one exists.
+   * @see node_modules/@upstash/blob/docs/bucket/deleting.mdx
    */
   async listMultipartUploads(options: ListMultipartOptions = {}): Promise<MultipartUpload[]> {
     return this.r2.listMultipartUploads(options.prefix);
@@ -521,6 +597,7 @@ export class Bucket {
    * Throws away an incomplete upload and every part that landed for it. Missing is success, which is
    * why it takes the record listMultipartUploads() returned rather than two strings: a swapped pair
    * would abort nothing and report that it worked.
+   * @see node_modules/@upstash/blob/docs/bucket/deleting.mdx
    */
   async abortMultipartUpload(upload: Pick<MultipartUpload, 'path' | 'uploadId'>): Promise<void> {
     if (!upload || typeof upload !== 'object') throw new BlobError('invalid_input', { message: 'abortMultipartUpload({ path, uploadId }): an upload is required' });
@@ -532,6 +609,8 @@ export class Bucket {
   /**
    * List plus abort, for an app cron: an abandoned upload is not expired for you, and one that
    * list() cannot see is what turns "delete the bucket" into a dead end. Returns what it aborted.
+   * @see node_modules/@upstash/blob/docs/bucket/deleting.mdx
+   * @see node_modules/@upstash/blob/docs/uploads/abandoned-uploads.mdx
    */
   async abortStaleMultipartUploads(options: AbortStaleMultipartOptions): Promise<MultipartUpload[]> {
     const cutoff = Date.now() - parseDuration(options.olderThan, 'olderThan');
@@ -542,6 +621,7 @@ export class Bucket {
 
   /* ---------------------------------------------------------- copy/move */
 
+  /** @see node_modules/@upstash/blob/docs/bucket/writing.mdx */
   async copy(from: string, to: string, options: CopyOptions = {}): Promise<BlobObject> {
     const creds = await this.r2.credentials();
     const headers: Record<string, string> = { 'x-amz-copy-source': `/${creds.bucket}/${encodeKey(from)}` };
@@ -566,7 +646,10 @@ export class Bucket {
     return this.r2.blobObject(to, head.size, head.etag, head.uploadedAt);
   }
 
-  /** A copy followed by a delete of the source: storage has no rename. Same options as `copy`. */
+  /**
+   * A copy followed by a delete of the source: storage has no rename. Same options as `copy`.
+   * @see node_modules/@upstash/blob/docs/bucket/writing.mdx
+   */
   async move(from: string, to: string, options: CopyOptions = {}): Promise<BlobObject> {
     const blob = await this.copy(from, to, options);
     try {
@@ -582,6 +665,7 @@ export class Bucket {
    * when nothing was there. A write that lost the race is re-read and re-run after a short jittered
    * pause, up to `maxAttempts` (default 6) times; then it throws 'conflict'. Existing metadata is
    * kept unless options.metadata is given.
+   * @see node_modules/@upstash/blob/docs/bucket/writing.mdx
    */
   async updateJson<T = unknown>(path: string, fn: (prev: T | null) => T | Promise<T>, options: UpdateJsonOptions = {}): Promise<BlobObject> {
     const attempts = options.maxAttempts ?? 6;
@@ -626,6 +710,7 @@ export class Bucket {
   // Async because the endpoint is only known from a credentials response: the aws-sdk reads
   // `endpoint` and `bucket` while the client is constructed (measured 2026-08-24, @aws-sdk 3.1116:
   // resolveEndpointConfig spreads the config, so a lazy getter is captured as its first value).
+  /** @see node_modules/@upstash/blob/docs/bucket/connecting.mdx */
   s3(): S3Config {
     const r2 = this.r2;
     return {
