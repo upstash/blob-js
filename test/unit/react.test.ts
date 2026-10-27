@@ -674,6 +674,24 @@ test('an abort the browser made itself, not cancel(), fails a server upload as a
   expect(upload.status === 'error' && upload.error.status).toBe(503);
 });
 
+test('a throw from the request that is not the network fails a server upload as a 500', async () => {
+  const send = ManualXhr.prototype.send;
+  ManualXhr.prototype.send = () => {
+    throw new TypeError('bad body');
+  };
+  restore.push(() => {
+    ManualXhr.prototype.send = send;
+  });
+  const hook = await render(() => useServerUpload('/api/avatar'));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  await flush();
+  const upload = hook.current.upload!;
+  expect(upload.status === 'error' && upload.error.code).toBe('request_failed');
+  expect(upload.status === 'error' && upload.error.status).toBe(500);
+});
+
 test('server upload start with a nullish file or body returns null', async () => {
   const hook = await render(() => useServerUpload('/api/avatar'));
   let a: unknown = 'unset';

@@ -316,7 +316,8 @@ class Task implements InternalTask {
 
     this.status = 'finishing';
     this.notify();
-    const end = (await this.routeCall({ phase: 'end', completionToken: this.token, parts: landed }, signal)) as WireEndResponse;
+    const end = (await this.routeCall({ phase: 'end', completionToken: this.token, parts: landed }, signal)) as WireEndResponse | undefined;
+    if (typeof end?.blob?.uploadedAt !== 'string') throw answerLost();
     return { ...end.blob, uploadedAt: new Date(end.blob.uploadedAt), data: end.data };
   }
 
@@ -553,7 +554,12 @@ class Task implements InternalTask {
   private async routeCall(body: Record<string, unknown>, signal: AbortSignal | undefined, attempts = ROUTE_ATTEMPTS): Promise<unknown> {
     let last: BlobError | undefined;
     // Outside the try too: an input JSON cannot carry is the caller's bug, not an unreachable route.
-    const payload = JSON.stringify({ ...body, protocol: UPLOAD_PROTOCOL });
+    let payload: string;
+    try {
+      payload = JSON.stringify({ ...body, protocol: UPLOAD_PROTOCOL });
+    } catch (e) {
+      throw new BlobError('invalid_input', { message: `input has to be JSON: ${e instanceof Error ? e.message : String(e)}`, cause: e });
+    }
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (signal?.aborted) throw abortError();
       // Outside the fetch try on purpose. headers() is the app's own hook and is re-read per attempt, so a
@@ -582,24 +588,22 @@ class Task implements InternalTask {
         await clock.sleep(backoffMs(attempt), signal);
         continue;
       }
+      // A 2xx for 'end' means onUploadComplete already returned, whatever the body turns out to be.
+      // Sending 'end' again runs it a second time, and a throw from that second run deletes the
+      // object the first run accepted.
+      const ended = res.ok && body.phase === 'end';
+      if (ended) {
+        this.accepted = true;
+        clearPending(this.storeKey);
+      }
       let text: string;
       try {
         text = await res.text();
       } catch (e) {
         if (isAbort(e) || signal?.aborted) throw abortError();
+        if (ended) throw answerLost(e);
         // A refusal whose body dropped is still that refusal. Only a success cut off mid-body is a
-        // network failure, retried like one -- except for 'end', where the success already happened:
-        // re-sending it runs onUploadComplete again, and a throw from that second run deletes the
-        // object the first run accepted.
-        if (res.ok && body.phase === 'end') {
-          this.accepted = true;
-          clearPending(this.storeKey);
-          throw new BlobError('request_failed', {
-            message: "the upload completed, but the route's answer was cut off",
-            hint: 'the file is stored and onUploadComplete ran: read the result from the app instead of uploading again',
-            cause: e,
-          });
-        }
+        // network failure, retried like one.
         if (res.ok) {
           last = new BlobError('request_failed', { message: "the upload route's response was cut off", status: 503, cause: e });
           if (attempt === attempts - 1) break;
@@ -626,6 +630,16 @@ class Task implements InternalTask {
     }
     throw last ?? new BlobError('request_failed');
   }
+}
+
+// 502 and not the 500 of a bug: the route did its part, it is its answer that went missing.
+function answerLost(cause?: unknown): BlobError {
+  return new BlobError('request_failed', {
+    message: "the upload completed, but the route's answer was lost",
+    status: 502,
+    hint: 'the file is stored and onUploadComplete ran: read the result from the app instead of uploading again',
+    cause,
+  });
 }
 
 // A PUT that fails with no status and no bytes sent was refused by the browser, not by storage, and

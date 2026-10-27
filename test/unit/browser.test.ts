@@ -475,10 +475,10 @@ describe('a single PUT', () => {
     expect(calls).toEqual([]);
   });
 
-  test('a bug is not reported as a 503, and an input JSON cannot carry never reaches the route', async () => {
+  test('an input JSON cannot carry is invalid_input and never reaches the route', async () => {
     onPhase = defaultRoute(3);
     const failed = await upload(png(), { route: '/api/upload', input: { n: 1n } }).done.catch((e) => e);
-    expect(failed).toMatchObject({ code: 'request_failed', status: 500 });
+    expect(failed).toMatchObject({ code: 'invalid_input', status: 400 });
     expect(failed.cause).toBeInstanceOf(TypeError);
     expect(calls).toEqual([]);
     expect(sleeps).toEqual([]);
@@ -517,11 +517,28 @@ describe('a single PUT', () => {
     ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
     await settle();
     const failed = await task.done.catch((e) => e);
-    expect(failed).toMatchObject({ code: 'request_failed', status: 500 });
+    expect(failed).toMatchObject({ code: 'request_failed', status: 502 });
     expect(failed.message).toContain('The upload completed');
     expect(task.retry()).toBe(false);
     expect(ends).toBe(1);
     expect(sleeps).toEqual([]);
+  });
+
+  test("a success for 'end' whose body is not an answer is never sent again", async () => {
+    let ends = 0;
+    const base = defaultRoute(3);
+    onPhase = (body) => {
+      if (body.phase !== 'end') return base(body);
+      ends++;
+      return new Response('<html>ok</html>', { status: 200 });
+    };
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await settle();
+    await expect(task.done).rejects.toMatchObject({ code: 'request_failed', status: 502 });
+    expect(task.retry()).toBe(false);
+    expect(ends).toBe(1);
   });
 
   test('a refusal that drops mid-body keeps its status and is not retried', async () => {
@@ -695,6 +712,35 @@ describe('multipart', () => {
     expect(sent.length).toBe(21);
     expect(sent.find((p) => p.n === 21)!.etag).toBe('"e21"');
     expect(task.snapshot().percent).toBe(100);
+  });
+
+  test("a cut-off success for 'end' clears the pending record, so picking the file again starts over", async () => {
+    const size = 17 * MIB;
+    let ends = 0;
+    const base = defaultRoute(size);
+    onPhase = (body) => {
+      if (body.phase !== 'end') return base(body);
+      ends++;
+      return new Response(new ReadableStream({ start: (c) => c.error(new TypeError('terminated')) }));
+    };
+    const file = big(size);
+    const task = upload(file, { route: '/api/upload/large' });
+    await settle();
+    expect(memory.size).toBe(1);
+    for (let done = 0; done < 4; ) {
+      const x = ManualXhr.pending[0];
+      if (!x) {
+        await settle();
+        continue;
+      }
+      x.respond(200, { etag: `"e${done}"` });
+      done++;
+      await settle();
+    }
+    await expect(task.done).rejects.toMatchObject({ code: 'request_failed', status: 502 });
+    expect(task.retry()).toBe(false);
+    expect(ends).toBe(1);
+    expect(memory.size).toBe(0);
   });
 
   test('pause keeps the parts already sending, drops the idle ones, and never retreats loaded', async () => {
