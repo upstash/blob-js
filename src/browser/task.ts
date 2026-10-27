@@ -600,8 +600,10 @@ class Task implements InternalTask {
       try {
         text = await res.text();
       } catch (e) {
-        if (isAbort(e) || signal?.aborted) throw abortError();
+        // Ahead of the abort check: an abort that is not cancel() would otherwise leave the task in
+        // 'finishing' for good, and a cancel() has already settled it either way.
         if (ended) throw answerLost(e);
+        if (isAbort(e) || signal?.aborted) throw abortError();
         // A refusal whose body dropped is still that refusal. Only a success cut off mid-body is a
         // network failure, retried like one.
         if (res.ok) {
@@ -637,7 +639,7 @@ function answerLost(cause?: unknown): BlobError {
   return new BlobError('request_failed', {
     message: "the upload completed, but the route's answer was lost",
     status: 502,
-    hint: 'the file is stored and onUploadComplete ran: read the result from the app instead of uploading again',
+    hint: 'the route answered 2xx, so the file should be stored and onUploadComplete should have run: check the app before uploading again',
     cause,
   });
 }
