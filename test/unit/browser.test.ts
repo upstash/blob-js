@@ -485,20 +485,43 @@ describe('a single PUT', () => {
   });
 
   test('a success that drops mid-body is a network failure, retried like one', async () => {
-    let ends = 0;
+    let parts = 0;
     const base = defaultRoute(3);
     const dropped = () => new Response(new ReadableStream({ start: (c) => c.error(new TypeError('terminated')) }));
-    onPhase = (body) => (body.phase === 'end' && ends++ === 0 ? dropped() : base(body));
+    onPhase = (body) => (body.phase === 'parts' && parts++ === 0 ? dropped() : base(body));
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    // A refused presign asks the route for fresh urls, read-only and safe to ask again.
+    ManualXhr.pending[0]!.respond(403);
+    await settle();
+    await wake();
+    await settle();
+    expect(parts).toBe(2);
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await task.done;
+
+    onPhase = (body) => (body.phase === 'begin' ? dropped() : base(body));
+    await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'request_failed', status: 503, message: "The upload route's response was cut off" });
+  });
+
+  test("a success for 'end' that drops mid-body is never sent again", async () => {
+    let ends = 0;
+    const base = defaultRoute(3);
+    onPhase = (body) => {
+      if (body.phase !== 'end') return base(body);
+      ends++;
+      return new Response(new ReadableStream({ start: (c) => c.error(new TypeError('terminated')) }));
+    };
     const task = upload(png(), { route: '/api/upload' });
     await settle();
     ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
     await settle();
-    await wake();
-    await task.done;
-    expect(ends).toBe(2);
-
-    onPhase = (body) => (body.phase === 'begin' ? dropped() : base(body));
-    await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'request_failed', status: 503, message: "The upload route's response was cut off" });
+    const failed = await task.done.catch((e) => e);
+    expect(failed).toMatchObject({ code: 'request_failed', status: 500 });
+    expect(failed.message).toContain('The upload completed');
+    expect(task.retry()).toBe(false);
+    expect(ends).toBe(1);
+    expect(sleeps).toEqual([]);
   });
 
   test('a refusal that drops mid-body keeps its status and is not retried', async () => {

@@ -160,6 +160,7 @@ export interface UploadTask {
   cancel(): boolean;
   /**
    * Only from 'error': runs the same upload again from the parts that landed. done is replaced.
+   * Answers false when the route already accepted the upload and only its answer was lost.
    * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
    */
   retry(): boolean;

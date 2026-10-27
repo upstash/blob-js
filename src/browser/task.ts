@@ -88,6 +88,9 @@ class Task implements InternalTask {
   // Whether the route cut this file into real multipart parts. False is a single PUT: one url, one
   // object write, and nothing on the other side to pause into or resume from.
   private multipart = false;
+  // Set once 'end' answered 2xx: the route recorded the object and onUploadComplete returned, so no
+  // retry() or resume may send 'end' again, even when the answer itself never arrived whole.
+  private accepted = false;
   private parts = new Map<number, PartState>();
   private urls = new Map<number, Signed>();
   private batch: Promise<void> | undefined;
@@ -213,7 +216,7 @@ class Task implements InternalTask {
   // exists, every landed part is still landed, and done is a fresh promise because the old one
   // already rejected.
   retry(): boolean {
-    if (this.status !== 'error') return false;
+    if (this.status !== 'error' || this.accepted) return false;
     this.error = undefined;
     this.status = 'queued';
     this.inflight.clear();
@@ -585,7 +588,18 @@ class Task implements InternalTask {
       } catch (e) {
         if (isAbort(e) || signal?.aborted) throw abortError();
         // A refusal whose body dropped is still that refusal. Only a success cut off mid-body is a
-        // network failure, retried like one.
+        // network failure, retried like one -- except for 'end', where the success already happened:
+        // re-sending it runs onUploadComplete again, and a throw from that second run deletes the
+        // object the first run accepted.
+        if (res.ok && body.phase === 'end') {
+          this.accepted = true;
+          clearPending(this.storeKey);
+          throw new BlobError('request_failed', {
+            message: "the upload completed, but the route's answer was cut off",
+            hint: 'the file is stored and onUploadComplete ran: read the result from the app instead of uploading again',
+            cause: e,
+          });
+        }
         if (res.ok) {
           last = new BlobError('request_failed', { message: "the upload route's response was cut off", status: 503, cause: e });
           if (attempt === attempts - 1) break;
