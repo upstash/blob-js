@@ -41,7 +41,7 @@ const chat = uploadHandler({
   onBeforeUpload: ({ ctx, file, input }) => {
     const path = root + uniquePath(`chat/${ctx.id}/${input.threadId}/${file.name}`);
     rows[path] = 'pending';
-    return { path, cache: 'immutable', metadata: { uploadedBy: ctx.id } };
+    return { path, cache: 'immutable', metadata: { uploadedby: ctx.id } };
   },
   onUploadComplete: ({ path }) => {
     rows[path] = 'ready';

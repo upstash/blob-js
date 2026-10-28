@@ -52,10 +52,21 @@ const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 // '=?utf-8?Q?caf=C3=A9?=', so accepting it would hand back a different string than was written.
 const ASCII_RE = /^[\x20-\x7e]*$/;
 
+const warnedKeys = new Set<string>();
+
 export function metaHeaders(metadata: Record<string, string> | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(metadata ?? {})) {
     if (!HEADER_NAME_RE.test(k)) throw new BlobError('invalid_input', { message: `metadata key "${k}" is not a valid header name` });
+    // Storage hands keys back lowercased, so `recordId` is written and `recordid` read back. Earlier
+    // releases lowercased these silently and apps rely on that, so this warns, once per key, rather
+    // than refusing.
+    if (k !== k.toLowerCase() && !warnedKeys.has(k)) {
+      // Bounded, since keys may come from user input: a forgotten key only warns once more.
+      if (warnedKeys.size >= 64) warnedKeys.clear();
+      warnedKeys.add(k);
+      console.warn(`[upstash-blob] metadata key "${k}" is stored and read back as "${k.toLowerCase()}"; write it lowercase`);
+    }
     if (typeof v !== 'string') throw new BlobError('invalid_input', { message: `metadata.${k} must be a string` });
     if (!ASCII_RE.test(v)) {
       throw new BlobError('invalid_input', {

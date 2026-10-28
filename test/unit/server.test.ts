@@ -444,7 +444,7 @@ describe('signedReadUrl', () => {
 describe('signedUploadUrl', () => {
   test('the agent signs one PUT with every pinned header, for ten minutes by default', async () => {
     resetCredentialCaches();
-    const up = await bucket().signedUploadUrl('in/report.pdf', { contentType: 'application/pdf', cache: '1m', metadata: { rowId: '7' }, size: 12, allowOverwrite: false });
+    const up = await bucket().signedUploadUrl('in/report.pdf', { contentType: 'application/pdf', cache: '1m', metadata: { rowid: '7' }, size: 12, allowOverwrite: false });
     const headers = { 'content-type': 'application/pdf', 'cache-control': 'public, max-age=60', 'x-amz-meta-rowid': '7', 'content-length': '12', 'if-none-match': '*' };
     expect(up.headers).toEqual(headers);
     expect(presigns).toEqual([{ method: 'PUT', key: 'in/report.pdf', expiresIn: 600, headers }]);
@@ -528,6 +528,22 @@ describe('bucket guards', () => {
     r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
     await b.put('a.txt', 'x', { metadata: { note: encodeURIComponent('café') } });
     expect(r2Calls()[0]!.headers.get('x-amz-meta-note')).toBe('caf%C3%A9');
+  });
+
+  test('an uppercase metadata key is lowercased as before, with a warning once per key', async () => {
+    resetCredentialCaches();
+    const warned = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
+      const b = bucket();
+      await b.put('a.txt', 'x', { metadata: { recordId: 'v' } });
+      await b.put('a.txt', 'x', { metadata: { recordId: 'v' } });
+      expect(r2Calls()[0]!.headers.get('x-amz-meta-recordid')).toBe('v');
+      expect(warned.mock.calls.filter(([m]) => String(m).includes('"recordId"')).length).toBe(1);
+      expect(String(warned.mock.calls[0]![0])).toContain('"recordid"');
+    } finally {
+      warned.mockRestore();
+    }
   });
 
   test("del({ prefix: '' }) has to say it means the whole bucket", async () => {
@@ -948,7 +964,7 @@ describe('uploadHandler: the direct transport', () => {
   test('a file under the threshold is one presigned object PUT, with nothing created behind it', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
-    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'small.png', metadata: { rowId: '7' } }) });
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'small.png', metadata: { rowid: '7' } }) });
     const started = await begin(route, { name: 'a.png', type: 'image/png', size: 10 });
     expect(started.upload.multipart).toBe(false);
     // One part covering the whole file: the browser walks the same list either way.
@@ -1176,7 +1192,7 @@ describe('uploadHandler: the direct transport', () => {
     const route = uploadHandler({
       bucket: bucket(),
       constraints: { maxSize: '5gb' },
-      onBeforeUpload: () => ({ path: 'big.bin', metadata: { rowId: '7' } }),
+      onBeforeUpload: () => ({ path: 'big.bin', metadata: { rowid: '7' } }),
       onError: ({ error, path, metadata }) => {
         seen.push({ code: (error as BlobError).code, path, metadata });
       },
@@ -1185,7 +1201,7 @@ describe('uploadHandler: the direct transport', () => {
     const res = await post(route, { phase: 'begin', file: { name: 'big.bin', type: '', size: 20_000_000 } });
     expect(res.status).toBe(502);
     // The create failed after onBeforeUpload ran, so whatever it reserved is reachable here.
-    expect(seen).toEqual([{ code: 'request_failed', path: 'big.bin', metadata: { rowId: '7' } }]);
+    expect(seen).toEqual([{ code: 'request_failed', path: 'big.bin', metadata: { rowid: '7' } }]);
   });
 
   test('bytes refused at the end are deleted, which bounds the exposure without undoing it', async () => {
