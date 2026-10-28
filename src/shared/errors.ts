@@ -77,12 +77,13 @@ export const PLAIN_ORIGIN_RE = /^https?:\/\/([a-z0-9.-]+|\[[0-9a-f:.]+\])(:\d+)?
 
 /**
  * The CLI command that adds an origin to a bucket's CORS list, for a hint meant to be pasted into a
- * shell. The origin is single-quoted, since zsh reads the brackets of an IPv6 host as a glob, and
- * only an origin made of plain host characters goes in at all: a URL host may hold a quote or `$(`.
+ * shell. Only an origin made of plain host characters goes in at all, and it is single-quoted only
+ * for the brackets of an IPv6 host, which zsh reads as a glob: cmd.exe would pass the quotes on.
  */
 export function corsCommand(bucket: string, origin: string | undefined): string {
   const plain = origin !== undefined && PLAIN_ORIGIN_RE.test(origin);
-  return `upstash blob cors ${bucket} ${plain ? `'${origin}'` : '<origin>'}`;
+  if (!plain) return `upstash blob cors ${bucket} <origin>`;
+  return `upstash blob cors ${bucket} ${origin.includes('[') ? `'${origin}'` : origin}`;
 }
 
 /**

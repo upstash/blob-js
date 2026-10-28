@@ -616,6 +616,7 @@ describe('CORS probe', () => {
     expect(corsCommand('b', 'http://[::1]:3000')).toBe("upstash blob cors b 'http://[::1]:3000'");
     expect(corsCommand('b', 'https://a.example.com$(id)')).toBe('upstash blob cors b <origin>');
     expect(corsCommand('b', "https://a.example.com'")).toBe('upstash blob cors b <origin>');
+    expect(corsCommand('b', 'https://app.example.com:8443')).toBe('upstash blob cors b https://app.example.com:8443');
   });
 });
 
