@@ -316,6 +316,8 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    * Who an upload belongs to, read from `ctx`: `owner: (user) => user.id`. Signed into the upload
    * at its first request; a later request whose `ctx` names someone else is a 403 before storage or
    * any callback is touched, so one user cannot finish, re-sign or cancel another's upload.
+   * Uploads begun before `owner` was turned on still finish; while a deploy that turns it on rolls
+   * out, an upload begun on a new instance is refused by an old one until the user retries.
    */
   owner?: (ctx: Awaited<TCtx>) => string | number | null | undefined;
   /** Every route inherits it. A Standard Schema for the browser's `input`. */
@@ -393,6 +395,8 @@ interface AnyRouteSpec {
 // A session lookup that found nobody reads as `user?.id`: that is a 401, never an upload owned by "undefined".
 function ownerString(owner: string | number | null | undefined): string {
   if (owner === null || owner === undefined || owner === '') throw new BlobError('unauthorized', { message: 'no signed-in user to own this upload' });
+  // An object would stringify to "[object Object]" for everyone, making every user the same owner.
+  if (typeof owner !== 'string' && typeof owner !== 'number') throw new TypeError(`uploadHandler: owner must return a string or number id, got ${typeof owner}`);
   return String(owner);
 }
 

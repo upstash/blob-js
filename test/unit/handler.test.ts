@@ -710,6 +710,13 @@ describe('owner', () => {
     expect(r2Calls()).toHaveLength(0);
   });
 
+  test('an owner that is not a string or number id throws rather than making everyone one owner', async () => {
+    const uploads = uploadHandler({ bucket: bucket(), context: () => ({ id: 'alice' }), owner: (user) => user as any, onBeforeUpload: () => ({ path: 'a.png' }) });
+    calls = [];
+    await expect(uploads.POST(as('alice', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 4 } }))).rejects.toThrow(/string or number id/);
+    expect(r2Calls()).toHaveLength(0);
+  });
+
   test('owner needs a context', () => {
     expect(() => uploadHandler({ bucket: bucket(), owner: () => 'x', onBeforeUpload: () => ({ path: 'a' }) } as any)).toThrow(/needs a context/);
   });
