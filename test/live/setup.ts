@@ -3,23 +3,25 @@ import { Bucket } from '../../src/index.ts';
 export const pub = Bucket.fromEnv('UPSTASH_BLOB_PUBLIC_TOKEN');
 export const priv = Bucket.fromEnv('UPSTASH_BLOB_PRIVATE_TOKEN');
 
-export const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-export const root = `test/${runId}/`;
+export const runId = `${Date.now().toString(16)}-${Math.random().toString(36).slice(2, 8)}`;
+// Every SDK shares the test buckets under test/<sdk>/; this suite touches nothing outside test/js/.
+const SWEEP = 'test/js/';
+export const root = `${SWEEP}${runId}/`;
 export const p = (name: string) => `${root}${name}`;
 
-// A crashed run leaves test/<runId>/ behind, and a killed one leaves multipart uploads nothing can
+// A crashed run leaves test/js/<runId>/ behind, and a killed one leaves multipart uploads nothing can
 // list; sweep both, anything older than an hour.
 export async function sweep(bucket: Bucket): Promise<void> {
-  await bucket.abortStaleMultipartUploads({ olderThan: '1h', prefix: 'test/' });
+  await bucket.abortStaleMultipartUploads({ olderThan: '1h', prefix: SWEEP });
   const cutoff = Date.now() - 3600_000;
   let cursor: string | undefined;
   const stale = new Set<string>();
   do {
-    const page = await bucket.list({ prefix: 'test/', limit: 1000, cursor });
+    const page = await bucket.list({ prefix: SWEEP, limit: 1000, cursor });
     for (const b of page.blobs) {
-      const id = b.path.split('/')[1] ?? '';
-      const started = parseInt(id.split('-')[0] ?? '', 36);
-      if (Number.isFinite(started) && started < cutoff) stale.add(`test/${id}/`);
+      const id = b.path.slice(SWEEP.length).split('/')[0] ?? '';
+      const ts = id.split('-')[0] ?? '';
+      if (/^[0-9a-f]+$/.test(ts) && parseInt(ts, 16) < cutoff) stale.add(`${SWEEP}${id}/`);
     }
     cursor = page.cursor;
   } while (cursor);

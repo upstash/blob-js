@@ -226,6 +226,54 @@ describe('r2 retries', () => {
     expect(r2Calls().length).toBe(1);
   });
 
+  test('retry: false sends each request once, and retries sets how many follow', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('<Error><Code>InternalError</Code></Error>', { status: 500 });
+    await expect(new Bucket({ token: TOKEN, retry: false }).exists('a.txt')).rejects.toMatchObject({ code: 'request_failed' });
+    expect(r2Calls().length).toBe(1);
+
+    calls = [];
+    const waits: number[] = [];
+    const custom = new Bucket({ token: TOKEN, retry: { retries: 4, backoff: (n) => (waits.push(n), 0) } });
+    await expect(custom.exists('a.txt')).rejects.toMatchObject({ code: 'request_failed' });
+    expect(r2Calls().length).toBe(5);
+    expect(waits).toEqual([0, 1, 2, 3]);
+
+    // A Retry-After from storage still wins over the backoff.
+    calls = [];
+    waits.length = 0;
+    r2Handler = () => new Response('<Error/>', { status: 429, headers: { 'retry-after': '0' } });
+    await expect(custom.exists('a.txt')).rejects.toMatchObject({ status: 429 });
+    expect(waits).toEqual([]);
+  });
+
+  test('retry: false also covers signing and a credential the service asked to wait for', async () => {
+    resetCredentialCaches();
+    presignResponse = () => new Response('', { status: 503 });
+    await expect(new Bucket({ token: TOKEN, retry: false }).signedReadUrl('a.txt')).rejects.toBeInstanceOf(BlobError);
+    expect(presigns.length).toBe(1);
+
+    resetCredentialCaches();
+    mintResponse = () => new Response('', { status: 429, headers: { 'retry-after': '1' } });
+    await expect(new Bucket({ token: TOKEN, retry: false }).exists('a.txt')).rejects.toMatchObject({ code: 'rate_limited' });
+    expect(mints).toBe(1);
+
+    // Without a Retry-After the credential wait is the caller's backoff, counted the same way.
+    resetCredentialCaches();
+    mints = 0;
+    const waits: number[] = [];
+    mintResponse = () => new Response('', { status: 503 });
+    await expect(new Bucket({ token: TOKEN, retry: { retries: 2, backoff: (n) => (waits.push(n), 0) } }).exists('a.txt')).rejects.toBeInstanceOf(BlobError);
+    expect(mints).toBe(3);
+    expect(waits).toEqual([0, 1]);
+  });
+
+  test('a retry option that cannot be honoured is refused at construction', () => {
+    for (const retry of [{ retries: -1 }, { retries: 1.5 }, { backoff: 5 }, true]) {
+      expect(() => new Bucket({ token: TOKEN, retry: retry as never })).toThrow(TypeError);
+    }
+  });
+
   test('a 403 that names the credential re-mints once and retries, then reads as unauthorized', async () => {
     resetCredentialCaches();
     const expired = '<Error><Code>ExpiredToken</Code><Message>token expired</Message></Error>';
@@ -631,7 +679,10 @@ describe('multipart put', () => {
     resetCredentialCaches();
     const script = scriptMultipart();
     const blob = await bucket().put('big.bin', new Uint8Array(17_000_000), { contentType: 'application/octet-stream' });
-    expect(script.parts).toEqual(['1', '2', '3', '4']);
+    expect([...script.parts].sort()).toEqual(['1', '2', '3', '4']);
+    // Parts land in any order, and complete still lists them by number.
+    const complete = String(r2Calls().find((c) => c.method === 'POST' && c.url.includes('uploadId='))!.init.body);
+    expect([...complete.matchAll(/<PartNumber>(\d+)<\/PartNumber><ETag>([^<]+)<\/ETag>/g)].map((m) => `${m[1]}:${m[2]}`)).toEqual(['1:"p1"', '2:"p2"', '3:"p3"', '4:"p4"']);
     expect(blob.etag).toBe('"done-4"');
     expect(blob.size).toBe(17_000_000);
     expect(blob.contentType).toBe('application/octet-stream');
@@ -646,6 +697,154 @@ describe('multipart put', () => {
     const abort = r2Calls().find((c) => c.method === 'DELETE');
     expect(abort).toBeDefined();
     expect(abort!.url).toContain('uploadId=up-1');
+  });
+
+  // Parts answer after `ms`, or reject the moment their request is cancelled, the way fetch does.
+  function scriptSlowParts(answer: (n: string) => { ms: number; res: () => Response }): { landed: string[]; peak: () => number } {
+    let open = 0;
+    let peak = 0;
+    const landed: string[] = [];
+    r2Handler = (call) => {
+      const u = new URL(call.url);
+      if (u.searchParams.has('uploads')) return new Response(CREATED, { status: 200 });
+      const n = u.searchParams.get('partNumber');
+      if (n) {
+        peak = Math.max(peak, ++open);
+        const { ms, res } = answer(n);
+        const signal = call.init.signal;
+        return new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            open--;
+            landed.push(`part ${n}`);
+            resolve(res());
+          }, ms);
+          const onAbort = () => {
+            clearTimeout(timer);
+            open--;
+            landed.push(`cancelled ${n}`);
+            reject(signal!.reason);
+          };
+          signal?.addEventListener('abort', onAbort, { once: true });
+        });
+      }
+      if (call.method === 'DELETE') landed.push('abort');
+      if (call.method === 'POST') return new Response(COMPLETED, { status: 200 });
+      return new Response('', { status: 200 });
+    };
+    return { landed, peak: () => peak };
+  }
+  const ok = (n: string) => () => new Response('', { status: 200, headers: { etag: `"p${n}"` } });
+  const refused = () => new Response('<Error><Code>InvalidPart</Code></Error>', { status: 400 });
+
+  test('parts go up four at a time', async () => {
+    resetCredentialCaches();
+    const script = scriptSlowParts((n) => ({ ms: 20, res: ok(n) }));
+    await bucket().put('big.bin', new Uint8Array(40_000_000));
+    expect(script.peak()).toBe(4);
+  });
+
+  test('a failed part cancels the rest at once, and the upload is aborted after they settle', async () => {
+    resetCredentialCaches();
+    const script = scriptSlowParts((n) => (n === '2' ? { ms: 10, res: refused } : { ms: 5_000, res: ok(n) }));
+    const started = Date.now();
+    await expect(bucket().put('fail.bin', new Uint8Array(40_000_000))).rejects.toMatchObject({ code: 'request_failed', status: 400 });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect([...script.landed].sort()).toEqual(['abort', 'cancelled 1', 'cancelled 3', 'cancelled 4', 'part 2'].sort());
+    expect(script.landed.at(-1)).toBe('abort');
+  });
+
+  test('a part waiting out a Retry-After is cancelled too', async () => {
+    resetCredentialCaches();
+    const script = scriptSlowParts((n) =>
+      n === '1' ? { ms: 1, res: () => new Response('<Error/>', { status: 503, headers: { 'retry-after': '8' } }) } : n === '2' ? { ms: 50, res: refused } : { ms: 5_000, res: ok(n) },
+    );
+    const started = Date.now();
+    await expect(bucket().put('fail.bin', new Uint8Array(40_000_000))).rejects.toMatchObject({ status: 400 });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(script.landed.at(-1)).toBe('abort');
+  });
+
+  test('a failed part is reported without waiting for a slow body', async () => {
+    resetCredentialCaches();
+    scriptSlowParts(() => ({ ms: 1, res: refused }));
+    let cancelled = false;
+    let reads = 0;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(c) {
+        // The first part arrives at once, the rest a megabyte a second.
+        if (reads++ >= 5) await Bun.sleep(1_000);
+        c.enqueue(new Uint8Array(1024 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const started = Date.now();
+    await expect(bucket().put('slow.bin', body, { size: 40_000_000 })).rejects.toMatchObject({ status: 400 });
+    expect(Date.now() - started).toBeLessThan(900);
+    expect(cancelled).toBe(true);
+  });
+
+  test('a body is not held in memory past the parts being sent', async () => {
+    resetCredentialCaches();
+    let peak = 0;
+    r2Handler = (call) => {
+      const u = new URL(call.url);
+      if (u.searchParams.has('uploads')) return new Response(CREATED, { status: 200 });
+      const n = u.searchParams.get('partNumber');
+      if (n) {
+        if (Number(n) % 10 === 0) {
+          Bun.gc(true);
+          peak = Math.max(peak, process.memoryUsage().arrayBuffers);
+        }
+        return new Response('', { status: 200, headers: { etag: `"p${n}"` } });
+      }
+      return new Response(COMPLETED, { status: 200 });
+    };
+    const MiB = 1024 * 1024;
+    const size = 400 * MiB;
+    let left = size;
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (left === 0) return c.close();
+        left -= MiB;
+        c.enqueue(new Uint8Array(MiB));
+      },
+    });
+    Bun.gc(true);
+    const before = process.memoryUsage().arrayBuffers;
+    await bucket().put('huge.bin', body, { size });
+    // Four parts in flight and one filling, at 5 MiB each, plus slack for the allocator.
+    expect(peak - before).toBeLessThan(80 * MiB);
+  });
+
+  test('a multipart upload that cannot be created leaves the body readable', async () => {
+    resetCredentialCaches();
+    r2Handler = () => new Response('<Error><Code>AccessDenied</Code></Error>', { status: 403 });
+    const body = new Blob([new Uint8Array(17_000_000)]).stream();
+    await expect(bucket().put('big.bin', body, { size: 17_000_000 })).rejects.toBeInstanceOf(BlobError);
+    expect(body.locked).toBe(false);
+  });
+
+  test('parts refused together for an expired credential re-mint it once', async () => {
+    resetCredentialCaches();
+    let minted = 0;
+    mintResponse = () => Response.json(creds({ sessionToken: `st-${++minted}` }));
+    r2Handler = (call) => {
+      const u = new URL(call.url);
+      if (u.searchParams.has('uploads')) return new Response(CREATED, { status: 200 });
+      const n = u.searchParams.get('partNumber');
+      if (n) {
+        if (call.headers.get('x-amz-security-token') === 'st-1') return new Promise((r) => setTimeout(() => r(new Response('<Error><Code>ExpiredToken</Code></Error>', { status: 403 })), 5));
+        return new Response('', { status: 200, headers: { etag: `"p${n}"` } });
+      }
+      if (call.method === 'POST') return new Response(COMPLETED, { status: 200 });
+      return new Response('', { status: 200 });
+    };
+    // The upload is created on the first credential, so it is its parts that find it expired.
+    await bucket().put('big.bin', new Uint8Array(40_000_000));
+    expect(mints).toBe(2);
   });
 
   test('a conditional write stays a single PUT, and asking for both is refused', async () => {
@@ -717,9 +916,35 @@ describe('uploadHandler: the direct transport', () => {
     expect(res.headers.get('cache-control')).toBe('public, max-age=60');
     const etag = res.headers.get('etag')!;
     expect(etag).toMatch(/^"[a-z0-9]+"$/);
-    expect(await res.json()).toEqual({ constraints: { maxSize: 1_000_000 } });
+    expect(await res.json()).toEqual({ protocol: 1, constraints: { maxSize: 1_000_000 } });
     const again = await route.GET(new Request('https://app.test/api/upload', { headers: { 'if-none-match': etag } }));
     expect(again.status).toBe(304);
+  });
+
+  test('the protocol is on GET and every answer, and nothing is refused over it', async () => {
+    resetCredentialCaches();
+    // cancel HEADs a single-PUT upload's object: answer that nothing was stored.
+    r2Handler = (call) => (call.method === 'HEAD' ? new Response(null, { status: 404 }) : beginR2(call));
+    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    expect((await (await route.GET(new Request('https://app.test/api/upload'))).json()).protocol).toBe(1);
+    const file = { name: 'a.png', type: 'image/png', size: 10 };
+    // Missing is 1, a newer client is answered the way it would be answered at 1, and a value that
+    // is not a version at all is ignored rather than turned into a refusal.
+    for (const protocol of [undefined, 1, 2, 99, 'x', -1, null]) {
+      const res = await post(route, { phase: 'begin', file, ...(protocol === undefined ? {} : { protocol }) });
+      expect(res.status).toBe(200);
+      const started = (await res.json()) as WireBeginResponse;
+      expect(started.protocol).toBe(1);
+      const parts = await post(route, { phase: 'parts', completionToken: started.completionToken, from: 1, protocol });
+      expect(parts.status).toBe(200);
+      expect(((await parts.json()) as WirePartsResponse).protocol).toBe(1);
+      const cancel = await post(route, { phase: 'cancel', completionToken: started.completionToken, protocol });
+      expect(await cancel.json()).toEqual({ protocol: 1, ok: true });
+    }
+    // A refusal carries none: it is BlobError.toJSON(), read by its code.
+    const refused = await post(route, { phase: 'parts', completionToken: 'nope', protocol: 1 });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).not.toHaveProperty('protocol');
   });
 
   test('a file under the threshold is one presigned object PUT, with nothing created behind it', async () => {
@@ -854,6 +1079,7 @@ describe('uploadHandler: the direct transport', () => {
     const res = await post(named, { phase: 'end', completionToken: started.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
     expect(res.status).toBe(200);
     const completed = await res.json();
+    expect(completed.protocol).toBe(1);
     expect(completed.blob.contentType).toBe('image/png');
     expect(completed.data).toEqual({ ok: true });
     expect(seen).toEqual({

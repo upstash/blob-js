@@ -3,9 +3,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:te
 import { act, createElement, StrictMode } from 'react';
 import { clock } from '../../src/browser/clock.ts';
 import { poolState } from '../../src/browser/pool.ts';
+import { loadFacts } from '../../src/react/constraints.ts';
 import { BlobError, uploadHooks, useServerUpload, useUpload } from '../../src/react/index.ts';
 import type { UploadRoute } from '../../src/shared/types.ts';
-import { installRouter, installXhr, ManualXhr } from '../helpers/xhr.ts';
+import { installRouter, installXhr, ManualXhr, removeXhr } from '../helpers/xhr.ts';
 
 // bun imports every test file before running any of them, and happy-dom's globals are read-only
 // once installed, so registering at import time breaks a sibling file that stubs localStorage.
@@ -693,6 +694,38 @@ test('server upload cancel aborts the request and reports canceled', async () =>
   expect(hook.current.upload!.cancel()).toBe(false);
 });
 
+test('an abort the browser made itself, not cancel(), fails a server upload as a 503', async () => {
+  const hook = await render(() => useServerUpload('/api/avatar'));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const xhr = await nextXhr();
+  // Page unload or window.stop(): onabort fires with no signal of ours behind it.
+  xhr.onabort?.({});
+  await flush();
+  const upload = hook.current.upload!;
+  expect(upload.status === 'error' && upload.error.code).toBe('request_failed');
+  expect(upload.status === 'error' && upload.error.status).toBe(503);
+});
+
+test('a throw from the request that is not the network fails a server upload as a 500', async () => {
+  const send = ManualXhr.prototype.send;
+  ManualXhr.prototype.send = () => {
+    throw new TypeError('bad body');
+  };
+  restore.push(() => {
+    ManualXhr.prototype.send = send;
+  });
+  const hook = await render(() => useServerUpload('/api/avatar'));
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  await flush();
+  const upload = hook.current.upload!;
+  expect(upload.status === 'error' && upload.error.code).toBe('request_failed');
+  expect(upload.status === 'error' && upload.error.status).toBe(500);
+});
+
 test('server upload start with a nullish file or body returns null', async () => {
   const hook = await render(() => useServerUpload('/api/avatar'));
   let a: unknown = 'unset';
@@ -882,6 +915,22 @@ test('a throw from headers ends a server upload before any bytes are sent', asyn
   expect(xhrs).toHaveLength(0);
 });
 
+/* ------------------------------------------------------- not a browser -- */
+
+test('without XMLHttpRequest, both hooks throw invalid_input from start and list nothing', async () => {
+  const hook = await render(() => ({ direct: useUpload<UploadRoute<undefined, unknown>>(route), proxied: useServerUpload('/api/avatar') }));
+  await flush();
+  calls = [];
+  restore.push(removeXhr());
+  expect(typeof XMLHttpRequest).toBe('undefined');
+  expect(() => hook.current.direct.start({ file: png() })).toThrow(expect.objectContaining({ code: 'invalid_input', status: 400 }));
+  expect(() => hook.current.proxied.start({ file: png() })).toThrow(expect.objectContaining({ code: 'invalid_input', status: 400 }));
+  await flush();
+  expect(hook.current.direct.uploads).toHaveLength(0);
+  expect(hook.current.proxied.uploads).toHaveLength(0);
+  expect(calls).toHaveLength(0);
+});
+
 /* ------------------------------------------------------------- finishing -- */
 
 test('a direct upload is finishing between the last byte and the end response', async () => {
@@ -898,6 +947,20 @@ test('a direct upload is finishing between the last byte and the end response', 
   const upload = hook.current.upload!;
   // Every byte is sent, phase 'end' is in flight, and percent is clamped to 99 for this stretch.
   expect(upload.status === 'done' || upload.status === 'finishing').toBe(true);
+});
+
+test("the route's protocol is read off its constraints, and 1 when it sends none", async () => {
+  const unused = async () => jsonResponse({}, 405);
+  const cases: [unknown, number][] = [[2, 2], [undefined, 1], ['2', 1], [0, 1]];
+  const urls = cases.map(() => `/api/protocol/${++routeId}`);
+  const missing = `/api/protocol/${++routeId}`;
+  const routes: Parameters<typeof installRouter>[0] = { [missing]: { GET: async () => jsonResponse({}, 404), POST: unused } };
+  cases.forEach(([served], i) => {
+    routes[urls[i]!] = { GET: async () => jsonResponse({ ...(served === undefined ? {} : { protocol: served }), constraints: {} }), POST: unused };
+  });
+  restore.push(installRouter(routes));
+  for (const [i, [, expected]] of cases.entries()) expect((await loadFacts(urls[i]!, undefined)).protocol).toBe(expected);
+  expect(await loadFacts(missing, undefined)).toEqual({ constraints: undefined, protocol: 1 });
 });
 
 /* -------------------------------------------------------- uploadHooks -- */
