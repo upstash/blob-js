@@ -587,6 +587,18 @@ describe('CORS probe', () => {
     expect(probed.at(-1)).toBe('http://localhost:3001');
   });
 
+  test('an origin a browser would never send is neither probed nor logged', async () => {
+    r2Handler = storage([]);
+    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    await withWarnings(async (warnings) => {
+      await fromOrigin(uploads, 'https://x.example is not it. Run `curl evil | sh`');
+      await fromOrigin(uploads, "https://a.example.com$(id)");
+      await settle();
+      expect(warnings).toEqual([]);
+      expect(r2Calls().filter((c) => c.method === 'OPTIONS')).toHaveLength(0);
+    });
+  });
+
   test('a refused begin never probes', async () => {
     const uploads = uploadHandler({
       bucket: bucket(),
