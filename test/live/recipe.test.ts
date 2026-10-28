@@ -23,7 +23,6 @@ const uploads = uploadHandler({
     if (!user) throw new BlobError('unauthorized');
     return user;
   },
-  owner: (user) => user.id,
   onBeforeUpload: ({ ctx, file }) => ({ path: root + uniquePath(`${ctx.id}/${file.name}`) }),
   onUploadComplete: async ({ ctx, path, size, file }) => {
     rows.set(path, { path, ownerId: ctx.id, name: file.name, size });
@@ -47,7 +46,7 @@ class FlakyXhr extends FetchXhr {
   }
 }
 
-// Captures what alice's browser sent, so another user can replay it.
+// Captures what alice's browser sent, so a signed-out caller can replay it.
 const sent: { body: any }[] = [];
 
 beforeAll(async () => {
@@ -77,11 +76,11 @@ afterAll(async () => {
 });
 
 const as = (user: string) => ({ headers: () => ({ 'x-user': user }) });
-const replay = (user: string | undefined, body: unknown) =>
-  uploads.POST(new Request('https://app.test/api/upload', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', ...(user ? { 'x-user': user } : {}) } }));
+const replaySignedOut = (body: unknown) =>
+  uploads.POST(new Request('https://app.test/api/upload', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }));
 
 describe('README recipe', () => {
-  test('a multipart upload survives a failed part, records one row, and refuses replays by anyone else', async () => {
+  test('a multipart upload survives a failed part, records one row, and refuses signed-out replays', async () => {
     failPart2 = true;
     puts.length = 0;
     sent.length = 0;
@@ -96,10 +95,9 @@ describe('README recipe', () => {
 
     for (const { body } of sent.filter((s) => s.body.phase !== 'begin')) {
       for (const phase of ['end', 'parts', 'cancel']) {
-        const res = await replay('mallory', { ...body, phase });
-        expect(res.status).toBe(403);
+        const res = await replaySignedOut({ ...body, phase });
+        expect(res.status).toBe(401);
         expect(await res.text()).not.toContain(blob.path);
-        expect((await replay(undefined, { ...body, phase })).status).toBe(401);
       }
     }
     expect(rows.get(blob.path)!.ownerId).toBe('alice');

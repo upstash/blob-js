@@ -121,8 +121,6 @@ const { start, upload, accept } = useUpload();
 
 - `routes: { attachment: {...}, large: {...} }` mounts several routes at one endpoint;
   `useUpload('attachment')` picks one. Route options replace handler defaults key by key.
-- `owner: (user) => user.id` binds each upload to whoever began it: another user's request with
-  its token is a 403.
 - `context: (request) => ...` runs once per POST, before any body is read, and its value is `ctx` in
   every callback. `onBeforeUpload` only runs on the first request of an upload, so `context` is how
   the user reaches `onUploadComplete` and `onError` too, and how several routes share one auth check.
@@ -216,8 +214,6 @@ export const uploads = uploadHandler({
     if (!user) throw new BlobError('unauthorized');
     return user;
   },
-  // Binds each upload to the user who began it: anyone else replaying its requests gets a 403.
-  owner: (user) => user.id,
   onBeforeUpload: ({ ctx, file }) => ({ path: uniquePath(`${ctx.id}/${file.name}`) }),
   // Runs once the file is stored, before the browser sees 'done'. Keyed by path: a repeat is a no-op.
   onUploadComplete: async ({ ctx, path, size, file }) => {
@@ -276,7 +272,7 @@ After a reload, list the user's rows from `db.files`: a row exists only for a co
 What the SDK already does, so you do not have to:
 
 - You need no presign, complete or cancel routes and no client-side IDs: every request after the
-  first carries a signed token for that one upload, and `owner` makes it useless to anyone else.
+  first carries a signed token for that one upload, and `context` still checks the session.
 - You need no pending rows: `onUploadComplete` runs only once the stored object has the declared
   size, and the record turns `done` only after it returns.
 - You need no multipart code: files over 16 MB go up in parts, 4 at a time, each retried and
@@ -292,8 +288,8 @@ What the SDK already does, so you do not have to:
   by path makes the second run a no-op.
 - `cancel()` during `finishing` is local only and the file may still be recorded, which is why the
   recipe hides Cancel there.
-- Picking a file again after a failure resumes the same upload; `context` and `owner` still check
-  every request.
+- Picking a file again after a failure resumes the same upload; `context` still checks every
+  request.
 - A closed tab, or a cancel request that never arrives, can leave a stored file with no row (under
   16 MB) or an unfinished multipart. Neither shows, since the list comes from rows; see
   [Incomplete uploads](#incomplete-uploads).
