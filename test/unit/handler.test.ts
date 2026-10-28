@@ -580,12 +580,13 @@ describe('CORS probe', () => {
   test('many origins keep being probed rather than filling the memory for good', async () => {
     r2Handler = storage(['*']);
     const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
+    // The first origin is remembered, then forgotten once 64 others fill the set: it is probed again.
     for (let i = 0; i < 65; i++) await fromOrigin(uploads, `https://t${i}.example.com`);
-    await fromOrigin(uploads, 'http://localhost:3001');
+    await fromOrigin(uploads, 'https://t0.example.com');
     await settle();
     const probed = r2Calls().filter((c) => c.method === 'OPTIONS').map((c) => c.headers.get('origin'));
     expect(probed).toHaveLength(66);
-    expect(probed.at(-1)).toBe('http://localhost:3001');
+    expect(probed.at(-1)).toBe('https://t0.example.com');
   });
 
   test('an origin a browser would never send is neither probed nor logged', async () => {

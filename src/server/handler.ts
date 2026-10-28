@@ -386,8 +386,9 @@ interface AnyRouteSpec {
 
 /**
  * The server half of a direct browser upload: export `{ GET, POST }` from one route and upload with
- * `useUpload`. Check the session in `context`, return the path from `onBeforeUpload`, and record the file in `onUploadComplete`, keyed by path. Signing,
- * multipart, retries, cancel and completion checks are the SDK's: no presign or complete routes.
+ * `useUpload`. Check the session in `context`, return the path from `onBeforeUpload`, and record
+ * the file in `onUploadComplete`, keyed by path. Signing, multipart, retries, cancel and completion
+ * checks are the SDK's: no presign or complete routes.
  * See "AI agents" in the README for the full recipe.
  *
  * `TRoutes` is first and has no default on purpose: with a default, or behind `TCtx`, TypeScript

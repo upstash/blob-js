@@ -214,10 +214,11 @@ export const uploads = uploadHandler({
     if (!user) throw new BlobError('unauthorized');
     return user;
   },
-  onBeforeUpload: ({ ctx, file }) => ({ path: uniquePath(`${ctx.id}/${file.name}`) }),
+  // The owner is fixed here, where the path is, and not read from whoever's session finishes it.
+  onBeforeUpload: ({ ctx, file }) => ({ path: uniquePath(`${ctx.id}/${file.name}`), state: { ownerId: ctx.id } }),
   // Runs once the file is stored, before the browser sees 'done'. Keyed by path: a repeat is a no-op.
-  onUploadComplete: async ({ ctx, path, size, file }) => {
-    await db.files.upsert({ path, ownerId: ctx.id, name: file.name, size });
+  onUploadComplete: async ({ state, path, size, file }) => {
+    await db.files.upsert({ path, ownerId: state.ownerId, name: file.name, size });
     return { path, name: file.name };
   },
 });

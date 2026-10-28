@@ -23,9 +23,10 @@ const uploads = uploadHandler({
     if (!user) throw new BlobError('unauthorized');
     return user;
   },
-  onBeforeUpload: ({ ctx, file }) => ({ path: root + uniquePath(`${ctx.id}/${file.name}`) }),
-  onUploadComplete: async ({ ctx, path, size, file }) => {
-    rows.set(path, { path, ownerId: ctx.id, name: file.name, size });
+  // The owner is fixed here, where the path is, and not read from whoever's session finishes it.
+  onBeforeUpload: ({ ctx, file }) => ({ path: root + uniquePath(`${ctx.id}/${file.name}`), state: { ownerId: ctx.id } }),
+  onUploadComplete: async ({ state, path, size, file }) => {
+    rows.set(path, { path, ownerId: state.ownerId, name: file.name, size });
     return { path, name: file.name };
   },
 });
