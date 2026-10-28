@@ -198,7 +198,7 @@ Use the API below; you do not need to read `src/`. Bundled docs are in
 ### Recipe: private, signed-in browser uploads
 
 This is the whole feature: progress, cancel, retry and large files included. Swap `getUser` and
-`db` for your own; `upstash blob create --name files --env-file .env.local` makes the private bucket.
+`db` for your own; `upstash blob create --name files --write-env .env.local` makes the private bucket.
 
 ```ts
 // lib/uploads.ts
