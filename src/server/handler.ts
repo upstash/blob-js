@@ -60,7 +60,7 @@ interface BeforeResult<TState> {
   path: string;
   /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
-  /** Lowercase keys (storage reads them back lowercased) and printable ASCII values. */
+  /** Printable ASCII values; keys are stored and read back lowercased, so write them lowercase. */
   metadata?: Record<string, string>;
   /** May narrow the route's constraints per user, never widen them. */
   constraints?: UploadConstraints;
@@ -250,8 +250,34 @@ export type HandlerRoutes<TRoutes, TData, TInput> = string extends keyof TRoutes
   ? { readonly '': RouteBrand<TInput, TData> }
   : { readonly [K in keyof TRoutes]: RouteBrand<InputOf<TRoutes[K], TInput>, DataOf<TRoutes[K], TData>> };
 
-/** @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx */
-export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends StandardSchema<any, any> | undefined> {
+/**
+ * The handler's own `state` is typed only when the handler is the route. With `routes`, mount() picks
+ * a route's onBeforeUpload and onUploadComplete separately, so a route that replaces only one of them
+ * would hand the other another state, or none. Whether `routes` was passed is read off `TRoutesArg`,
+ * the argument's own type (`unknown` when it was left out), not off `TRoutes`' keys: a
+ * `Record<string, ...>` or `any` has no keys to tell it from no routes at all.
+ * Only onBeforeUpload's return reads it: in a callback parameter, `TRoutesArg` would be fixed before
+ * `routes` is read. onUploadComplete takes `NoInferState<TState>`, so annotating it cannot type it either,
+ * and an `any` state, which onBeforeUpload's return accepts even with routes, reads as `unknown` there.
+ */
+type HandlerState<TRoutesArg, TState> = 0 extends 1 & TRoutesArg ? undefined : unknown extends TRoutesArg ? TState : undefined;
+
+/** `NoInfer`, but one that degrades to `T` rather than `any` on TypeScript before 5.4. */
+type NoInferState<T> = [T][T extends unknown ? 0 : never];
+
+/**
+ * Captures `routes` for `TRoutesArg`. A second naked type parameter in the `routes` intersection
+ * would leave both it and `TRoutes` uninferred, and `unknown`, while nothing is inferred, leaves the
+ * route callbacks' contextual type alone.
+ */
+type RoutesArg<T> = T extends unknown ? T : never;
+
+/**
+ * For a wrapper: `TRoutes` of `never` is a handler without routes, whose `state` is typed; any other
+ * `TRoutes` counts as routes, so a wrapper that forwards `routes` keeps the handler's state `undefined`.
+ * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
+ */
+export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends StandardSchema<any, any> | undefined, TState = undefined, TRoutesArg = [TRoutes] extends [never] ? unknown : TRoutes> {
   /**
    * Every route inherits it; a route may name its own. Omit it and the handler builds one from
    * `UPSTASH_BLOB_TOKEN`, once, the way `Bucket.fromEnv()` does -- so name a bucket when the token
@@ -298,7 +324,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    * The default. A route with its own onBeforeUpload replaces it. Runs at the first request of an
    * upload, before anything is signed, and returns the path. Throw to refuse.
    */
-  onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<undefined> | Promise<BeforeResult<undefined>>;
+  onBeforeUpload?: (args: BeforeArgs<Awaited<TCtx>, RouteInputOf<TSchema>>) => BeforeResult<HandlerState<TRoutesArg, TState>> | Promise<BeforeResult<HandlerState<TRoutesArg, TState>>>;
   /**
    * The default. A route with its own onUploadComplete replaces it, and answers the browser with its
    * own return instead of this one.
@@ -310,7 +336,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    * and logged. It may run more than once, or never if the browser stops before 'end', so write
    * idempotently on `uploadId`.
    */
-  onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, undefined> & DirectCompleteExtras) => TData | Promise<TData>;
+  onUploadComplete?: (args: CompleteBase<Awaited<TCtx>, NoInferState<0 extends 1 & TState ? unknown : TState>> & DirectCompleteExtras) => TData | Promise<TData>;
   /**
    * The default. Sees every refusal, this handler's own included: return a BlobError or a Response to
    * answer with it, return nothing to leave the answer alone. It is the one place to log.
@@ -328,7 +354,7 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    * returned. That is what lets `context: (request) => requireUser(request)` stay unannotated, as
    * long as it is written above `routes`.
    */
-  routes?: TRoutes & UploadRoutes<Awaited<TCtx>, RouteInputOf<TSchema>>;
+  routes?: TRoutes & UploadRoutes<Awaited<TCtx>, RouteInputOf<TSchema>> & RoutesArg<TRoutesArg>;
 }
 
 export interface UploadHandler<TRoutes = UploadRouteMap, TCtx = unknown> {
@@ -381,7 +407,8 @@ function ownerString(owner: string | number | null | undefined): string {
  * stops reading the route literal and every route's data comes back `unknown`. Its constraint is
  * deliberately shapeless: the route shape, with the ctx, is the `UploadRoutes` half of `routes`,
  * and a constraint that repeated it would be intersected with that half in every callback's
- * contextual type.
+ * contextual type. `TRoutesArg` is inferred from `routes` alone; its default is for explicit type
+ * arguments, where named `TRoutes` still count as routes.
  * @see node_modules/@upstash/blob/docs/uploads/upload-handler.mdx
  */
 export function uploadHandler<
@@ -389,7 +416,9 @@ export function uploadHandler<
   TCtx = undefined,
   TData = void,
   TSchema extends StandardSchema<any, any> | undefined = undefined,
->(options: UploadHandlerOptions<TCtx, TRoutes, TData, TSchema>): UploadHandler<HandlerRoutes<TRoutes, TData, RouteInputOf<TSchema>>, Awaited<TCtx>> {
+  TState = undefined,
+  TRoutesArg = string extends keyof TRoutes ? unknown : TRoutes,
+>(options: UploadHandlerOptions<TCtx, TRoutes, TData, TSchema, TState, TRoutesArg>): UploadHandler<HandlerRoutes<TRoutes, TData, RouteInputOf<TSchema>>, Awaited<TCtx>> {
   const named = options.routes !== undefined;
   const definitions = (options.routes ?? { '': {} }) as unknown as Record<string, unknown>;
   if (options.owner && !options.context) throw new TypeError('uploadHandler: owner reads ctx, so it needs a context');

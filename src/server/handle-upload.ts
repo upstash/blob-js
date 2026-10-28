@@ -1,4 +1,5 @@
 import { BlobError } from '../shared/errors.ts';
+import { UPLOAD_PROTOCOL } from '../shared/protocol.ts';
 import type { UploadFile, WireBeginResponse, WireEndResponse, WireLanded, ServedConstraints, WireConstraintsResponse, WirePart, WirePartsResponse } from '../shared/types.ts';
 import { cacheControl, overLimit, parseSize, type CacheOption, type Size } from '../shared/units.ts';
 import { r2Of, type Bucket } from './bucket.ts';
@@ -56,7 +57,7 @@ interface Decided {
   path: string;
   /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
-  /** Lowercase keys (storage reads them back lowercased) and printable ASCII values. */
+  /** Printable ASCII values; keys are stored and read back lowercased, so write them lowercase. */
   metadata?: Record<string, string>;
   constraints?: UploadConstraints;
   state?: unknown;
@@ -114,13 +115,13 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       if (!body || typeof body !== 'object' || typeof body.phase !== 'string') throw new BlobError('invalid_input', { message: 'expected a JSON body with a phase' });
       switch (body.phase) {
         case 'begin':
-          return Response.json(await begin(request, body, details));
+          return answer(await begin(request, body, details));
         case 'parts':
-          return Response.json(await parts(request, body, details));
+          return answer(await parts(request, body, details));
         case 'end':
-          return Response.json(await end(request, body, details));
+          return answer(await end(request, body, details));
         case 'cancel':
-          return Response.json(await cancel(request, body, details));
+          return answer(await cancel(request, body, details));
         default:
           throw new BlobError('invalid_input', { message: `unknown phase ${String(body.phase)}` });
       }
@@ -366,7 +367,12 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     // A token is a bearer capability, so without this anyone signed in who holds one could finish,
     // re-sign or cancel somebody else's upload. Checked before storage or any callback is touched,
     // and before details names the path, so a refusal tells the caller nothing about the upload.
-    if (options.ownerOf && options.ownerOf(request) !== t.o) throw new BlobError('forbidden', { message: 'this upload belongs to another user' });
+    // A token with no owner was minted before `owner` was turned on: it still needs a signed-in user,
+    // but is let through so uploads in flight across that deploy finish, as they would have before.
+    if (options.ownerOf) {
+      const who = options.ownerOf(request);
+      if (t.o !== undefined && who !== t.o) throw new BlobError('forbidden', { message: 'this upload belongs to another user' });
+    }
     details.path = t.path;
     details.state = t.ctx;
     return t;
@@ -416,6 +422,14 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
 }
 
 /**
+ * Every successful answer carries the protocol of the server that wrote it. On a deploy, instances of
+ * two releases answer one upload side by side, so the client reads each answer by its own number.
+ */
+function answer(body: object): Response {
+  return Response.json({ ...body, protocol: UPLOAD_PROTOCOL });
+}
+
+/**
  * Every refusal leaves a route as BlobError.toJSON(), so the browser rebuilds it with its code
  * intact and callers switch on error.code instead of reading status numbers and message text.
  */
@@ -446,7 +460,7 @@ export function constraintsEndpoint(routeConstraints: ResolvedConstraints): (req
   const served: ServedConstraints = {};
   if (routeConstraints.contentTypes) served.contentTypes = routeConstraints.contentTypes;
   if (routeConstraints.maxSize !== undefined) served.maxSize = routeConstraints.maxSize;
-  const body = JSON.stringify({ constraints: served } satisfies WireConstraintsResponse);
+  const body = JSON.stringify({ protocol: UPLOAD_PROTOCOL, constraints: served } satisfies WireConstraintsResponse);
   const etag = `"${hash(body)}"`;
   return async (request: Request): Promise<Response> => {
     const headers = { 'content-type': 'application/json', 'cache-control': `public, max-age=${LIMITS_MAX_AGE}`, etag };

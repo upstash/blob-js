@@ -30,6 +30,7 @@ export interface UploadRecordBase {
   cancel(): boolean;
   /**
    * Only from 'error': continues the same upload from the parts that landed.
+   * Answers false when the route already accepted the upload and only its answer was lost.
    * @see node_modules/@upstash/blob/docs/uploads/large-files.mdx
    */
   retry(): boolean;

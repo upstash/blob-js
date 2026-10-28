@@ -34,9 +34,12 @@ export function corsProbe(bucketId: string): (request: Request, url: string, hea
   };
 }
 
+// The Origin header is the caller's to set, so it stays out of the command: a log reader who pastes
+// it as given would let whoever sent the request upload from their own site. The command takes a
+// placeholder, and the origin is named only as something to check.
 export function corsWarning(origin: string, bucketId: string): string {
-  const command = corsCommand(bucketId, origin);
-  return `[upstash-blob] storage refused the CORS preflight from ${origin}, so a browser upload from that origin will be blocked before any bytes are sent. If ${origin} is your app, add it to the bucket's CORS origins: run \`${command}\` followed by any origins to keep (it replaces the list), or use the Upstash Console under the bucket's CORS settings.`;
+  const command = corsCommand(bucketId, undefined);
+  return `[upstash-blob] storage refused the CORS preflight from ${origin}, so a browser upload from that origin will be blocked before any bytes are sent. If ${origin} is your app, add it to the bucket's CORS origins: run \`${command}\` listing every origin to keep, since it replaces the list (\`upstash blob get ${bucketId}\` shows the current one), or use the Upstash Console under the bucket's CORS settings.`;
 }
 
 /** true or false when storage answered the preflight; undefined when it could not be asked. */

@@ -4,14 +4,14 @@ import { upload } from '../../src/browser/index.ts';
 import { clock } from '../../src/browser/clock.ts';
 import { poolState, GLOBAL_REQUEST_CAP } from '../../src/browser/pool.ts';
 import { backoffMs, classify } from '../../src/browser/retry.ts';
-import { flush, installXhr, ManualXhr } from '../helpers/xhr.ts';
+import { flush, installXhr, ManualXhr, removeXhr } from '../helpers/xhr.ts';
 
 const MIB = 1024 * 1024;
 const memory = new Map<string, string>();
 const sleeps: number[] = [];
 let timers: { ms: number; cb: () => void }[] = [];
 let wakers: (() => void)[] = [];
-let calls: { phase: string; body: any }[] = [];
+let calls: { phase: string; body: any; protocol: unknown }[] = [];
 let onPhase: (body: any) => unknown | Response;
 const restore: (() => void)[] = [];
 
@@ -86,7 +86,9 @@ beforeAll(() => {
     const url = typeof input === 'string' ? input : input.url;
     if (!url.startsWith('/api/')) return real(input, init);
     const body = JSON.parse(init!.body as string);
-    calls.push({ phase: body.phase, body });
+    // Kept apart so the body assertions stay about the phase; afterEach checks it on every call.
+    const { protocol, ...rest } = body;
+    calls.push({ phase: body.phase, body: rest, protocol });
     const out = onPhase(body);
     if (out instanceof Response) return out;
     return Response.json(out);
@@ -112,6 +114,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   expect(poolState().active).toBe(0);
+  // Every phase of every test: the client's protocol rides each POST.
+  expect(calls.map((c) => c.protocol)).toEqual(calls.map(() => 1));
 });
 
 async function settle(rounds = 6) {
@@ -489,6 +493,124 @@ describe('a single PUT', () => {
     await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'request_failed', status: 418, message: 'Nope' });
   });
 
+  test('without XMLHttpRequest, upload() throws invalid_input before calling the route', () => {
+    onPhase = defaultRoute(3);
+    const put = removeXhr();
+    let thrown: unknown;
+    try {
+      expect(typeof XMLHttpRequest).toBe('undefined');
+      // Canceled at once if it ever stops throwing, so a regression fails here and not in every later test.
+      upload(png(), { route: '/api/upload' }).cancel();
+    } catch (e) {
+      thrown = e;
+    } finally {
+      put();
+    }
+    expect(BlobError.is(thrown)).toBe(true);
+    expect(thrown).toMatchObject({ code: 'invalid_input', status: 400 });
+    expect((thrown as BlobError).message).toContain('XMLHttpRequest');
+    expect((thrown as BlobError).message).toContain('Bucket.fromEnv().put(path, body)');
+    expect(calls).toEqual([]);
+  });
+
+  test('an input JSON cannot carry is invalid_input and never reaches the route', async () => {
+    onPhase = defaultRoute(3);
+    const failed = await upload(png(), { route: '/api/upload', input: { n: 1n } }).done.catch((e) => e);
+    expect(failed).toMatchObject({ code: 'invalid_input', status: 400 });
+    expect(failed.cause).toBeInstanceOf(TypeError);
+    expect(calls).toEqual([]);
+    expect(sleeps).toEqual([]);
+  });
+
+  test('a success that drops mid-body is a network failure, retried like one', async () => {
+    let parts = 0;
+    const base = defaultRoute(3);
+    const dropped = () => new Response(new ReadableStream({ start: (c) => c.error(new TypeError('terminated')) }));
+    onPhase = (body) => (body.phase === 'parts' && parts++ === 0 ? dropped() : base(body));
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    // A refused presign asks the route for fresh urls, read-only and safe to ask again.
+    ManualXhr.pending[0]!.respond(403);
+    await settle();
+    await wake();
+    await settle();
+    expect(parts).toBe(2);
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await task.done;
+
+    onPhase = (body) => (body.phase === 'begin' ? dropped() : base(body));
+    await expect(upload(png(), { route: '/api/upload' }).done).rejects.toMatchObject({ code: 'request_failed', status: 503, message: "The upload route's response was cut off" });
+  });
+
+  test("a success for 'end' that drops mid-body is never sent again", async () => {
+    let ends = 0;
+    const base = defaultRoute(3);
+    onPhase = (body) => {
+      if (body.phase !== 'end') return base(body);
+      ends++;
+      return new Response(new ReadableStream({ start: (c) => c.error(new TypeError('terminated')) }));
+    };
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await settle();
+    const failed = await task.done.catch((e) => e);
+    expect(failed).toMatchObject({ code: 'request_failed', status: 502 });
+    expect(failed.message).toContain('The upload completed');
+    expect(task.retry()).toBe(false);
+    expect(ends).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  test("a success for 'end' whose body is not an answer is never sent again", async () => {
+    let ends = 0;
+    const base = defaultRoute(3);
+    onPhase = (body) => {
+      if (body.phase !== 'end') return base(body);
+      ends++;
+      return new Response('<html>ok</html>', { status: 200 });
+    };
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await settle();
+    await expect(task.done).rejects.toMatchObject({ code: 'request_failed', status: 502 });
+    expect(task.retry()).toBe(false);
+    expect(ends).toBe(1);
+  });
+
+  test('a refusal that drops mid-body keeps its status and is not retried', async () => {
+    let ends = 0;
+    const base = defaultRoute(3);
+    const dropped = () => new Response(new ReadableStream({ start: (c) => c.error(new TypeError('terminated')) }), { status: 403 });
+    onPhase = (body) => {
+      if (body.phase !== 'end') return base(body);
+      ends++;
+      return dropped();
+    };
+    const task = upload(png(), { route: '/api/upload' });
+    await settle();
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await settle();
+    await expect(task.done).rejects.toMatchObject({ code: 'forbidden', status: 403 });
+    expect(ends).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  test('a throw from headers is a 400 carrying the app error, and the route is never called', async () => {
+    onPhase = defaultRoute(3);
+    const cause = new Error('no token');
+    const failed = await upload(png(), {
+      route: '/api/upload',
+      headers: () => {
+        throw cause;
+      },
+    }).done.catch((e) => e);
+    expect(failed).toMatchObject({ code: 'request_failed', status: 400, message: 'No token' });
+    expect(failed.cause).toBe(cause);
+    expect(calls).toEqual([]);
+  });
+
   test('the controls answer false instead of throwing when they cannot act', async () => {
     onPhase = defaultRoute(3);
     const task = upload(png(), { route: '/api/upload' });
@@ -555,6 +677,24 @@ describe('a single PUT', () => {
     }
   });
 
+  test('answers from servers of different protocols, as on a deploy, still make one upload', async () => {
+    // begin and end can be answered by two releases: every mix of newer, none and garbage.
+    for (const [atBegin, atEnd] of [[2, undefined], [undefined, 2], [2, 'x'], ['x', 1]]) {
+      const from = calls.length;
+      const route = defaultRoute(3);
+      onPhase = (body) => {
+        const out = route(body) as Record<string, unknown>;
+        const advertised = body.phase === 'begin' ? atBegin : atEnd;
+        return advertised === undefined ? out : { ...out, protocol: advertised };
+      };
+      const task = upload(png(), { route: '/api/upload' });
+      await settle();
+      ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+      await expect(task.done).resolves.toMatchObject({ path: 'p' });
+      expect(calls.slice(from).map((c) => c.phase)).toEqual(['begin', 'end']);
+    }
+  });
+
   test('cancel while queued rejects done with AbortError and never PUTs', async () => {
     let release!: () => void;
     onPhase = () => new Response(new ReadableStream({ start: (c) => (release = () => c.close()) }));
@@ -610,6 +750,35 @@ describe('multipart', () => {
     expect(sent.length).toBe(21);
     expect(sent.find((p) => p.n === 21)!.etag).toBe('"e21"');
     expect(task.snapshot().percent).toBe(100);
+  });
+
+  test("a cut-off success for 'end' clears the pending record, so picking the file again starts over", async () => {
+    const size = 17 * MIB;
+    let ends = 0;
+    const base = defaultRoute(size);
+    onPhase = (body) => {
+      if (body.phase !== 'end') return base(body);
+      ends++;
+      return new Response(new ReadableStream({ start: (c) => c.error(new TypeError('terminated')) }));
+    };
+    const file = big(size);
+    const task = upload(file, { route: '/api/upload/large' });
+    await settle();
+    expect(memory.size).toBe(1);
+    for (let done = 0; done < 4; ) {
+      const x = ManualXhr.pending[0];
+      if (!x) {
+        await settle();
+        continue;
+      }
+      x.respond(200, { etag: `"e${done}"` });
+      done++;
+      await settle();
+    }
+    await expect(task.done).rejects.toMatchObject({ code: 'request_failed', status: 502 });
+    expect(task.retry()).toBe(false);
+    expect(ends).toBe(1);
+    expect(memory.size).toBe(0);
   });
 
   test('pause keeps the parts already sending, drops the idle ones, and never retreats loaded', async () => {

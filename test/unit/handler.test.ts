@@ -3,6 +3,7 @@ import * as z from 'zod';
 import { BlobError, Bucket, uniquePath, uploadRoute, uploadHandler } from '../../src/index.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { encodeToken } from '../../src/server/token.ts';
+import { corsCommand } from '../../src/shared/errors.ts';
 import type { WireBeginResponse } from '../../src/shared/types.ts';
 
 // The handler against a scripted R2. What matters here is the dispatch and the composition: which
@@ -133,7 +134,7 @@ describe('dispatch', () => {
     const uploads = handler();
     const res = await uploads.GET(new Request(url('large')));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ constraints: { maxSize: 2_000_000_000 } });
+    expect(await res.json()).toEqual({ protocol: 1, constraints: { maxSize: 2_000_000_000 } });
 
     const begin = await post(uploads, 'attachment', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } });
     expect(begin.status).toBe(200);
@@ -171,7 +172,7 @@ describe('dispatch', () => {
     const uploads = uploadHandler({ bucket: bucket(), constraints: { maxSize: '1mb' }, onBeforeUpload: () => ({ path: 'only/1.png' }) });
     const begin = await began(uploads, undefined, { name: 'a.png', type: 'image/png', size: 10 });
     expect(begin.path).toBe('only/1.png');
-    expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ constraints: { maxSize: 1_000_000 } });
+    expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ protocol: 1, constraints: { maxSize: 1_000_000 } });
     // A name on the query is a client bound to some other handler: it does not silently get this
     // route, for GET or for POST.
     for (const name of ['anything', '__proto__', 'toString']) {
@@ -254,11 +255,11 @@ describe('dispatch', () => {
 describe('defaults', () => {
   test('a route replaces constraints per key, and null clears one', async () => {
     const uploads = handler();
-    expect(await (await uploads.GET(new Request(url('attachment')))).json()).toEqual({ constraints: { contentTypes: ['image/png'], maxSize: 20_000_000 } });
+    expect(await (await uploads.GET(new Request(url('attachment')))).json()).toEqual({ protocol: 1, constraints: { contentTypes: ['image/png'], maxSize: 20_000_000 } });
     // maxSize replaced, contentTypes cleared by null.
-    expect(await (await uploads.GET(new Request(url('large')))).json()).toEqual({ constraints: { maxSize: 2_000_000_000 } });
+    expect(await (await uploads.GET(new Request(url('large')))).json()).toEqual({ protocol: 1, constraints: { maxSize: 2_000_000_000 } });
     // maxSize replaced, the handler's type list inherited.
-    expect(await (await uploads.GET(new Request(url('avatar')))).json()).toEqual({ constraints: { contentTypes: ['image/png'], maxSize: 2_000_000 } });
+    expect(await (await uploads.GET(new Request(url('avatar')))).json()).toEqual({ protocol: 1, constraints: { contentTypes: ['image/png'], maxSize: 2_000_000 } });
   });
 
   test('the inherited constraints still refuse', async () => {
@@ -362,8 +363,8 @@ describe('defaults', () => {
       routes: { omega: { constraints: { maxSize: '1kb' } }, alpha: {} },
     });
     for (const uploads of [first, second]) {
-      expect(await (await uploads.GET(new Request(url('alpha')))).json()).toEqual({ constraints: { maxSize: 20_000_000 } });
-      expect(await (await uploads.GET(new Request(url('omega')))).json()).toEqual({ constraints: { maxSize: 1_000 } });
+      expect(await (await uploads.GET(new Request(url('alpha')))).json()).toEqual({ protocol: 1, constraints: { maxSize: 20_000_000 } });
+      expect(await (await uploads.GET(new Request(url('omega')))).json()).toEqual({ protocol: 1, constraints: { maxSize: 1_000 } });
     }
   });
 });
@@ -477,7 +478,7 @@ test('a 32MiB upload limit accepts the exact file size and rejects one byte over
     constraints: { maxSize: '32MiB' },
     onBeforeUpload: () => ({ path: 'large/file.bin' }),
   });
-  expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ constraints: { maxSize: 33_554_432 } });
+  expect(await (await uploads.GET(new Request(url()))).json()).toEqual({ protocol: 1, constraints: { maxSize: 33_554_432 } });
   const begin = await post(uploads, undefined, { phase: 'begin', file: { name: 'file.bin', type: 'application/octet-stream', size: 33_554_432 } });
   expect(begin.status).toBe(200);
   expect((await begin.json()).upload.multipart).toBe(true);
@@ -533,7 +534,9 @@ describe('CORS probe', () => {
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain('http://localhost:3001');
       expect(warnings[0]).toContain("bucket's CORS origins");
-      expect(warnings[0]).toContain("`upstash blob cors bucket-id 'http://localhost:3001'`");
+      // The origin is the caller's to set, so it is named but never put in the command to paste.
+      expect(warnings[0]).toContain('`upstash blob cors bucket-id <origin>`');
+      expect(warnings[0]).toContain('replaces the list');
       expect(warnings[0]).toContain('Upstash Console');
 
       await fromOrigin(uploads, 'http://localhost:3001');
@@ -596,17 +599,10 @@ describe('CORS probe', () => {
     expect(r2Calls().filter((c) => c.method === 'OPTIONS')).toHaveLength(0);
   });
 
-  test('the CLI command in the warning never carries an origin unsafe to paste into a shell', async () => {
-    r2Handler = storage([]);
-    const uploads = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png' }) });
-    await withWarnings(async (warnings) => {
-      await fromOrigin(uploads, 'http://[::1]:3000');
-      await fromOrigin(uploads, 'https://a.example.com$(id)');
-      await settle();
-      expect(warnings).toHaveLength(2);
-      expect(warnings[0]).toContain("`upstash blob cors bucket-id 'http://[::1]:3000'`");
-      expect(warnings[1]).toContain('`upstash blob cors bucket-id <origin>`');
-    });
+  test('the CLI command in the warning never carries an origin unsafe to paste into a shell', () => {
+    expect(corsCommand('b', 'http://[::1]:3000')).toBe("upstash blob cors b 'http://[::1]:3000'");
+    expect(corsCommand('b', 'https://a.example.com$(id)')).toBe('upstash blob cors b <origin>');
+    expect(corsCommand('b', "https://a.example.com'")).toBe('upstash blob cors b <origin>');
   });
 });
 
@@ -682,6 +678,15 @@ describe('owner', () => {
       expect(r2Calls()).toHaveLength(0);
     });
   }
+
+  test('a token minted before owner was turned on still finishes for a signed-in user', async () => {
+    const before = uploadHandler({ bucket: bucket(), context: (request) => request.headers.get('x-user'), onBeforeUpload: () => ({ path: 'a.png' }) });
+    const begin = (await (await before.POST(as('alice', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 4 } }))).json()) as WireBeginResponse;
+    const after = owned([]);
+    const body = { phase: 'parts', completionToken: begin.completionToken, from: 1 };
+    expect((await after.POST(as('alice', body))).status).toBe(200);
+    expect((await after.POST(as(undefined, body))).status).toBe(401);
+  });
 
   test('owner needs a context', () => {
     expect(() => uploadHandler({ bucket: bucket(), owner: () => 'x', onBeforeUpload: () => ({ path: 'a' }) } as any)).toThrow(/needs a context/);
