@@ -312,14 +312,6 @@ export interface UploadHandlerOptions<TCtx, TRoutes, TData, TSchema extends Stan
    * Write it above the callbacks: see the note at the top of this file.
    */
   context?: (request: Request) => TCtx;
-  /**
-   * Who an upload belongs to, read from `ctx`: `owner: (user) => user.id`. Signed into the upload
-   * at its first request; a later request whose `ctx` names someone else is a 403 before storage or
-   * any callback is touched, so one user cannot finish, re-sign or cancel another's upload.
-   * Uploads begun before `owner` was turned on still finish; while a deploy that turns it on rolls
-   * out, an upload begun on a new instance is refused by an old one until the user retries.
-   */
-  owner?: (ctx: Awaited<TCtx>) => string | number | null | undefined;
   /** Every route inherits it. A Standard Schema for the browser's `input`. */
   input?: TSchema;
   /**
@@ -392,18 +384,9 @@ interface AnyRouteSpec {
   onError?: (args: any) => ErrorReturn;
 }
 
-// A session lookup that found nobody reads as `user?.id`: that is a 401, never an upload owned by "undefined".
-function ownerString(owner: string | number | null | undefined): string {
-  if (owner === null || owner === undefined || owner === '') throw new BlobError('unauthorized', { message: 'no signed-in user to own this upload' });
-  // An object would stringify to "[object Object]" for everyone, making every user the same owner.
-  if (typeof owner !== 'string' && typeof owner !== 'number') throw new TypeError(`uploadHandler: owner must return a string or number id, got ${typeof owner}`);
-  return String(owner);
-}
-
 /**
  * The server half of a direct browser upload: export `{ GET, POST }` from one route and upload with
- * `useUpload`. Check the session in `context`, bind uploads with `owner: (user) => user.id`, return
- * the path from `onBeforeUpload`, and record the file in `onUploadComplete`, keyed by path. Signing,
+ * `useUpload`. Check the session in `context`, return the path from `onBeforeUpload`, and record the file in `onUploadComplete`, keyed by path. Signing,
  * multipart, retries, cancel and completion checks are the SDK's: no presign or complete routes.
  * See "AI agents" in the README for the full recipe.
  *
@@ -425,7 +408,6 @@ export function uploadHandler<
 >(options: UploadHandlerOptions<TCtx, TRoutes, TData, TSchema, TState, TRoutesArg>): UploadHandler<HandlerRoutes<TRoutes, TData, RouteInputOf<TSchema>>, Awaited<TCtx>> {
   const named = options.routes !== undefined;
   const definitions = (options.routes ?? { '': {} }) as unknown as Record<string, unknown>;
-  if (options.owner && !options.context) throw new TypeError('uploadHandler: owner reads ctx, so it needs a context');
   if (named && Object.keys(definitions).length === 0) throw new TypeError('uploadHandler was given an empty routes map: name at least one route, or omit routes to make the handler the route');
 
   // The request is the key, so `ctx` reaches the direct-upload callbacks without entering a
@@ -482,7 +464,6 @@ export function uploadHandler<
       onBeforeUpload: (args: any) => onBeforeUpload({ ...args, ctx: ctxOf(args.request as Request) }),
       onUploadComplete: onUploadComplete ? (args: any) => onUploadComplete({ ...args, ctx: ctxOf(args.request as Request) }) : undefined,
       onError,
-      ownerOf: options.owner ? (request: Request) => ownerString(options.owner!(ctxOf(request) as Awaited<TCtx>)) : undefined,
     };
 
     const handlers = handleUpload(shared);

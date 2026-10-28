@@ -76,8 +76,6 @@ export interface InternalUploadOptions {
   onBeforeUpload: (args: { request: Request; route: string; file: UploadFile; input: unknown }) => Decided | Promise<Decided>;
   onUploadComplete?: (args: Record<string, unknown>) => unknown;
   onError?: ErrorMapper;
-  /** Who the request is from, when the handler binds uploads to an owner. @see UploadHandlerOptions.owner */
-  ownerOf?: (request: Request) => string;
 }
 
 export interface InternalUploadHandlers {
@@ -117,11 +115,11 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
         case 'begin':
           return answer(await begin(request, body, details));
         case 'parts':
-          return answer(await parts(request, body, details));
+          return answer(await parts(body, details));
         case 'end':
           return answer(await end(request, body, details));
         case 'cancel':
-          return answer(await cancel(request, body, details));
+          return answer(await cancel(body, details));
         default:
           throw new BlobError('invalid_input', { message: `unknown phase ${String(body.phase)}` });
       }
@@ -143,8 +141,6 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     enforce(routeConstraints, file, head);
 
     const input = await validateInput(options.input, body.input);
-    // Before onBeforeUpload and storage: a request with no owner must leave no row and no multipart behind.
-    const owner = options.ownerOf?.(request);
 
     const decided = await options.onBeforeUpload({ request, route: options.route, file, input });
     if (!decided || typeof decided.path !== 'string') throw new TypeError('onBeforeUpload must return { path }');
@@ -209,7 +205,6 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       ctx: decided.state,
       exp: Date.now() + TOKEN_TTL_MS,
       ...(uploadId === undefined ? {} : { uploadId }),
-      ...(owner === undefined ? {} : { o: owner }),
       partSize,
     };
     const completionToken = await signToken(payload, tokenKey());
@@ -230,8 +225,8 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     return { completionToken, path: decided.path, upload: { partSize, multipart, parts } };
   }
 
-  async function parts(request: Request, body: any, details: ErrorDetails): Promise<WirePartsResponse> {
-    const t = await verify(request, body.completionToken, details);
+  async function parts(body: any, details: ErrorDetails): Promise<WirePartsResponse> {
+    const t = await verify(body.completionToken, details);
     const from = Number.isInteger(body.from) && body.from >= 1 ? body.from : 1;
     // Nothing lands early on a single PUT: it is one object write, so a resumed upload runs it again.
     const landed = t.uploadId ? (await r2.listParts(t.path, t.uploadId)).map(({ n, etag }) => ({ n, etag })) : [];
@@ -239,7 +234,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
   }
 
   async function end(request: Request, body: any, details: ErrorDetails): Promise<WireEndResponse<unknown>> {
-    const t = await verify(request, body.completionToken, details);
+    const t = await verify(body.completionToken, details);
     const file: UploadFile = { name: t.n, type: t.type, size: t.size };
     details.file = file;
 
@@ -344,8 +339,8 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     }
   }
 
-  async function cancel(request: Request, body: any, details: ErrorDetails): Promise<{ ok: true }> {
-    const t = await verify(request, body.completionToken, details);
+  async function cancel(body: any, details: ErrorDetails): Promise<{ ok: true }> {
+    const t = await verify(body.completionToken, details);
     if (t.uploadId) {
       await r2.abortMultipart(t.path, t.uploadId);
       return { ok: true };
@@ -359,19 +354,11 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     return { ok: true };
   }
 
-  async function verify(request: Request, token: unknown, details: ErrorDetails): Promise<TokenPayload> {
+  async function verify(token: unknown, details: ErrorDetails): Promise<TokenPayload> {
     if (typeof token !== 'string') throw new BlobError('invalid_input', { message: 'completionToken is required' });
     const t = await verifyToken(token, tokenKey());
     if (!t || t.b !== r2.bucketId || t.r !== routeId) throw new BlobError('forbidden', { message: 'completionToken is not valid for this route' });
     if (t.exp < Date.now()) throw new BlobError('forbidden', { message: 'completionToken has expired' });
-    // A token is a bearer capability, so without this anyone signed in who holds one could finish,
-    // re-sign or cancel somebody else's upload. Checked before storage or any callback is touched,
-    // and before details names the path, so a refusal tells the caller nothing about the upload.
-    // A token with no owner was minted before `owner` was turned on: it still needs a signed-in user,
-    // but is let through so uploads in flight across that deploy finish, as they would have before.
-    // The reverse fails closed: an owned token never works on a route that cannot check its owner.
-    const who = options.ownerOf?.(request);
-    if (t.o !== undefined && who !== t.o) throw new BlobError('forbidden', { message: 'this upload belongs to another user' });
     details.path = t.path;
     details.state = t.ctx;
     return t;
