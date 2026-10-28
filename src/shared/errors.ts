@@ -72,13 +72,16 @@ const DEFAULT_HINT: Partial<Record<BlobErrorCode, string>> = {
  */
 export const PLATFORM_BODY_CAP_HINT = 'Vercel caps a serverless request body at 4.5MB, AWS Lambda at 6MB, Cloudflare at 100MB on the free plan';
 
+/** An origin as a browser sends it: scheme, host and port, nothing a shell or a log could misread. */
+export const PLAIN_ORIGIN_RE = /^https?:\/\/([a-z0-9.-]+|\[[0-9a-f:.]+\])(:\d+)?$/i;
+
 /**
  * The CLI command that adds an origin to a bucket's CORS list, for a hint meant to be pasted into a
  * shell. The origin is single-quoted, since zsh reads the brackets of an IPv6 host as a glob, and
  * only an origin made of plain host characters goes in at all: a URL host may hold a quote or `$(`.
  */
 export function corsCommand(bucket: string, origin: string | undefined): string {
-  const plain = origin !== undefined && /^https?:\/\/([a-z0-9.-]+|\[[0-9a-f:.]+\])(:\d+)?$/i.test(origin);
+  const plain = origin !== undefined && PLAIN_ORIGIN_RE.test(origin);
   return `upstash blob cors ${bucket} ${plain ? `'${origin}'` : '<origin>'}`;
 }
 

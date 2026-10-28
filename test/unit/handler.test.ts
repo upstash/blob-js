@@ -537,6 +537,7 @@ describe('CORS probe', () => {
       // The origin is the caller's to set, so it is named but never put in the command to paste.
       expect(warnings[0]).toContain('`upstash blob cors bucket-id <origin>`');
       expect(warnings[0]).toContain('replaces the list');
+      expect(warnings[0]).toContain('--hide-credentials');
       expect(warnings[0]).toContain('Upstash Console');
 
       await fromOrigin(uploads, 'http://localhost:3001');

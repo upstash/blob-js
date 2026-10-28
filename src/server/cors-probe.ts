@@ -1,4 +1,4 @@
-import { corsCommand } from '../shared/errors.ts';
+import { corsCommand, PLAIN_ORIGIN_RE } from '../shared/errors.ts';
 
 /**
  * A browser upload PUTs straight to storage, so a bucket whose CORS list leaves out the page's origin
@@ -12,10 +12,6 @@ import { corsCommand } from '../shared/errors.ts';
  * Diagnostic only: never awaited by the request, never thrown, and once per origin per process.
  */
 
-// Only what a browser actually sends: scheme, host, port. The Origin header is the caller's to set
-// and lands in the log verbatim, so anything else (spaces, quotes, backticks) is never probed.
-const PLAIN_ORIGIN_RE = /^https?:\/\/([a-z0-9.-]+|\[[0-9a-f:.]+\])(:\d+)?$/i;
-
 /** Origins remembered as probed. Bounded, since the Origin header is the client's to choose. */
 const MAX_PROBED = 64;
 
@@ -23,6 +19,8 @@ export function corsProbe(bucketId: string): (request: Request, url: string, hea
   const probed = new Set<string>();
   return (request, url, headers) => {
     const origin = request.headers?.get?.('origin');
+    // Only what a browser actually sends: the Origin header is the caller's to set and lands in the
+    // log verbatim, so anything else (spaces, quotes, backticks) is never probed.
     if (!origin || !PLAIN_ORIGIN_RE.test(origin) || probed.has(origin)) return;
     // Forgetting is the cheap way to stay bounded: a forgotten origin is only probed once more.
     if (probed.size >= MAX_PROBED) probed.clear();
@@ -43,7 +41,7 @@ export function corsProbe(bucketId: string): (request: Request, url: string, hea
 // placeholder, and the origin is named only as something to check.
 export function corsWarning(origin: string, bucketId: string): string {
   const command = corsCommand(bucketId, undefined);
-  return `[upstash-blob] storage refused the CORS preflight from ${origin}, so a browser upload from that origin will be blocked before any bytes are sent. If ${origin} is your app, add it to the bucket's CORS origins: run \`${command}\` listing every origin to keep, since it replaces the list (\`upstash blob get ${bucketId}\` shows the current one), or use the Upstash Console under the bucket's CORS settings.`;
+  return `[upstash-blob] storage refused the CORS preflight from ${origin}, so a browser upload from that origin will be blocked before any bytes are sent. If ${origin} is your app, add it to the bucket's CORS origins: run \`${command}\` listing every origin to keep, since it replaces the list (\`upstash blob get ${bucketId} --hide-credentials\` shows the current one), or use the Upstash Console under the bucket's CORS settings.`;
 }
 
 /** true or false when storage answered the preflight; undefined when it could not be asked. */
