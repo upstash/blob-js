@@ -37,7 +37,7 @@ export interface PutOptions {
   maxSize?: Size;
   /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
-  /** Lowercase keys (storage reads them back lowercased) and printable ASCII values. */
+  /** Printable ASCII values; keys are stored and read back lowercased, so write them lowercase. */
   metadata?: Record<string, string>;
   /**
    * Declared length for a stream whose size is not otherwise known. Without it, `put()` buffers the
@@ -108,7 +108,7 @@ export interface SignedUploadUrlOptions {
   contentType?: string;
   /** The `Cache-Control` the object is stored with. @see CacheOption */
   cache?: CacheOption;
-  /** Lowercase keys (storage reads them back lowercased) and printable ASCII values. */
+  /** Printable ASCII values; keys are stored and read back lowercased, so write them lowercase. */
   metadata?: Record<string, string>;
   /** Pin the body's exact length, so a url handed out for one file cannot upload another size. */
   size?: Size;
@@ -162,7 +162,7 @@ export interface CopyOptions {
 export interface UpdateJsonOptions {
   /** The `Cache-Control` the rewritten object is stored with. @see CacheOption */
   cache?: CacheOption;
-  /** Lowercase keys (storage reads them back lowercased) and printable ASCII values. */
+  /** Printable ASCII values; keys are stored and read back lowercased, so write them lowercase. */
   metadata?: Record<string, string>;
   /** How many times to read, transform and write before giving up with 'conflict'. Default 6. */
   maxAttempts?: number;

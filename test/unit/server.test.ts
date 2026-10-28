@@ -523,13 +523,27 @@ describe('bucket guards', () => {
     expect(e.status).toBe(400);
     expect(e.message).toContain('metadata.note');
     await expect(b.put('a.txt', 'x', { metadata: { 'bad name': 'v' } })).rejects.toMatchObject({ code: 'invalid_input' });
-    // Storage lowercases keys, so recordId would be read back as recordid: refused at write time.
-    await expect(b.put('a.txt', 'x', { metadata: { recordId: 'v' } })).rejects.toMatchObject({ code: 'invalid_input', hint: expect.stringContaining('"recordid"') });
     // R2 re-encodes anything above ASCII, so it is refused too rather than handed back changed.
     await expect(b.put('a.txt', 'x', { metadata: { note: 'café' } })).rejects.toMatchObject({ code: 'invalid_input' });
     r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
     await b.put('a.txt', 'x', { metadata: { note: encodeURIComponent('café') } });
     expect(r2Calls()[0]!.headers.get('x-amz-meta-note')).toBe('caf%C3%A9');
+  });
+
+  test('an uppercase metadata key is lowercased as before, with a warning once per key', async () => {
+    resetCredentialCaches();
+    const warned = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      r2Handler = () => new Response('', { status: 200, headers: { etag: '"e"' } });
+      const b = bucket();
+      await b.put('a.txt', 'x', { metadata: { recordId: 'v' } });
+      await b.put('a.txt', 'x', { metadata: { recordId: 'v' } });
+      expect(r2Calls()[0]!.headers.get('x-amz-meta-recordid')).toBe('v');
+      expect(warned.mock.calls.filter(([m]) => String(m).includes('"recordId"')).length).toBe(1);
+      expect(String(warned.mock.calls[0]![0])).toContain('"recordid"');
+    } finally {
+      warned.mockRestore();
+    }
   });
 
   test("del({ prefix: '' }) has to say it means the whole bucket", async () => {

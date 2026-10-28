@@ -57,7 +57,7 @@ interface Decided {
   path: string;
   /** The `Cache-Control` this object is stored with, overriding the bucket default. @see CacheOption */
   cache?: CacheOption;
-  /** Lowercase keys (storage reads them back lowercased) and printable ASCII values. */
+  /** Printable ASCII values; keys are stored and read back lowercased, so write them lowercase. */
   metadata?: Record<string, string>;
   constraints?: UploadConstraints;
   state?: unknown;
@@ -367,7 +367,12 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     // A token is a bearer capability, so without this anyone signed in who holds one could finish,
     // re-sign or cancel somebody else's upload. Checked before storage or any callback is touched,
     // and before details names the path, so a refusal tells the caller nothing about the upload.
-    if (options.ownerOf && options.ownerOf(request) !== t.o) throw new BlobError('forbidden', { message: 'this upload belongs to another user' });
+    // A token with no owner was minted before `owner` was turned on: it still needs a signed-in user,
+    // but is let through so uploads in flight across that deploy finish, as they would have before.
+    if (options.ownerOf) {
+      const who = options.ownerOf(request);
+      if (t.o !== undefined && who !== t.o) throw new BlobError('forbidden', { message: 'this upload belongs to another user' });
+    }
     details.path = t.path;
     details.state = t.ctx;
     return t;

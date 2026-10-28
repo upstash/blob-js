@@ -668,6 +668,15 @@ describe('owner', () => {
     });
   }
 
+  test('a token minted before owner was turned on still finishes for a signed-in user', async () => {
+    const before = uploadHandler({ bucket: bucket(), context: (request) => request.headers.get('x-user'), onBeforeUpload: () => ({ path: 'a.png' }) });
+    const begin = (await (await before.POST(as('alice', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 4 } }))).json()) as WireBeginResponse;
+    const after = owned([]);
+    const body = { phase: 'parts', completionToken: begin.completionToken, from: 1 };
+    expect((await after.POST(as('alice', body))).status).toBe(200);
+    expect((await after.POST(as(undefined, body))).status).toBe(401);
+  });
+
   test('owner needs a context', () => {
     expect(() => uploadHandler({ bucket: bucket(), owner: () => 'x', onBeforeUpload: () => ({ path: 'a' }) } as any)).toThrow(/needs a context/);
   });
