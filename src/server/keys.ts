@@ -62,6 +62,8 @@ export function metaHeaders(metadata: Record<string, string> | undefined): Recor
     // releases lowercased these silently and apps rely on that, so this warns, once per key, rather
     // than refusing.
     if (k !== k.toLowerCase() && !warnedKeys.has(k)) {
+      // Bounded, since keys may come from user input: a forgotten key only warns once more.
+      if (warnedKeys.size >= 64) warnedKeys.clear();
       warnedKeys.add(k);
       console.warn(`[upstash-blob] metadata key "${k}" is stored and read back as "${k.toLowerCase()}"; write it lowercase`);
     }
