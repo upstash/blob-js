@@ -3,6 +3,7 @@ import * as z from 'zod';
 import { BlobError, Bucket, uniquePath, uploadRoute, uploadHandler } from '../../src/index.ts';
 import { resetCredentialCaches } from '../../src/server/credentials.ts';
 import { encodeToken } from '../../src/server/token.ts';
+import { corsCommand } from '../../src/shared/errors.ts';
 import type { WireBeginResponse } from '../../src/shared/types.ts';
 
 // The handler against a scripted R2. What matters here is the dispatch and the composition: which
@@ -533,6 +534,11 @@ describe('CORS probe', () => {
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain('http://localhost:3001');
       expect(warnings[0]).toContain("bucket's CORS origins");
+      // The origin is the caller's to set, so it is named but never put in the command to paste.
+      expect(warnings[0]).toContain('`upstash blob cors bucket-id <origin>`');
+      expect(warnings[0]).toContain('replaces the list');
+      expect(warnings[0]).toContain('--hide-credentials');
+      expect(warnings[0]).toContain('Upstash Console');
 
       await fromOrigin(uploads, 'http://localhost:3001');
       await settle();
@@ -605,5 +611,12 @@ describe('CORS probe', () => {
     expect((await fromOrigin(uploads, 'http://localhost:3001')).status).toBe(401);
     await settle();
     expect(r2Calls().filter((c) => c.method === 'OPTIONS')).toHaveLength(0);
+  });
+
+  test('the CLI command in the warning never carries an origin unsafe to paste into a shell', () => {
+    expect(corsCommand('b', 'http://[::1]:3000')).toBe("upstash blob cors b 'http://[::1]:3000'");
+    expect(corsCommand('b', 'https://a.example.com$(id)')).toBe('upstash blob cors b <origin>');
+    expect(corsCommand('b', "https://a.example.com'")).toBe('upstash blob cors b <origin>');
+    expect(corsCommand('b', 'https://app.example.com:8443')).toBe('upstash blob cors b https://app.example.com:8443');
   });
 });
