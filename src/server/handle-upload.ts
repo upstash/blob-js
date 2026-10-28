@@ -369,10 +369,9 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     // and before details names the path, so a refusal tells the caller nothing about the upload.
     // A token with no owner was minted before `owner` was turned on: it still needs a signed-in user,
     // but is let through so uploads in flight across that deploy finish, as they would have before.
-    if (options.ownerOf) {
-      const who = options.ownerOf(request);
-      if (t.o !== undefined && who !== t.o) throw new BlobError('forbidden', { message: 'this upload belongs to another user' });
-    }
+    // The reverse fails closed: an owned token never works on a route that cannot check its owner.
+    const who = options.ownerOf?.(request);
+    if (t.o !== undefined && who !== t.o) throw new BlobError('forbidden', { message: 'this upload belongs to another user' });
     details.path = t.path;
     details.state = t.ctx;
     return t;

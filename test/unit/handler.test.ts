@@ -701,6 +701,14 @@ describe('owner', () => {
     expect((await after.POST(as(undefined, body))).status).toBe(401);
   });
 
+  test('an owned token is refused by a route that does not check owners', async () => {
+    const begin = (await (await owned([]).POST(as('alice', { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 4 } }))).json()) as WireBeginResponse;
+    const unowned = uploadHandler({ bucket: bucket(), context: (request) => ({ id: request.headers.get('x-user') }), onBeforeUpload: ({ ctx, file }) => ({ path: `${ctx.id}/${file.name}` }) });
+    calls = [];
+    expect((await unowned.POST(as('mallory', { phase: 'parts', completionToken: begin.completionToken, from: 1 }))).status).toBe(403);
+    expect(r2Calls()).toHaveLength(0);
+  });
+
   test('owner needs a context', () => {
     expect(() => uploadHandler({ bucket: bucket(), owner: () => 'x', onBeforeUpload: () => ({ path: 'a' }) } as any)).toThrow(/needs a context/);
   });
