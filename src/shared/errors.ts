@@ -76,7 +76,7 @@ export const PLATFORM_BODY_CAP_HINT = 'Vercel caps a serverless request body at 
 export const PLAIN_ORIGIN_RE = /^https?:\/\/([a-z0-9.-]+|\[[0-9a-f:.]+\])(:\d+)?$/i;
 
 /**
- * The CLI command that adds an origin to a bucket's CORS list, for a hint meant to be pasted into a
+ * The CLI command that sets a bucket's CORS list, replacing it whole, for a hint meant to be pasted into a
  * shell. Only an origin made of plain host characters goes in at all, and it is single-quoted only
  * for the brackets of an IPv6 host, which zsh reads as a glob: cmd.exe would pass the quotes on.
  */
