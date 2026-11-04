@@ -104,7 +104,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
   const routeConstraints = resolveConstraints(options.constraints);
   const routeId = options.id;
   const GET = constraintsEndpoint(routeConstraints);
-  const probeCors = corsProbe();
+  const probeCors = corsProbe(r2.bucketId);
 
   const POST = async (request: Request): Promise<Response> => {
     const details: ErrorDetails = {};

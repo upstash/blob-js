@@ -1,3 +1,5 @@
+import { corsCommand, PLAIN_ORIGIN_RE } from '../shared/errors.ts';
+
 /**
  * A browser upload PUTs straight to storage, so a bucket whose CORS list leaves out the page's origin
  * fails in the browser alone: the route answers 200, a curl against it succeeds, and the only trace
@@ -10,17 +12,15 @@
  * Diagnostic only: never awaited by the request, never thrown, and once per origin per process.
  */
 
-// Only what a browser actually sends: scheme, host, port. The Origin header is the caller's to set
-// and lands in the log verbatim, so anything else (spaces, quotes, backticks) is never probed.
-const PLAIN_ORIGIN_RE = /^https?:\/\/([a-z0-9.-]+|\[[0-9a-f:.]+\])(:\d+)?$/i;
-
 /** Origins remembered as probed. Bounded, since the Origin header is the client's to choose. */
 const MAX_PROBED = 64;
 
-export function corsProbe(): (request: Request, url: string, headers: Record<string, string> | undefined) => void {
+export function corsProbe(bucketId: string): (request: Request, url: string, headers: Record<string, string> | undefined) => void {
   const probed = new Set<string>();
   return (request, url, headers) => {
     const origin = request.headers?.get?.('origin');
+    // Only what a browser actually sends: the Origin header is the caller's to set and lands in the
+    // log verbatim, so anything else (spaces, quotes, backticks) is never probed.
     if (!origin || !PLAIN_ORIGIN_RE.test(origin) || probed.has(origin)) return;
     // Forgetting is the cheap way to stay bounded: a forgotten origin is only probed once more.
     if (probed.size >= MAX_PROBED) probed.clear();
@@ -29,15 +29,19 @@ export function corsProbe(): (request: Request, url: string, headers: Record<str
       (allowed) => {
         // Storage that could not be asked is asked again on the next upload from this origin.
         if (allowed === undefined) probed.delete(origin);
-        else if (!allowed) console.warn(corsWarning(origin));
+        else if (!allowed) console.warn(corsWarning(origin, bucketId));
       },
       () => probed.delete(origin),
     );
   };
 }
 
-export function corsWarning(origin: string): string {
-  return `[upstash-blob] storage refused the CORS preflight from ${origin}, so a browser upload from that origin will be blocked before any bytes are sent. If ${origin} is your app, add it to the bucket's CORS origins in the Upstash Console, under the bucket's CORS settings.`;
+// The Origin header is the caller's to set, so it stays out of the command: a log reader who pastes
+// it as given would let whoever sent the request upload from their own site. The command takes a
+// placeholder, and the origin is named only as something to check.
+export function corsWarning(origin: string, bucketId: string): string {
+  const command = corsCommand(bucketId, undefined);
+  return `[upstash-blob] storage refused the CORS preflight from ${origin}, so a browser upload from that origin will be blocked before any bytes are sent. If ${origin} is your app, add it to the bucket's CORS origins: run \`${command}\` listing every origin to keep, since it replaces the list (\`upstash blob get ${bucketId} --hide-credentials\` shows the current one), or use the Upstash Console under the bucket's CORS settings.`;
 }
 
 /** true or false when storage answered the preflight; undefined when it could not be asked. */

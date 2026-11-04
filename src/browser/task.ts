@@ -1,4 +1,4 @@
-import { BlobError } from '../shared/errors.ts';
+import { BlobError, corsCommand } from '../shared/errors.ts';
 import { protocolOf, UPLOAD_PROTOCOL } from '../shared/protocol.ts';
 import type { CompletedBlob, UploadSnapshot, UploadTask, WireAnswer, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
 import { SNIFF_BYTES } from '../shared/units.ts';
@@ -650,7 +650,7 @@ function answerLost(cause?: unknown): BlobError {
 // has to be on it and where to put it.
 function corsHint(origin = pageOrigin()): string {
   const who = origin ?? "this page's origin";
-  return `the browser blocked the request before sending any bytes, which is almost always CORS: the bucket's CORS origins must include ${who}; add it in the Upstash Console under the bucket's CORS settings`;
+  return `the browser blocked the request before sending any bytes, which is almost always CORS: the bucket's CORS origins must include ${who}; add it with \`${corsCommand('<bucket>', origin)}\` listing every origin to keep, since it replaces the list, or in the Upstash Console under the bucket's CORS settings`;
 }
 
 function pageOrigin(): string | undefined {

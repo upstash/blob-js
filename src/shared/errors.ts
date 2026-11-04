@@ -72,6 +72,20 @@ const DEFAULT_HINT: Partial<Record<BlobErrorCode, string>> = {
  */
 export const PLATFORM_BODY_CAP_HINT = 'Vercel caps a serverless request body at 4.5MB, AWS Lambda at 6MB, Cloudflare at 100MB on the free plan';
 
+/** An origin as a browser sends it: scheme, host and port, nothing a shell or a log could misread. */
+export const PLAIN_ORIGIN_RE = /^https?:\/\/([a-z0-9.-]+|\[[0-9a-f:.]+\])(:\d+)?$/i;
+
+/**
+ * The CLI command that sets a bucket's CORS list, replacing it whole, for a hint meant to be pasted into a
+ * shell. Only an origin made of plain host characters goes in at all, and it is single-quoted only
+ * for the brackets of an IPv6 host, which zsh reads as a glob: cmd.exe would pass the quotes on.
+ */
+export function corsCommand(bucket: string, origin: string | undefined): string {
+  const plain = origin !== undefined && PLAIN_ORIGIN_RE.test(origin);
+  if (!plain) return `upstash blob cors ${bucket} <origin>`;
+  return `upstash blob cors ${bucket} ${origin.includes('[') ? `'${origin}'` : origin}`;
+}
+
 /**
  * The code a bare HTTP status means, for a route that answered with a status and no code of its own:
  * an auth check that threw its own 401, a platform that refused the body at 413. Without it every
