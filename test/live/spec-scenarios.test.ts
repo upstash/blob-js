@@ -34,7 +34,7 @@ const POST_avatar = route(async (req: Request) => {
     contentTypes: ['image/png', 'image/jpeg', 'image/webp'],
     maxSize: '2mb',
     cache: '1m',
-    metadata: { uploadedBy: user.id },
+    metadata: { uploadedby: user.id },
   });
   db.avatars.set(user.id, { path: blob.path, size: blob.size, etag: blob.etag });
   return Response.json({ url: blob.versionedUrl });

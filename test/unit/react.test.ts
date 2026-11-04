@@ -403,6 +403,40 @@ test('a small file is a single PUT, so it is not offered as pausable', async () 
   expect(hook.current.upload!.status).toBe('canceled');
 });
 
+// A cancel at 0%, before the route has answered begin or before a part sent a byte, still has to
+// land the record on 'canceled' and keep it there.
+test('cancel at 0% settles the record on canceled, before begin answers or with a part in flight', async () => {
+  const hook = await render(() => useUpload(route));
+  await flush();
+  await act(async () => {
+    const record = hook.current.start({ file: png('early.png') });
+    expect(record!.cancel()).toBe(true);
+  });
+  await flush(3);
+  expect(hook.current.upload!.status).toBe('canceled');
+  expect(hook.current.upload!.pending).toBe(false);
+  expect(xhrs).toHaveLength(0);
+
+  partedPlan = true;
+  try {
+    await act(async () => {
+      hook.current.start({ file: png('mid.png') });
+    });
+    const xhr = await nextXhr();
+    await flush();
+    expect(hook.current.upload!.percent).toBe(0);
+    await act(async () => {
+      expect(hook.current.upload!.cancel()).toBe(true);
+    });
+    await flush(3);
+    expect(xhr.aborted).toBe(true);
+    expect(hook.current.upload!.status).toBe('canceled');
+    expect(hook.current.uploads.map((u) => u.status)).toEqual(['canceled', 'canceled']);
+  } finally {
+    partedPlan = false;
+  }
+});
+
 test('a file the route parts pauses, resumes and cancels, and the controls answer', async () => {
   partedPlan = true;
   const hook = await render(() => useUpload(route));

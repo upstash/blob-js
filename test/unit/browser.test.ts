@@ -359,6 +359,43 @@ describe('a single PUT', () => {
     expect(sleeps.length).toBe(2);
   });
 
+  test('the CORS error names the page origin and where to allow it', async () => {
+    const had = Object.getOwnPropertyDescriptor(globalThis, 'location');
+    Object.defineProperty(globalThis, 'location', { value: { origin: 'http://localhost:3001', href: 'http://localhost:3001/upload' }, configurable: true });
+    try {
+      onPhase = defaultRoute(3);
+      const task = upload(png(), { route: '/api/upload' });
+      for (let i = 0; i < 3; i++) {
+        await settle();
+        ManualXhr.pending[0]!.fail();
+        await wake();
+      }
+      const e = await task.done.catch((x) => x);
+      expect(e.code).toBe('request_failed');
+      expect(e.message).toContain("the bucket's CORS origins must include http://localhost:3001");
+      expect(e.message).toContain('Upstash Console');
+      expect(e.message).toContain("the bucket's CORS settings");
+      expect(e.hint).toContain('http://localhost:3001');
+    } finally {
+      if (had) Object.defineProperty(globalThis, 'location', had);
+      else delete (globalThis as any).location;
+    }
+  });
+
+  test('a network failure after bytes were sent is not blamed on CORS', async () => {
+    onPhase = defaultRoute(3);
+    const task = upload(png(), { route: '/api/upload' });
+    for (let i = 0; i < 20; i++) {
+      await settle();
+      ManualXhr.pending[0]!.progress(1);
+      ManualXhr.pending[0]!.fail();
+      await wake();
+    }
+    const e = await task.done.catch((x) => x);
+    expect(e.code).toBe('request_failed');
+    expect(e.message).not.toContain('CORS');
+  });
+
   test('a PUT that goes quiet is aborted and retried instead of hanging', async () => {
     onPhase = defaultRoute(3);
     const task = upload(png(), { route: '/api/upload' });
