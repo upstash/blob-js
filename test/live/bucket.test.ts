@@ -128,7 +128,7 @@ describe('read', () => {
     expect(Number(new URL(read.url).searchParams.get('X-Amz-Expires'))).toBe(120);
     expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + 110_000);
     // Signed by the agent, not with the temporary credential: the url carries no session token, and
-    // so nothing a holder could turn back into the credential. Both share the agent's access key id.
+    // so nothing a holder could turn back into the credential.
     expect(new URL(read.url).searchParams.has('X-Amz-Security-Token')).toBe(false);
     const res = await fetch(read.url);
     expect(res.status).toBe(200);
