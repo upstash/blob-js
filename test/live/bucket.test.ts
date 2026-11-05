@@ -127,11 +127,9 @@ describe('read', () => {
     const read = await priv.signedReadUrl(p('secret.txt'), { expiresIn: 120, downloadAs: 'Report Q3.txt' });
     expect(Number(new URL(read.url).searchParams.get('X-Amz-Expires'))).toBe(120);
     expect(read.expiresAt.getTime()).toBeGreaterThan(Date.now() + 110_000);
-    // Signed by the agent's key, not the temporary credential: the url carries no session token,
-    // and so nothing a holder could turn back into the credential.
-    const temp = await priv.s3().credentials();
+    // Signed by the agent, not with the temporary credential: the url carries no session token, and
+    // so nothing a holder could turn back into the credential. Both share the agent's access key id.
     expect(new URL(read.url).searchParams.has('X-Amz-Security-Token')).toBe(false);
-    expect(new URL(read.url).searchParams.get('X-Amz-Credential')).not.toStartWith(`${temp.accessKeyId}/`);
     const res = await fetch(read.url);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('shh');
