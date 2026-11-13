@@ -392,27 +392,36 @@ class Task implements InternalTask {
   }
 
   // The user picking the file again is the resume gesture: a fingerprint match asks the server,
-  // which asks R2 what landed. Anything else is a fresh upload, never an error.
+  // which asks R2 what landed. Only an answer that the upload is gone (an unknown or expired token, a
+  // different size) starts a fresh one. A lookup that never got an answer fails the task with the
+  // record kept, so retry() asks again instead of re-sending every part and orphaning the old upload.
   private async tryResume(): Promise<boolean> {
     const rec = readPending(this.storeKey);
     if (!rec || rec.completionToken !== this.picked || Task.live.has(rec.completionToken)) return false;
     Task.live.add((this.claim = rec.completionToken));
+    let res: WirePartsResponse;
     try {
-      const res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal, 1)) as WirePartsResponse;
-      if (res.size !== this.file.size) throw new Error('not resumable');
-      this.token = rec.completionToken;
-      this.partSize = res.partSize;
-      this.multipart = res.multipart !== false;
-      this.layoutParts();
-      this.applyBatch(res);
-      return true;
+      res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal)) as WirePartsResponse;
     } catch (e) {
       Task.live.delete(rec.completionToken);
       this.claim = undefined;
       if (isAbort(e)) throw e;
+      if (!BlobError.is(e) || (e.status !== 403 && e.status !== 404)) throw e;
       clearPending(this.storeKey, rec.completionToken);
       return false;
     }
+    if (res?.size !== this.file.size) {
+      Task.live.delete(rec.completionToken);
+      this.claim = undefined;
+      clearPending(this.storeKey, rec.completionToken);
+      return false;
+    }
+    this.token = rec.completionToken;
+    this.partSize = res.partSize;
+    this.multipart = res.multipart !== false;
+    this.layoutParts();
+    this.applyBatch(res);
+    return true;
   }
 
   private firstMissing(): number {

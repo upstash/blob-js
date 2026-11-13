@@ -945,6 +945,55 @@ describe('multipart', () => {
     await settle();
   });
 
+  test('a resume lookup that fails once is retried, not restarted from zero', async () => {
+    const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
+    memory.set(key, JSON.stringify({ completionToken: 'old' }));
+    const route = defaultRoute(SIZE, [
+      { n: 1, etag: '"e1"' },
+      { n: 3, etag: '"e3"' },
+    ]);
+    let failures = 2;
+    onPhase = (body) => {
+      if (body.phase === 'parts' && failures-- > 0) {
+        if (failures === 1) return new Response('unavailable', { status: 503 });
+        throw new TypeError('network down');
+      }
+      return route(body);
+    };
+    const task = upload(big(SIZE), { route: '/api/upload/large' });
+    await wake();
+    await wake();
+    expect(calls.map((c) => c.phase)).toEqual(['parts', 'parts', 'parts']);
+    expect(calls.every((c) => c.body.completionToken === 'old')).toBe(true);
+    expect(task.snapshot().loaded).toBe(10 * MIB);
+    expect(ManualXhr.pending.map((x) => new URL(x.url).pathname)).toEqual(['/part/2', '/part/4', '/part/5', '/part/6']);
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old' }));
+    task.cancel();
+    await settle();
+  });
+
+  test('a resume lookup that never answers fails the task, keeps the record, and retry() resumes', async () => {
+    const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
+    memory.set(key, JSON.stringify({ completionToken: 'old' }));
+    const route = defaultRoute(SIZE, [{ n: 1, etag: '"e1"' }]);
+    let down = true;
+    onPhase = (body) => (body.phase === 'parts' && down ? new Response('unavailable', { status: 503 }) : route(body));
+    const task = upload(big(SIZE), { route: '/api/upload/large' });
+    await wake();
+    await wake();
+    expect(task.snapshot().status).toBe('error');
+    expect(calls.map((c) => c.phase)).toEqual(['parts', 'parts', 'parts']);
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old' }));
+    down = false;
+    calls = [];
+    expect(task.retry()).toBe(true);
+    await settle();
+    expect(calls.map((c) => c.phase)).toEqual(['parts']);
+    expect(task.snapshot().loaded).toBe(5 * MIB);
+    task.cancel();
+    await settle();
+  });
+
   test('a record under another fingerprint is left alone: a fresh upload, never an error', async () => {
     onPhase = defaultRoute(SIZE);
     const other = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|999`;
