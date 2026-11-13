@@ -383,18 +383,13 @@ test('headers is a function re-read per route call', async () => {
   expect(calls.map((c) => c.body?.phase)).toEqual([undefined, 'begin', 'end']);
 });
 
-// An app passes a token from its own state, so every render hands the hook a new headers function.
-function useRotatingToken(): { token: string; rotate: (t: string) => void } {
-  const [token, rotate] = useState('A');
-  return { token, rotate };
-}
-
 test('a token rotated mid-upload reaches the later phases', async () => {
   let rotate!: (t: string) => void;
   const hook = await render(() => {
-    const auth = useRotatingToken();
-    rotate = auth.rotate;
-    return useUpload(route, { headers: () => ({ authorization: `Bearer ${auth.token}` }) });
+    // A token from the app's own state: every render hands the hook a new headers function.
+    const [token, setToken] = useState('A');
+    rotate = setToken;
+    return useUpload(route, { headers: () => ({ authorization: `Bearer ${token}` }) });
   });
   await flush();
   await act(async () => {
@@ -419,9 +414,10 @@ test('a token rotated mid-upload reaches the later phases', async () => {
 test('retry() sends the token rotated after the failure', async () => {
   let rotate!: (t: string) => void;
   const hook = await render(() => {
-    const auth = useRotatingToken();
-    rotate = auth.rotate;
-    return useUpload(route, { headers: () => ({ authorization: `Bearer ${auth.token}` }) });
+    // A token from the app's own state: every render hands the hook a new headers function.
+    const [token, setToken] = useState('A');
+    rotate = setToken;
+    return useUpload(route, { headers: () => ({ authorization: `Bearer ${token}` }) });
   });
   await flush();
   await act(async () => {
@@ -879,9 +875,10 @@ test('an upload canceled while queued is not started by a clear() from onError',
 test('a queued server upload sends the token rotated while it waited', async () => {
   let rotate!: (t: string) => void;
   const hook = await render(() => {
-    const auth = useRotatingToken();
-    rotate = auth.rotate;
-    return useServerUpload('/api/avatar', { concurrency: 1, headers: () => ({ authorization: `Bearer ${auth.token}` }) });
+    // A token from the app's own state: every render hands the hook a new headers function.
+    const [token, setToken] = useState('A');
+    rotate = setToken;
+    return useServerUpload('/api/avatar', { concurrency: 1, headers: () => ({ authorization: `Bearer ${token}` }) });
   });
   await act(async () => {
     hook.current.start({ file: png('a.png') });
