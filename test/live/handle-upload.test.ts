@@ -337,6 +337,41 @@ describe('begin', () => {
     expect(after.status).toBe(404);
   });
 
+  test("a repeated 'end' finishes a multipart the first one completed, and only this upload's object", async () => {
+    const path = p(`stable/${crypto.randomUUID()}.bin`);
+    const ids: string[] = [];
+    const route = uploadHandler({
+      bucket: priv,
+      multipart: true,
+      onBeforeUpload: () => ({ path }),
+      onUploadComplete: ({ uploadId }) => void ids.push(uploadId),
+    });
+    const size = 1000;
+    const begin = (await (await post(route, { phase: 'begin', file: { name: 'a.bin', type: '', size } })).json()) as WireBeginResponse;
+    expect(begin.upload.multipart).toBe(true);
+    const put = await fetch(begin.upload.parts[0]!.url, { method: 'PUT', body: bytes(size, 5) });
+    expect(put.status).toBe(200);
+    const parts = [{ n: 1, etag: put.headers.get('etag')! }];
+    const first = (await (await post(route, { phase: 'end', completionToken: begin.completionToken, parts })).json()) as WireEndResponse<undefined>;
+    expect(first.blob.size).toBe(size);
+
+    // That answer is the one the browser never got. A file picked again has only the token to send.
+    const replay = await post(route, { phase: 'end', completionToken: begin.completionToken });
+    expect(replay.status).toBe(200);
+    expect(((await replay.json()) as WireEndResponse<undefined>).blob).toEqual(first.blob);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).toBe(ids[1]!);
+
+    // Another object of the same size at the path is not this upload's, so a repeated 'end' does not
+    // report it as one, and does not delete it either.
+    await priv.put(path, bytes(size, 6));
+    const other = await post(route, { phase: 'end', completionToken: begin.completionToken, parts });
+    expect(other.status).toBe(404);
+    expect((await other.json()).code).toBe('not_found');
+    expect(await priv.exists(path)).toBe(true);
+    expect(ids).toHaveLength(2);
+  });
+
   test('routes at one endpoint are told apart by name, in the constraints and in the token', async () => {
     const file = { name: 'shot.bin', type: '', size: 5_000_000 };
     // thumb narrowed maxSize to 1mb; file inherited the handler's 5gb. Same handler, same bucket.
