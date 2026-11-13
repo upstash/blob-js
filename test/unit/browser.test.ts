@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { BlobError } from '../../src/shared/errors.ts';
 import { upload } from '../../src/browser/index.ts';
+import { createTask } from '../../src/browser/task.ts';
 import { clock } from '../../src/browser/clock.ts';
 import { poolState, GLOBAL_REQUEST_CAP } from '../../src/browser/pool.ts';
 import { backoffMs, classify } from '../../src/browser/retry.ts';
@@ -521,6 +522,17 @@ describe('a single PUT', () => {
     expect(sleeps).toEqual([]);
   });
 
+  test('an input that refers to itself is refused at once', async () => {
+    onPhase = defaultRoute(3);
+    const input: Record<string, unknown> = { rows: Array.from({ length: 100 }, (_, i) => ({ i })) };
+    input.self = input;
+    const t0 = performance.now();
+    const failed = await upload(png(), { route: '/api/upload', input }).done.catch((e) => e);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(failed).toMatchObject({ code: 'invalid_input' });
+    expect(calls).toEqual([]);
+  });
+
   test('a success that drops mid-body is a network failure, retried like one', async () => {
     let parts = 0;
     const base = defaultRoute(3);
@@ -1010,6 +1022,62 @@ describe('multipart', () => {
     expect(calls.map((c) => c.phase)).toEqual(['begin', 'parts']);
     expect(task.retry()).toBe(false);
     again.cancel();
+    await settle();
+  });
+
+  test('a duplicate picked before the first one failed is still a second upload', async () => {
+    let n = 0;
+    const base = defaultRoute(SIZE);
+    onPhase = (body) => (body.phase === 'begin' ? { ...multipartBegin(SIZE), completionToken: `tok-${++n}` } : base(body));
+    const file = big(SIZE);
+    const first = upload(file, { route: '/api/upload/large' });
+    await settle();
+    // Queued, as useUpload does: picked now, started later.
+    const second = createTask(file, { route: '/api/upload/large' }, false);
+    ManualXhr.pending[0]!.respond(400);
+    await settle();
+    expect(first.snapshot().status).toBe('error');
+    second.start();
+    await settle();
+    expect(calls.map((c) => [c.phase, c.body.completionToken])).toEqual([
+      ['begin', undefined],
+      ['begin', undefined],
+    ]);
+    expect(first.retry()).toBe(true);
+    await settle();
+    first.cancel();
+    second.cancel();
+    await settle();
+    expect(calls.filter((c) => c.phase === 'cancel').map((c) => c.body.completionToken)).toEqual(['tok-1', 'tok-2']);
+  });
+
+  test('canceling a pick during its resume check leaves the failed upload to retry', async () => {
+    onPhase = defaultRoute(SIZE);
+    const file = big(SIZE);
+    const first = upload(file, { route: '/api/upload/large' });
+    await settle();
+    ManualXhr.pending[0]!.respond(400);
+    await settle();
+    expect(first.snapshot().status).toBe('error');
+    // A real fetch refuses an aborted signal; the stub has to be told to.
+    const stub = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init?: RequestInit) => {
+      if (init?.signal?.aborted) throw new DOMException('aborted', 'AbortError');
+      return stub(input, init);
+    }) as typeof fetch;
+    try {
+      const again = upload(file, { route: '/api/upload/large' });
+      again.cancel();
+      await settle();
+    } finally {
+      globalThis.fetch = stub;
+    }
+    expect(calls.map((c) => c.phase)).toEqual(['begin']);
+    expect(memory.size).toBe(1);
+    expect(first.retry()).toBe(true);
+    await settle();
+    expect(calls.map((c) => c.phase)).toEqual(['begin', 'parts']);
+    first.cancel();
     await settle();
   });
 

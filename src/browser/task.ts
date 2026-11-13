@@ -88,6 +88,12 @@ class Task implements InternalTask {
   private storeKey: string | undefined;
   /** The token this task put in `live`, taken before the resume check so two picks cannot both win it. */
   private claim: string | undefined;
+  /**
+   * The token of the record that was free when the file was picked, the only one this task resumes:
+   * a pick made while another task here held the record is a second upload, even if that task fails
+   * before this one starts.
+   */
+  private readonly picked: string | undefined;
   private partSize = 0;
   /**
    * The protocol on the last answer to arrive. Calls overlap, so this is not a gate: a feature reads
@@ -124,6 +130,8 @@ class Task implements InternalTask {
     private readonly options: UploadOptions,
   ) {
     this.storeKey = fingerprint(options.route, file, options.input);
+    const rec = readPending(this.storeKey);
+    this.picked = rec && !Task.live.has(rec.completionToken) ? rec.completionToken : undefined;
     this.freshDone();
   }
 
@@ -290,10 +298,12 @@ class Task implements InternalTask {
   // A multipart upload the server already created is storage nothing else can see, and a single PUT
   // that landed is an object no callback accepted, so the token is spent on a cancel either way.
   private abortServerSide(): void {
-    clearPending(this.storeKey, this.claim);
     const token = this.token;
+    // No token yet is a cancel during the resume check, which leaves the record as it was: the upload
+    // is still the failed task's to retry, or the next pick's to resume.
     if (!token) return;
     this.token = undefined;
+    clearPending(this.storeKey, token);
     this.routeCall({ phase: 'cancel', completionToken: token }, undefined, 1).catch(() => {});
   }
 
@@ -385,7 +395,7 @@ class Task implements InternalTask {
   // which asks R2 what landed. Anything else is a fresh upload, never an error.
   private async tryResume(): Promise<boolean> {
     const rec = readPending(this.storeKey);
-    if (!rec || Task.live.has(rec.completionToken)) return false;
+    if (!rec || rec.completionToken !== this.picked || Task.live.has(rec.completionToken)) return false;
     Task.live.add((this.claim = rec.completionToken));
     try {
       const res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal, 1)) as WirePartsResponse;
@@ -397,10 +407,10 @@ class Task implements InternalTask {
       this.applyBatch(res);
       return true;
     } catch (e) {
-      if (isAbort(e)) throw e;
-      clearPending(this.storeKey, rec.completionToken);
       Task.live.delete(rec.completionToken);
       this.claim = undefined;
+      if (isAbort(e)) throw e;
+      clearPending(this.storeKey, rec.completionToken);
       return false;
     }
   }
