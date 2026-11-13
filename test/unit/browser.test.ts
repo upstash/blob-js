@@ -1276,7 +1276,7 @@ describe('multipart', () => {
     await wake();
     await expect(task.done).rejects.toMatchObject({ code: 'request_failed', status: 503 });
     expect(calls.map((c) => c.phase)).toEqual(['parts', 'end', 'end', 'end']);
-    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'tok-lost-2' }));
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'tok-lost-2', misses: 1 }));
 
     // Once the route answers, retry() resumes from the record and finishes.
     state.dropping = false;
@@ -1285,6 +1285,32 @@ describe('multipart', () => {
     expect((await task.done).size).toBe(size);
     expect(calls.map((c) => c.phase)).toEqual(['parts', 'end']);
     expect(memory.size).toBe(0);
+  });
+
+  test("a repeated 'end' that never gets an answer is given up on after three picks, like a lookup", async () => {
+    const size = 17 * MIB;
+    const { route, state } = completedRoute(size);
+    state.completed = true;
+    onPhase = route;
+    const key = `upstash-blob:v1:/api/upload/large|big.bin|${size}|2`;
+    memory.set(key, JSON.stringify({ completionToken: 'tok-lost-3' }));
+    for (const misses of [1, 2]) {
+      const task = upload(big(size), { route: '/api/upload/large' });
+      await settle();
+      await wake();
+      await wake();
+      await expect(task.done).rejects.toMatchObject({ code: 'request_failed' });
+      expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'tok-lost-3', misses }));
+    }
+    calls = [];
+    const task = upload(big(size), { route: '/api/upload/large' });
+    await settle();
+    await wake();
+    await wake();
+    expect(calls.map((c) => c.phase)).toEqual(['parts', 'end', 'end', 'end', 'begin']);
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'tok' }));
+    task.cancel();
+    await settle();
   });
 
   test('a record under another fingerprint is left alone: a fresh upload, never an error', async () => {
