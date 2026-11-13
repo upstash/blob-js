@@ -916,12 +916,16 @@ test('server upload concurrency 1 queues the second request', async () => {
   expect(hook.current.uploads[1]!.status).toBe('uploading');
 });
 
-/** A background tab: requestAnimationFrame is never called back, while timers and the network run. */
-async function hiddenTab(body: () => Promise<void>): Promise<void> {
+/**
+ * A background tab: requestAnimationFrame is never called back, while timers and the network run.
+ * `frame` defaults to the real progress throttle; the queue tests pass one that never fires, so a
+ * status change that waited on it, rather than on rAF itself, still fails them.
+ */
+async function hiddenTab(body: () => Promise<void>, frame: (cb: () => void) => void = realFrame): Promise<void> {
   const raf = globalThis.requestAnimationFrame;
   const stubbed = clock.frame;
   globalThis.requestAnimationFrame = () => 0;
-  clock.frame = realFrame;
+  clock.frame = frame;
   try {
     await body();
   } finally {
@@ -929,6 +933,8 @@ async function hiddenTab(body: () => Promise<void>): Promise<void> {
     clock.frame = stubbed;
   }
 }
+
+const neverFires = (): void => {};
 
 /** Answers every request as it arrives until `ready` holds, so a queue stuck between files fails here. */
 async function drain(ready: () => boolean, answer: (xhr: TestXhr) => void): Promise<void> {
@@ -961,7 +967,7 @@ test('a hidden tab still starts every queued file and fires onDone for each', as
     expect(xhrs).toHaveLength(names.length);
     expect(done.sort()).toEqual(names);
     expect(hook.current.uploads.map((u) => u.status)).toEqual(names.map(() => 'done'));
-  });
+  }, neverFires);
 });
 
 test('a hidden tab still starts every queued server upload and fires onDone for each', async () => {
@@ -978,6 +984,24 @@ test('a hidden tab still starts every queued server upload and fires onDone for 
     );
     expect(xhrs).toHaveLength(names.length);
     expect(done.sort()).toEqual(names);
+  }, neverFires);
+});
+
+test('a hidden tab still moves percent, on a timer rather than a frame', async () => {
+  await hiddenTab(async () => {
+    const hook = await render(() => ({ direct: useUpload(route), proxied: useServerUpload('/api/avatar') }));
+    await flush();
+    await act(async () => {
+      hook.current.direct.start({ file: png('a.png', 10) });
+      hook.current.proxied.start({ file: png('b.png', 10) });
+    });
+    for (let i = 0; i < 20 && xhrs.length < 2; i++) await flush();
+    await act(async () => {
+      for (const xhr of xhrs) xhr.progress(5, 10);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(hook.current.direct.upload!.percent).toBe(50);
+    expect(hook.current.proxied.upload!.percent).toBe(50);
   });
 });
 

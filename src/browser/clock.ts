@@ -23,7 +23,7 @@ export const clock = {
   },
   /**
    * Coalesces upload progress to about one notification a frame. A timer, not requestAnimationFrame:
-   * a background tab paints no frames, and a queue waiting on one never starts its next file.
+   * a background tab paints no frames, and its uploads would report no progress until shown again.
    */
   frame(cb: () => void): void {
     setTimeout(cb, 16);
