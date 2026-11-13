@@ -1263,6 +1263,30 @@ describe('multipart', () => {
     expect(memory.size).toBe(0);
   });
 
+  test("picking the file again keeps the record when the repeated 'end' gets no answer either", async () => {
+    const size = 17 * MIB;
+    const { route, state } = completedRoute(size);
+    state.completed = true;
+    onPhase = route;
+    const key = `upstash-blob:v1:/api/upload/large|big.bin|${size}|2`;
+    memory.set(key, JSON.stringify({ completionToken: 'tok-lost-2' }));
+    const task = upload(big(size), { route: '/api/upload/large' });
+    await settle();
+    await wake();
+    await wake();
+    await expect(task.done).rejects.toMatchObject({ code: 'request_failed', status: 503 });
+    expect(calls.map((c) => c.phase)).toEqual(['parts', 'end', 'end', 'end']);
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'tok-lost-2' }));
+
+    // Once the route answers, retry() resumes from the record and finishes.
+    state.dropping = false;
+    calls = [];
+    expect(task.retry()).toBe(true);
+    expect((await task.done).size).toBe(size);
+    expect(calls.map((c) => c.phase)).toEqual(['parts', 'end']);
+    expect(memory.size).toBe(0);
+  });
+
   test('a record under another fingerprint is left alone: a fresh upload, never an error', async () => {
     onPhase = defaultRoute(SIZE);
     const other = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|999`;
