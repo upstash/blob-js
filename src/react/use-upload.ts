@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
-import { createTask, type HeadersProvider, type InternalTask } from '../browser/task.ts';
+import { createTask, resolveHeaders, type HeadersProvider, type InternalTask } from '../browser/task.ts';
 import type { BlobError } from '../shared/errors.ts';
 import type { CompletedBlob, Jsonify, UploadRoute, UploadRouteTypes, ServedConstraints } from '../shared/types.ts';
 import { deny, useConstraints } from './constraints.ts';
@@ -177,9 +177,11 @@ export function useUpload(route: string, maybeOptions?: any): any {
         // let the route decide.
         const known = constraintsRef.current;
         const sniffBytes = known === undefined ? undefined : (known.contentTypes?.length ?? 0) > 0;
+        // Headers are read through the ref per request, so a token the app rotates mid-upload
+        // reaches the later phases and retry().
         return refusal
           ? refusedEntry(file, refusal)
-          : taskEntry(createTask(file, { route: url, headers: headersRef.current, input: args.input, sniffBytes }, false));
+          : taskEntry(createTask(file, { route: url, headers: () => resolveHeaders(headersRef.current), input: args.input, sniffBytes }, false));
       };
       if ('files' in args) return add(args.files ? Array.from(args.files).map(make) : []);
       if (!args.file) return null;
