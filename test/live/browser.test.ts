@@ -196,6 +196,8 @@ describe('upload()', () => {
       await new Promise((r) => setTimeout(r, 750));
     }
     memory.set(rec2[0], rec2[1]);
+    // A reload also forgets which uploads the page's tasks hold, so the next pick may resume this one.
+    (second0.constructor as unknown as { live: Set<string> }).live.clear();
 
     const third = upload(file, { route: '/api/upload/large', headers });
     const blob = await third.done;

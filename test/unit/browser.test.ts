@@ -945,6 +945,74 @@ describe('multipart', () => {
     await settle();
   });
 
+  test('a record is resumed only by a pick with the same input, whatever its key order', async () => {
+    let n = 0;
+    const base = defaultRoute(SIZE);
+    onPhase = (body) => (body.phase === 'begin' ? { ...multipartBegin(SIZE), completionToken: `tok-${++n}` } : base(body));
+    const file = big(SIZE);
+    const first = upload(file, { route: '/api/upload/large', input: { thread: 'A', kind: 'doc' } });
+    await settle();
+    // Failed, so nothing in the page holds its upload any more, as after a reload.
+    ManualXhr.pending[0]!.respond(400);
+    await settle();
+    expect(first.snapshot().status).toBe('error');
+    calls = [];
+    ManualXhr.reset();
+    const other = upload(file, { route: '/api/upload/large', input: { thread: 'B', kind: 'doc' } });
+    await settle();
+    expect(calls.map((c) => c.phase)).toEqual(['begin']);
+    expect(calls[0]!.body.input).toEqual({ thread: 'B', kind: 'doc' });
+    other.cancel();
+    await settle();
+    calls = [];
+    ManualXhr.reset();
+    const same = upload(file, { route: '/api/upload/large', input: { kind: 'doc', thread: 'A' } });
+    await settle();
+    expect(calls.map((c) => [c.phase, c.body.completionToken])).toEqual([['parts', 'tok-1']]);
+    same.cancel();
+    await settle();
+  });
+
+  test('the same file picked twice in one page is two uploads: canceling one leaves the other', async () => {
+    let n = 0;
+    const base = defaultRoute(3);
+    onPhase = (body) => (body.phase === 'begin' ? { ...singleBegin(3), completionToken: `tok-${++n}` } : base(body));
+    const file = png();
+    const first = upload(file, { route: '/api/upload/avatar' });
+    await settle();
+    const second = upload(file, { route: '/api/upload/avatar' });
+    await settle();
+    expect(calls.map((c) => [c.phase, c.body.completionToken])).toEqual([
+      ['begin', undefined],
+      ['begin', undefined],
+    ]);
+    ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+    await settle();
+    await first.done;
+    // The first finishing leaves the second one's record, so a reload still resumes it.
+    expect([...memory.values()]).toEqual([JSON.stringify({ completionToken: 'tok-2' })]);
+    second.cancel();
+    await settle();
+    expect(calls.filter((c) => c.phase === 'cancel').map((c) => c.body.completionToken)).toEqual(['tok-2']);
+    expect(memory.size).toBe(0);
+  });
+
+  test('a failed upload picked again moves to the new task, and retry() on the old one is refused', async () => {
+    const file = big(SIZE);
+    onPhase = defaultRoute(SIZE);
+    const task = upload(file, { route: '/api/upload/large' });
+    await settle();
+    ManualXhr.pending[0]!.respond(400);
+    await settle();
+    expect(task.snapshot().status).toBe('error');
+    const again = upload(file, { route: '/api/upload/large' });
+    await settle();
+    expect(calls.map((c) => c.phase)).toEqual(['begin', 'parts']);
+    expect(task.retry()).toBe(false);
+    again.cancel();
+    await settle();
+  });
+
   test('a cancel during begin still aborts the upload server-side and never PUTs', async () => {
     const route = defaultRoute(SIZE);
     const running: { task?: ReturnType<typeof upload> } = {};
