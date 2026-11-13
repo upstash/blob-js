@@ -651,10 +651,14 @@ export class Bucket {
 
   /**
    * A copy followed by a delete of the source: storage has no rename. Same options as `copy`.
+   * Moving a path onto itself is only the copy, so the options still apply and nothing is deleted.
    * @see node_modules/@upstash/blob/docs/bucket/writing.mdx
    */
   async move(from: string, to: string, options: CopyOptions = {}): Promise<BlobObject> {
     const blob = await this.copy(from, to, options);
+    // Storage keeps one object for every Unicode spelling of a name (NFC and NFD of "café" are one
+    // path), so the source is compared the same way: deleting it would delete the copy just written.
+    if (from.normalize('NFC') === to.normalize('NFC')) return blob;
     try {
       await this.del(from);
     } catch (e) {

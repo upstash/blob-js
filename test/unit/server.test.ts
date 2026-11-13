@@ -1677,6 +1677,26 @@ describe('copy and move', () => {
     expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'PUT', 'HEAD', 'DELETE']);
     expect(r2Calls().find((c) => c.method === 'PUT')!.headers.get('content-type')).toBe('text/markdown');
   });
+
+  test('move onto the same path, in any Unicode spelling, copies and never deletes', async () => {
+    for (const [from, to] of [
+      ['a.txt', 'a.txt'],
+      ['caf\u00e9.txt', 'cafe\u0301.txt'],
+    ]) {
+      resetCredentialCaches();
+      calls = [];
+      r2Handler = handler;
+      const moved = await bucket().move(from!, to!, { contentType: 'text/markdown' });
+      expect(moved.path).toBe(to!);
+      expect(r2Calls().map((c) => c.method)).toEqual(['HEAD', 'PUT', 'HEAD']);
+    }
+    // A leading slash names a different object, so that one is a real move.
+    resetCredentialCaches();
+    calls = [];
+    r2Handler = handler;
+    await bucket().move('/a.txt', 'a.txt');
+    expect(r2Calls().map((c) => c.method)).toEqual(['PUT', 'HEAD', 'DELETE']);
+  });
 });
 
 describe('updateJson', () => {
