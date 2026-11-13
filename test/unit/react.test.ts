@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test';
-import { act, createElement, StrictMode } from 'react';
+import { act, createElement, StrictMode, useState } from 'react';
 import { clock } from '../../src/browser/clock.ts';
 import { poolState } from '../../src/browser/pool.ts';
 import { loadFacts } from '../../src/react/constraints.ts';
@@ -381,6 +381,74 @@ test('headers is a function re-read per route call', async () => {
   const auths = calls.map((c) => c.auth);
   expect(auths).toEqual(['Bearer 1', 'Bearer 2', 'Bearer 3']);
   expect(calls.map((c) => c.body?.phase)).toEqual([undefined, 'begin', 'end']);
+});
+
+// An app passes a token from its own state, so every render hands the hook a new headers function.
+function useRotatingToken(): { token: string; rotate: (t: string) => void } {
+  const [token, rotate] = useState('A');
+  return { token, rotate };
+}
+
+test('a token rotated mid-upload reaches the later phases', async () => {
+  let rotate!: (t: string) => void;
+  const hook = await render(() => {
+    const auth = useRotatingToken();
+    rotate = auth.rotate;
+    return useUpload(route, { headers: () => ({ authorization: `Bearer ${auth.token}` }) });
+  });
+  await flush();
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const put = await nextXhr();
+  await act(async () => {
+    rotate('B');
+  });
+  await act(async () => {
+    put.respond(200, { etag: '"x"' });
+  });
+  await flush(3);
+  expect(hook.current.upload!.status).toBe('done');
+  expect(calls.map((c) => [c.body?.phase, c.auth])).toEqual([
+    [undefined, 'Bearer A'],
+    ['begin', 'Bearer A'],
+    ['end', 'Bearer B'],
+  ]);
+});
+
+test('retry() sends the token rotated after the failure', async () => {
+  let rotate!: (t: string) => void;
+  const hook = await render(() => {
+    const auth = useRotatingToken();
+    rotate = auth.rotate;
+    return useUpload(route, { headers: () => ({ authorization: `Bearer ${auth.token}` }) });
+  });
+  await flush();
+  await act(async () => {
+    hook.current.start({ file: png() });
+  });
+  const put = await nextXhr();
+  await act(async () => {
+    put.respond(400);
+  });
+  await flush(2);
+  expect(hook.current.upload!.status).toBe('error');
+  await act(async () => {
+    rotate('B');
+  });
+  await act(async () => {
+    expect(hook.current.upload!.retry()).toBe(true);
+  });
+  const second = await nextXhr(1);
+  await act(async () => {
+    second.respond(200, { etag: '"x"' });
+  });
+  await flush(3);
+  expect(hook.current.upload!.status).toBe('done');
+  expect(calls.filter((c) => c.body?.phase === 'parts' || c.body?.phase === 'end').map((c) => [c.body.phase, c.auth])).toEqual([
+    ['parts', 'Bearer B'],
+    ['end', 'Bearer B'],
+  ]);
 });
 
 test('a small file is a single PUT, so it is not offered as pausable', async () => {
@@ -806,6 +874,29 @@ test('an upload canceled while queued is not started by a clear() from onError',
   expect(api.uploads).toHaveLength(1);
   expect(api.uploads[0]!.status).toBe('canceled');
   expect(xhrs).toHaveLength(1);
+});
+
+test('a queued server upload sends the token rotated while it waited', async () => {
+  let rotate!: (t: string) => void;
+  const hook = await render(() => {
+    const auth = useRotatingToken();
+    rotate = auth.rotate;
+    return useServerUpload('/api/avatar', { concurrency: 1, headers: () => ({ authorization: `Bearer ${auth.token}` }) });
+  });
+  await act(async () => {
+    hook.current.start({ file: png('a.png') });
+    hook.current.start({ file: png('b.png') });
+  });
+  const first = await nextXhr();
+  await act(async () => {
+    rotate('B');
+  });
+  await act(async () => {
+    first.respond(200, {}, '{}');
+  });
+  const second = await nextXhr(1);
+  expect(first.headers['authorization']).toBe('Bearer A');
+  expect(second.headers['authorization']).toBe('Bearer B');
 });
 
 test('server upload concurrency 1 queues the second request', async () => {
