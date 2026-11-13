@@ -560,6 +560,7 @@ class Task implements InternalTask {
       let httpAttempts = 0;
       let netAttempts = 0;
       let represigns = 0;
+      let renewFailures = 0;
       let waits = 0;
       const backOff = async (retryAfter: string | null) => {
         state.backingOff = true;
@@ -580,12 +581,17 @@ class Task implements InternalTask {
         try {
           signed = await this.urlFor(n);
         } catch (e) {
-          if (!renewing || !BlobError.is(e) || classify(e.status) !== 'retry' || ++netAttempts >= MAX_NETWORK_ATTEMPTS) throw e;
+          if (!renewing || !BlobError.is(e) || classify(e.status) !== 'retry' || ++renewFailures >= MAX_NETWORK_ATTEMPTS) throw e;
           await backOff(null);
           continue;
         }
         const { url, headers } = signed;
         const release = await acquire(ctrl.signal);
+        // The wait for a slot can outlast the url, behind another upload's parts or across a sleep.
+        if (clock.now() >= signed.renewAt) {
+          release();
+          continue;
+        }
         let status = 0;
         let retryAfter: string | null = null;
         let etag: string | null = null;

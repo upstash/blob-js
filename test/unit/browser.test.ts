@@ -532,19 +532,21 @@ describe('a single PUT', () => {
     try {
       const { route, storage } = expiringRoute(3);
       let refused = 0;
-      // Woken before its network is back: the first renewals never reach the route.
+      // Woken before its network is back: two renewals, three calls each, never reach the route.
       onPhase = (body) => {
-        if (body.phase === 'parts' && refused++ < 4) throw new TypeError('Failed to fetch');
+        if (body.phase === 'parts' && refused++ < 6) throw new TypeError('Failed to fetch');
         return route(body);
       };
       task = upload(png(), { route: '/api/upload' });
       await settle();
+      // The lid closes before a byte leaves.
       t += 11 * 60_000;
-      ManualXhr.pending[0]!.progress(1);
       ManualXhr.pending[0]!.fail();
-      await drive(task, (x) => storage(x));
+      // The first PUT on the fresh url drops too: the failed renewals do not count against the PUT.
+      let dropped = false;
+      await drive(task, (x) => (dropped ? storage(x) : ((dropped = true), x.fail())));
       expect(await task.done).toMatchObject({ size: 3 });
-      expect(calls.filter((c) => c.phase === 'parts').length).toBe(5);
+      expect(calls.filter((c) => c.phase === 'parts').length).toBe(7);
     } finally {
       clock.now = realNow;
       task?.cancel();
@@ -1387,6 +1389,29 @@ describe('multipart', () => {
     }
   });
 
+  test('a part that waited out its url for a connection slot renews it before sending', async () => {
+    const realNow = clock.now;
+    let t = 1_000_000;
+    clock.now = () => t;
+    const tasks: ReturnType<typeof upload>[] = [];
+    try {
+      onPhase = expiringRoute(SIZE).route;
+      tasks.push(upload(big(SIZE), { route: '/api/upload/large' }), upload(big(SIZE), { route: '/api/upload/large' }));
+      await settle();
+      expect(poolState()).toEqual({ active: 6, waiting: 2 });
+      t += 11 * 60_000;
+      ManualXhr.pending[0]!.respond(200, { etag: '"e"' });
+      await settle();
+      const after = ManualXhr.sentUrls.slice(6);
+      expect(after.length).toBeGreaterThan(0);
+      expect(after.filter((u) => u.includes('g=0'))).toEqual([]);
+    } finally {
+      clock.now = realNow;
+      for (const task of tasks) task.cancel();
+      await settle();
+    }
+  });
+
   test('on a link slower than a batch of urls lives, the later parts get fresh urls', async () => {
     const realNow = clock.now;
     let t = 1_000_000;
@@ -1403,7 +1428,7 @@ describe('multipart', () => {
       expect((blob.data as { parts: unknown[] }).parts.length).toBe(21);
       // One renewal covers the rest of the file: only the part that outlived its url is sent twice.
       expect(calls.filter((c) => c.phase === 'parts').map((c) => c.body.from)).toEqual([16]);
-      expect(ManualXhr.sentUrls.length).toBeLessThanOrEqual(22);
+      expect(ManualXhr.sentUrls.length).toBe(22);
     } finally {
       clock.now = realNow;
       task?.cancel();
