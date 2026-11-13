@@ -7,6 +7,8 @@ const PREFIX = 'upstash-blob:v1:';
 // worth the exposure, and what landed is the server's answer, not this record's.
 export interface PendingRecord {
   completionToken: string;
+  /** Resume lookups in a row that got no usable answer, so a route that never gives one is given up on. */
+  misses?: number;
 }
 
 // The input decides where the upload lands, so a record is only ever resumed by a pick with the same
