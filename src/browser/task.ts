@@ -1,6 +1,6 @@
 import { BlobError } from '../shared/errors.ts';
 import { protocolOf, UPLOAD_PROTOCOL } from '../shared/protocol.ts';
-import type { CompletedBlob, UploadSnapshot, UploadTask, WireAnswer, WireBeginResponse, WireEndResponse, WireLanded, WirePartsResponse } from '../shared/types.ts';
+import type { CompletedBlob, UploadSnapshot, UploadTask, WireAnswer, WireBeginResponse, WireEndResponse, WireLanded, WirePart, WirePartsResponse } from '../shared/types.ts';
 import { SNIFF_BYTES } from '../shared/units.ts';
 import { abortError, clock } from './clock.ts';
 import { acquire } from './pool.ts';
@@ -39,6 +39,12 @@ const PRESIGN_STALE_MS = 60_000;
 const MAX_URL_BATCHES = 4;
 // Resume lookups in a row, each with the route's own retries, before a saved upload is given up on.
 const MAX_LOOKUP_MISSES = 3;
+// How long a url that does not carry X-Amz-Expires is taken to live: what the route signs for.
+const URL_LIFETIME_MS = 600_000;
+// A url is renewed once this share of its life is gone, before a part is sent with it rather than
+// after storage refuses it: an expired url is refused without a CORS header, which the browser
+// reports as a network error with no status, so the re-sign on 403 never sees it.
+const URL_RENEW_AT = 0.9;
 
 type Status = UploadSnapshot['status'];
 
@@ -52,6 +58,9 @@ interface PartState {
 interface Signed {
   url: string;
   headers: Record<string, string>;
+  /** When the call that returned it was sent, by this clock: never later than the signing. */
+  issuedAt: number;
+  renewAt: number;
 }
 
 interface InFlight {
@@ -113,7 +122,6 @@ class Task implements InternalTask {
   private batch: Promise<void> | undefined;
   private inflight = new Map<number, InFlight>();
   private represigned = new Set<number>();
-  private urlsMintedAt = 0;
   private paused = false;
   private resumeWaiters: (() => void)[] = [];
   private readonly cancelController = new AbortController();
@@ -372,6 +380,7 @@ class Task implements InternalTask {
 
   private async begin(): Promise<void> {
     const head = this.options.sniffBytes === false ? undefined : await readHead(this.file);
+    const asked = clock.now();
     const res = (await this.routeCall(
       {
         phase: 'begin',
@@ -388,8 +397,7 @@ class Task implements InternalTask {
     this.partSize = res.upload.partSize;
     this.multipart = res.upload.multipart !== false;
     this.layoutParts();
-    for (const p of res.upload.parts) this.urls.set(p.n, { url: p.url, headers: p.headers ?? {} });
-    this.urlsMintedAt = clock.now();
+    for (const p of res.upload.parts) this.urls.set(p.n, toSigned(p, asked));
     writePending(this.storeKey, { completionToken: this.token });
   }
 
@@ -405,6 +413,7 @@ class Task implements InternalTask {
     if (!rec || rec.completionToken !== this.picked || (Task.live.has(rec.completionToken) && this.claim !== rec.completionToken)) return false;
     Task.live.add((this.claim = rec.completionToken));
     let res: WirePartsResponse;
+    const asked = clock.now();
     try {
       res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal)) as WirePartsResponse;
       if (!Array.isArray(res?.parts) || !Array.isArray(res.landed)) throw new BlobError('request_failed', { message: "the upload route's answer to the resume lookup was not one", status: 502 });
@@ -434,7 +443,7 @@ class Task implements InternalTask {
     this.partSize = res.partSize;
     this.multipart = res.multipart !== false;
     this.layoutParts();
-    this.applyBatch(res);
+    this.applyBatch(res, asked);
     return true;
   }
 
@@ -450,9 +459,8 @@ class Task implements InternalTask {
     }
   }
 
-  private applyBatch(res: WirePartsResponse): void {
-    for (const p of res.parts) this.urls.set(p.n, { url: p.url, headers: p.headers ?? {} });
-    this.urlsMintedAt = clock.now();
+  private applyBatch(res: WirePartsResponse, asked: number): void {
+    for (const p of res.parts) this.urls.set(p.n, toSigned(p, asked));
     for (const l of res.landed) {
       const p = this.parts.get(l.n);
       if (p) p.etag = l.etag;
@@ -504,20 +512,31 @@ class Task implements InternalTask {
   // part would otherwise spin here with no backoff and no error.
   private async urlFor(n: number, attempt = 0): Promise<Signed> {
     const cached = this.urls.get(n);
-    if (cached) return cached;
-    this.batch ??= this.fetchBatch(n).finally(() => {
+    if (cached && clock.now() < cached.renewAt) return cached;
+    this.batch ??= this.fetchBatch(this.renewalFrom(n)).finally(() => {
       this.batch = undefined;
     });
     await this.batch;
-    const signed = this.urls.get(n);
-    if (signed) return signed;
+    // A batch asked for another part's `from` may not cover this one, and leaves its old url aging.
+    const fresh = this.urls.get(n);
+    if (fresh && clock.now() < fresh.renewAt) return fresh;
     if (attempt >= MAX_URL_BATCHES) throw new BlobError('request_failed', { message: `the route did not sign part ${n}`, status: 503 });
     return this.urlFor(n, attempt + 1);
   }
 
+  // A batch of urls ages together, so a renewal starts at the lowest part still waiting on one of
+  // them: the workers that resume together then share one call instead of each taking its own.
+  private renewalFrom(n: number): number {
+    const now = clock.now();
+    let from = n;
+    for (const [k, s] of this.urls) if (k < from && now >= s.renewAt && !this.parts.get(k)?.etag) from = k;
+    return from;
+  }
+
   private async fetchBatch(from: number): Promise<void> {
+    const asked = clock.now();
     const res = (await this.routeCall({ phase: 'parts', completionToken: this.token, from }, this.cancelController.signal)) as WirePartsResponse;
-    this.applyBatch(res);
+    this.applyBatch(res, asked);
   }
 
   private async represign(n: number): Promise<void> {
@@ -542,10 +561,30 @@ class Task implements InternalTask {
       let netAttempts = 0;
       let represigns = 0;
       let waits = 0;
+      const backOff = async (retryAfter: string | null) => {
+        state.backingOff = true;
+        this.notify();
+        try {
+          await clock.sleep(backoffMs(waits++, retryAfter), ctrl.signal);
+        } finally {
+          state.backingOff = false;
+          this.notify();
+        }
+      };
       for (;;) {
         if (ctrl.signal.aborted) throw abortError();
-        const { url, headers } = await this.urlFor(n);
-        const mintedAt = this.urlsMintedAt;
+        // Held already, so asking again is a renewal: the route not answering it, as on a laptop that
+        // woke before its network did, is a dropped link to back off from, not the end of the upload.
+        const renewing = this.urls.has(n);
+        let signed: Signed;
+        try {
+          signed = await this.urlFor(n);
+        } catch (e) {
+          if (!renewing || !BlobError.is(e) || classify(e.status) !== 'retry' || ++netAttempts >= MAX_NETWORK_ATTEMPTS) throw e;
+          await backOff(null);
+          continue;
+        }
+        const { url, headers } = signed;
         const release = await acquire(ctrl.signal);
         let status = 0;
         let retryAfter: string | null = null;
@@ -591,10 +630,16 @@ class Task implements InternalTask {
         // spare: hand it back to the queue rather than retrying through a pause.
         if (this.paused) throw abortError();
         lastStatus = status;
+        // A network error on a url due for renewal is most likely storage refusing it as expired, out
+        // of the browser's sight: renew it and send again, without spending the link's budget.
+        if (status === 0 && clock.now() >= signed.renewAt && represigns < MAX_ATTEMPTS) {
+          represigns++;
+          continue;
+        }
         const verdict = classify(status);
         if (verdict === 'fail') throw putError(status, false);
         if (verdict === 'represign') {
-          const expired = clock.now() - mintedAt >= PRESIGN_STALE_MS;
+          const expired = clock.now() - signed.issuedAt >= PRESIGN_STALE_MS;
           if ((!expired && this.represigned.has(n)) || represigns >= MAX_ATTEMPTS) throw putError(status, true);
           represigns++;
           this.represigned.add(n);
@@ -602,14 +647,7 @@ class Task implements InternalTask {
           continue;
         }
         if (status === 0 ? ++netAttempts >= networkAttemptCap(sentBytes) : ++httpAttempts >= MAX_ATTEMPTS) break;
-        state.backingOff = true;
-        this.notify();
-        try {
-          await clock.sleep(backoffMs(waits++, retryAfter), ctrl.signal);
-        } finally {
-          state.backingOff = false;
-          this.notify();
-        }
+        await backOff(retryAfter);
       }
       throw new BlobError('request_failed', {
         message: `upload failed after ${httpAttempts + netAttempts} attempts${lastStatus ? ` (last status ${lastStatus})` : ''}`,
@@ -750,6 +788,21 @@ function sameOrigin(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+function toSigned(p: WirePart, issuedAt: number): Signed {
+  return { url: p.url, headers: p.headers ?? {}, issuedAt, renewAt: issuedAt + lifetimeMs(p.url) * URL_RENEW_AT };
+}
+
+// Storage writes a presigned url's lifetime into it, in seconds.
+function lifetimeMs(url: string): number {
+  try {
+    const seconds = Number(new URL(url).searchParams.get('X-Amz-Expires'));
+    if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+  } catch {
+    // Not a url this can read: fall back to what the route signs for.
+  }
+  return URL_LIFETIME_MS;
 }
 
 function putError(status: number, afterRepresign: boolean): BlobError {
