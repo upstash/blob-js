@@ -12,6 +12,8 @@ import { installRouter, installXhr, ManualXhr, removeXhr } from '../helpers/xhr.
 // once installed, so registering at import time breaks a sibling file that stubs localStorage.
 // react-dom is imported here too: it wants document at module scope.
 let createRoot: typeof import('react-dom/client').createRoot;
+// Taken before beforeAll swaps it for a microtask, for the tests about a tab that paints no frames.
+const realFrame = clock.frame;
 
 beforeAll(async () => {
   GlobalRegistrator.register();
@@ -912,6 +914,71 @@ test('server upload concurrency 1 queues the second request', async () => {
   expect(xhrs).toHaveLength(2);
   expect(hook.current.uploads[0]!.status).toBe('done');
   expect(hook.current.uploads[1]!.status).toBe('uploading');
+});
+
+/** A background tab: requestAnimationFrame is never called back, while timers and the network run. */
+async function hiddenTab(body: () => Promise<void>): Promise<void> {
+  const raf = globalThis.requestAnimationFrame;
+  const stubbed = clock.frame;
+  globalThis.requestAnimationFrame = () => 0;
+  clock.frame = realFrame;
+  try {
+    await body();
+  } finally {
+    globalThis.requestAnimationFrame = raf;
+    clock.frame = stubbed;
+  }
+}
+
+/** Answers every request as it arrives until `ready` holds, so a queue stuck between files fails here. */
+async function drain(ready: () => boolean, answer: (xhr: TestXhr) => void): Promise<void> {
+  let answered = 0;
+  for (let i = 0; i < 60 && !ready(); i++) {
+    while (answered < xhrs.length) {
+      const xhr = xhrs[answered++]!;
+      await act(async () => {
+        xhr.progress(5, 10);
+        answer(xhr);
+      });
+    }
+    await flush();
+  }
+}
+
+test('a hidden tab still starts every queued file and fires onDone for each', async () => {
+  await hiddenTab(async () => {
+    const done: string[] = [];
+    const hook = await render(() => useUpload(route, { concurrency: 2, onDone: (u) => done.push(u.file.name) }));
+    await flush();
+    const names = ['1.png', '2.png', '3.png', '4.png', '5.png', '6.png'];
+    await act(async () => {
+      hook.current.start({ files: names.map((n) => png(n)) });
+    });
+    await drain(
+      () => done.length === names.length,
+      (xhr) => xhr.respond(200, { etag: '"x"' }),
+    );
+    expect(xhrs).toHaveLength(names.length);
+    expect(done.sort()).toEqual(names);
+    expect(hook.current.uploads.map((u) => u.status)).toEqual(names.map(() => 'done'));
+  });
+});
+
+test('a hidden tab still starts every queued server upload and fires onDone for each', async () => {
+  await hiddenTab(async () => {
+    const done: string[] = [];
+    const hook = await render(() => useServerUpload('/api/avatar', { concurrency: 2, onDone: (u) => done.push(u.file!.name) }));
+    const names = ['1.png', '2.png', '3.png', '4.png'];
+    await act(async () => {
+      for (const n of names) hook.current.start({ file: png(n) });
+    });
+    await drain(
+      () => done.length === names.length,
+      (xhr) => xhr.respond(200),
+    );
+    expect(xhrs).toHaveLength(names.length);
+    expect(done.sort()).toEqual(names);
+  });
 });
 
 /* ------------------------------------------------- refusals keep their code -- */
