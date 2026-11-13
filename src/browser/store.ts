@@ -17,10 +17,13 @@ export function fingerprint(route: string, file: File, input: unknown): string |
   const base = `${PREFIX}${route}|${file.name}|${file.size}|${file.lastModified}`;
   if (input === undefined) return base;
   try {
+    // Plain first: the sorting replacer hands back a fresh copy of every object, which hides a cycle
+    // from JSON.stringify until the stack runs out, seconds later on a wide object.
+    if (JSON.stringify(input) === undefined) return base;
     const json = JSON.stringify(input, (_k, v: unknown) =>
       v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : v,
     );
-    return json === undefined ? base : `${base}|${hash(json)}`;
+    return `${base}|${hash(json)}`;
   } catch {
     return undefined;
   }
