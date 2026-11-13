@@ -103,7 +103,9 @@ class Task implements InternalTask {
   private started = false;
   private listeners = new Set<() => void>();
   private cached: UploadSnapshot | undefined;
-  private frameQueued = false;
+  private dirty = false;
+  private notifyQueued = false;
+  private progressQueued = false;
   private resolveDone!: (b: CompletedBlob & { data: unknown }) => void;
   private rejectDone!: (e: unknown) => void;
   private donePromise!: Promise<CompletedBlob & { data: unknown }>;
@@ -172,14 +174,35 @@ class Task implements InternalTask {
     };
   }
 
+  // Status changes go out on the next microtask, never on an animation frame: a queue starts its
+  // next file and fires onDone off them, and a background tab paints no frames.
   private notify(): void {
     this.cached = undefined;
-    if (this.frameQueued) return;
-    this.frameQueued = true;
-    clock.frame(() => {
-      this.frameQueued = false;
-      for (const l of [...this.listeners]) l();
+    this.dirty = true;
+    if (this.notifyQueued) return;
+    this.notifyQueued = true;
+    queueMicrotask(() => {
+      this.notifyQueued = false;
+      this.emit();
     });
+  }
+
+  /** Bytes on the wire: many events a second, so these are coalesced on clock.frame. */
+  private progress(): void {
+    this.cached = undefined;
+    this.dirty = true;
+    if (this.progressQueued) return;
+    this.progressQueued = true;
+    clock.frame(() => {
+      this.progressQueued = false;
+      this.emit();
+    });
+  }
+
+  private emit(): void {
+    if (!this.dirty) return;
+    this.dirty = false;
+    for (const l of [...this.listeners]) l();
   }
 
   /* ----------------------------------------------------------- controls */
@@ -486,7 +509,7 @@ class Task implements InternalTask {
             onUploadProgress: (loaded) => {
               if (loaded > 0) sentBytes = true;
               state.loaded = Math.min(loaded, size);
-              this.notify();
+              this.progress();
             },
             stallTimeoutMs: STALL_TIMEOUT_MS,
           });
