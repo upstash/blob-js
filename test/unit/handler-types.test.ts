@@ -443,6 +443,7 @@ function _jsonData(value: Bucket) {
     onUploadComplete: () => ({
       at: new Date(),
       when: [new Date()] as const,
+      list: [new Date(), undefined],
       maybe: undefined as Date | undefined,
       gone: undefined,
       run: () => 1,
@@ -457,9 +458,13 @@ function _jsonData(value: Bucket) {
       // @ts-expect-error a Date reaches the browser as its ISO string
       void (data.at satisfies Date);
       void (data.when satisfies readonly [string]);
+      // An undefined array slot is written as null.
+      void (data.list satisfies (string | null)[]);
+      // @ts-expect-error not undefined
+      void (data.list satisfies (string | undefined)[]);
       void (data.maybe satisfies string | undefined);
       // A key whose value may be undefined is optional: JSON drops it when it is.
-      void ({ at: '', when: [''], seen: {}, nested: { at: '', n: null } } satisfies typeof data);
+      void ({ at: '', when: [''], list: [], seen: {}, nested: { at: '', n: null } } satisfies typeof data);
       // @ts-expect-error JSON drops undefined values
       void data.gone;
       // @ts-expect-error JSON drops functions

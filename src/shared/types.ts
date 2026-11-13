@@ -189,8 +189,15 @@ export type Jsonify<T> = 0 extends 1 & T
             : T extends ReadonlyMap<unknown, unknown> | ReadonlySet<unknown>
               ? Record<never, never>
               : T extends readonly unknown[]
-                ? { [K in keyof T]: T[K] extends NotJson ? null : Jsonify<T[K]> }
+                ? number extends T['length']
+                  ? T extends unknown[]
+                    ? JsonElement<T[number]>[]
+                    : readonly JsonElement<T[number]>[]
+                  : { [K in keyof T]: JsonElement<T[K]> }
                 : JsonObject<T>;
+
+/** An array slot JSON.stringify cannot write holds null instead. */
+type JsonElement<V> = 0 extends 1 & V ? any : Jsonify<Exclude<V, NotJson>> | (Dropped<V> extends 'never' ? never : null);
 
 type JsonObject<T> = Flatten<
   { [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'maybe' ? K : never]?: Jsonify<Exclude<T[K], NotJson>> } & {
@@ -200,7 +207,7 @@ type JsonObject<T> = Flatten<
 
 /** Whether JSON.stringify drops a member holding a `V`: always, sometimes or never. */
 type Dropped<V> = 0 extends 1 & V ? 'never' : [V] extends [NotJson] ? 'always' : [Extract<V, NotJson>] extends [never] ? 'never' : 'maybe';
-type Flatten<T> = { [K in keyof T]: T[K] };
+type Flatten<T> = { [K in keyof T]: T[K] } & {};
 
 /** Phantom types carried by an upload route so the hooks can infer its input and completion data. */
 export interface UploadRouteTypes<TInput, TData, TRoute extends string = string> {
