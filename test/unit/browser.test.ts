@@ -947,7 +947,7 @@ describe('multipart', () => {
 
   test('a resume lookup that fails is retried, not restarted from zero', async () => {
     const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
-    memory.set(key, JSON.stringify({ completionToken: 'old' }));
+    memory.set(key, JSON.stringify({ completionToken: 'old-1' }));
     const route = defaultRoute(SIZE, [
       { n: 1, etag: '"e1"' },
       { n: 3, etag: '"e3"' },
@@ -964,17 +964,17 @@ describe('multipart', () => {
     await wake();
     await wake();
     expect(calls.map((c) => c.phase)).toEqual(['parts', 'parts', 'parts']);
-    expect(calls.every((c) => c.body.completionToken === 'old')).toBe(true);
+    expect(calls.every((c) => c.body.completionToken === 'old-1')).toBe(true);
     expect(task.snapshot().loaded).toBe(10 * MIB);
     expect(ManualXhr.pending.map((x) => new URL(x.url).pathname)).toEqual(['/part/2', '/part/4', '/part/5', '/part/6']);
-    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old' }));
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old-1' }));
     task.cancel();
     await settle();
   });
 
   test('a resume lookup that never answers fails the task, keeps the record, and retry() resumes', async () => {
     const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
-    memory.set(key, JSON.stringify({ completionToken: 'old' }));
+    memory.set(key, JSON.stringify({ completionToken: 'old-2' }));
     const route = defaultRoute(SIZE, [{ n: 1, etag: '"e1"' }]);
     let down = true;
     onPhase = (body) => (body.phase === 'parts' && down ? new Response('unavailable', { status: 503 }) : route(body));
@@ -983,21 +983,21 @@ describe('multipart', () => {
     await wake();
     expect(task.snapshot().status).toBe('error');
     expect(calls.map((c) => c.phase)).toEqual(['parts', 'parts', 'parts']);
-    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old', misses: 1 }));
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old-2', misses: 1 }));
     down = false;
     calls = [];
     expect(task.retry()).toBe(true);
     await settle();
     expect(calls.map((c) => c.phase)).toEqual(['parts']);
     expect(task.snapshot().loaded).toBe(5 * MIB);
-    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old' }));
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old-2' }));
     task.cancel();
     await settle();
   });
 
   test('a resume lookup that keeps getting no usable answer is given up on after three tries', async () => {
     const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
-    memory.set(key, JSON.stringify({ completionToken: 'old' }));
+    memory.set(key, JSON.stringify({ completionToken: 'old-3' }));
     // A route that rewrites every error, and a 2xx that is not an answer (a login page), look alike.
     const answers = [Response.json({ error: 'nope' }, { status: 400 }), new Response('<html>', { status: 200 }), Response.json({ error: 'nope' }, { status: 400 })];
     const route = defaultRoute(SIZE);
@@ -1006,7 +1006,7 @@ describe('multipart', () => {
       const task = upload(big(SIZE), { route: '/api/upload/large' });
       await settle();
       expect(task.snapshot().status).toBe('error');
-      expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old', misses }));
+      expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old-3', misses }));
     }
     calls = [];
     const task = upload(big(SIZE), { route: '/api/upload/large' });
@@ -1020,10 +1020,10 @@ describe('multipart', () => {
   test('an expired token or a different size falls back to a fresh begin', async () => {
     const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
     for (const answer of [Response.json({ code: 'forbidden', error: 'completionToken has expired' }, { status: 403 }), Response.json({ partSize: 5 * MIB, size: SIZE + 1, multipart: true, parts: [], landed: [] })]) {
-      memory.set(key, JSON.stringify({ completionToken: 'old' }));
+      memory.set(key, JSON.stringify({ completionToken: 'old-4' }));
       calls = [];
       const route = defaultRoute(SIZE);
-      onPhase = (body) => (body.phase === 'parts' && body.completionToken === 'old' ? answer : route(body));
+      onPhase = (body) => (body.phase === 'parts' && body.completionToken === 'old-4' ? answer : route(body));
       const task = upload(big(SIZE), { route: '/api/upload/large' });
       await settle();
       expect(calls.map((c) => c.phase)).toEqual(['parts', 'begin']);
