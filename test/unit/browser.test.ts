@@ -1051,10 +1051,11 @@ describe('multipart', () => {
 
   test('a stale record falls back to a fresh begin', async () => {
     memory.set(`upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`, JSON.stringify({ completionToken: 'gone' }));
-    onPhase = (body) => (body.phase === 'parts' && body.completionToken === 'gone' ? Response.json({ code: 'not_found' }, { status: 404 }) : defaultRoute(SIZE)(body));
+    onPhase = (body) => ((body.phase === 'parts' || body.phase === 'end') && body.completionToken === 'gone' ? Response.json({ code: 'not_found' }, { status: 404 }) : defaultRoute(SIZE)(body));
     const task = upload(big(SIZE), { route: '/api/upload/large' });
     await settle();
-    expect(calls.map((c) => c.phase)).toEqual(['parts', 'begin']);
+    // A gone multipart may be one an earlier 'end' completed, so 'end' is asked before starting over.
+    expect(calls.map((c) => c.phase)).toEqual(['parts', 'end', 'begin']);
     // The token is the whole record: nothing else about the upload is worth keeping in localStorage.
     expect(memory.get(`upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`)).toBe(JSON.stringify({ completionToken: 'tok' }));
     task.cancel();
@@ -1196,6 +1197,70 @@ describe('multipart', () => {
       task.cancel();
       await settle();
     }
+  });
+
+  // The route completed the multipart and ran onUploadComplete, and its answer to 'end' never reached
+  // the browser. From then on the multipart is gone: 'parts' is not_found, and 'end' answers the blob.
+  function completedRoute(size: number) {
+    const base = defaultRoute(size);
+    const state = { completed: false, dropping: true };
+    const route = (body: any) => {
+      if (state.completed && body.phase === 'parts') return Response.json(new BlobError('not_found').toJSON(), { status: 404 });
+      if (body.phase === 'end') {
+        state.completed = true;
+        if (state.dropping) throw new TypeError('Failed to fetch');
+      }
+      return base(body);
+    };
+    return { route, state };
+  }
+
+  test("retry() after an 'end' whose answer was lost finishes the upload instead of failing not_found", async () => {
+    const size = 17 * MIB;
+    const { route, state } = completedRoute(size);
+    onPhase = route;
+    const task = upload(big(size), { route: '/api/upload/large' });
+    await settle();
+    for (let done = 0; done < 4; ) {
+      const x = ManualXhr.pending[0];
+      if (!x) {
+        await settle();
+        continue;
+      }
+      x.respond(200, { etag: `"e${new URL(x.url).pathname.split('/').pop()}"` });
+      done++;
+      await settle();
+    }
+    await wake();
+    await wake();
+    await expect(task.done).rejects.toMatchObject({ code: 'request_failed', status: 503 });
+    expect(calls.filter((c) => c.phase === 'end').length).toBe(3);
+
+    state.dropping = false;
+    calls = [];
+    expect(task.retry()).toBe(true);
+    const blob = await task.done;
+    expect(calls.map((c) => c.phase)).toEqual(['parts', 'end']);
+    expect(blob.size).toBe(size);
+    expect(task.snapshot().status).toBe('done');
+    expect(memory.size).toBe(0);
+  });
+
+  test("picking the file again after an 'end' whose answer was lost finishes it instead of uploading a second copy", async () => {
+    const size = 17 * MIB;
+    const { route, state } = completedRoute(size);
+    state.completed = true;
+    state.dropping = false;
+    onPhase = route;
+    memory.set(`upstash-blob:v1:/api/upload/large|big.bin|${size}|2`, JSON.stringify({ completionToken: 'tok-lost' }));
+    const task = upload(big(size), { route: '/api/upload/large' });
+    const blob = await task.done;
+    expect(calls.map((c) => c.phase)).toEqual(['parts', 'end']);
+    expect(calls[1]!.body).toEqual({ phase: 'end', completionToken: 'tok-lost', parts: [] });
+    expect(ManualXhr.sentUrls).toEqual([]);
+    expect(blob.size).toBe(size);
+    expect(task.snapshot()).toMatchObject({ status: 'done', percent: 100 });
+    expect(memory.size).toBe(0);
   });
 
   test('a record under another fingerprint is left alone: a fresh upload, never an error', async () => {

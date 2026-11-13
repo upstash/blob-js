@@ -84,13 +84,13 @@ export interface InternalUploadHandlers {
 }
 
 /**
- * Written onto every single-PUT object, signed into the url so only this SDK can set it, and read
- * back to answer the one question a multipart upload answered by construction: are the bytes at this
- * path the ones THIS upload put there? Phase 'end' completes a multipart, so an object that exists
- * is one this token created; a presigned PUT is written by the browser, so the object at the path
- * may be anybody's -- a stale token's, a concurrent upload's, or one that was there all along.
- * Without a marker, 'end' would record an object it never received and a refusal would delete one it
- * cannot identify, both on nothing better than a value out of the request body.
+ * Written onto every uploaded object, signed into the url or the multipart so only this SDK can set
+ * it, and read back to answer one question: are the bytes at this path the ones THIS upload put
+ * there? A presigned PUT is written by the browser, and a multipart completed by an earlier 'end'
+ * (or aborted) leaves nothing to complete, so either way the object at the path may be anybody's --
+ * a stale token's, a concurrent upload's, or one that was there all along. Without a marker, 'end'
+ * would record an object it never received and a refusal would delete one it cannot identify, both
+ * on nothing better than a value out of the request body.
  */
 const UPLOAD_MARKER = 'upstash-upload';
 const UPLOAD_MARKER_HEADER = `x-amz-meta-${UPLOAD_MARKER}`;
@@ -179,6 +179,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     // create that fails afterwards is told back to the app, with the path it reserved, through onError.
     const multipart = wantsMultipart(options.multipart, file.size);
     const id = crypto.randomUUID();
+    headers[UPLOAD_MARKER_HEADER] = id;
     let uploadId: string | undefined;
     if (multipart) {
       try {
@@ -186,8 +187,6 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
       } catch (e) {
         throw BlobError.is(e) ? e : new BlobError('request_failed', { message: 'could not start the upload', status: 502, cause: e });
       }
-    } else {
-      headers[UPLOAD_MARKER_HEADER] = id;
     }
     // One part covering the whole file is how a single PUT is expressed: the browser runs the same
     // loop over one url, and only this side knows the url is an object PUT and not a part.
@@ -239,39 +238,57 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     details.file = file;
 
     const expected = partCount(t.size, t.partSize);
+    // Every single PUT carries the marker; a multipart does unless an older 'begin' minted its token.
+    const marked = !t.uploadId || t.headers[UPLOAD_MARKER_HEADER] === t.id;
+    // Set when the multipart no longer exists: an earlier 'end' completed it and its answer never
+    // reached the browser, or it was aborted. The marker on the object at the path says which, so a
+    // repeated 'end' answers what the first one did instead of not_found forever. It runs
+    // onUploadComplete again, with the same uploadId: the object existing proves complete() ran, not
+    // that the callback returned (a function timed out mid-callback leaves exactly this), and only
+    // the app can tell a row it already wrote from one it never did.
+    let gone = false;
     let list: WireLanded[] = Array.isArray(body.parts) ? body.parts : [];
-    if (list.length !== expected && t.uploadId) list = (await r2.listParts(t.path, t.uploadId)).map(({ n, etag }) => ({ n, etag }));
-    if (list.length !== expected) throw new BlobError('invalid_input', { message: `expected ${expected} parts, ${list.length} landed` });
-    for (const p of list) {
-      if (!Number.isInteger(p?.n) || typeof p.etag !== 'string') throw new BlobError('invalid_input', { message: 'parts must be [{ n, etag }]' });
+    if (list.length !== expected && t.uploadId) {
+      try {
+        list = (await r2.listParts(t.path, t.uploadId)).map(({ n, etag }) => ({ n, etag }));
+      } catch (e) {
+        // A re-picked file has no part list to send, so this is where its repeated 'end' lands.
+        if (!marked || !BlobError.is(e) || e.code !== 'not_found') throw e;
+        gone = true;
+      }
     }
     // Kept for discard(): it is what says the object still holds this upload's bytes and not a later
     // upload's, which matters whenever onBeforeUpload returns a stable path. For a multipart that is
     // the etag complete() answered with -- the head read afterwards is whatever is stored now, so
     // guarding on that alone would compare the object to itself. On the retried-'end' path there is
     // no complete to take it from, and then a refusal deliberately leaves the object rather than
-    // delete one it cannot identify. The single-PUT branch below has its own answer: the marker.
+    // delete one the first 'end' may have accepted. The single-PUT branch below has its own answer.
     let completedEtag: string | undefined;
-    if (t.uploadId) {
-      try {
-        completedEtag = await r2.completeMultipart(t.path, t.uploadId, list);
-      } catch (e) {
-        // NoSuchUpload after the object landed is a retried 'end': the earlier call completed it.
-        if (!BlobError.is(e) || e.code !== 'not_found' || !(await r2.head(t.path))) throw e;
+    if (!gone) {
+      if (list.length !== expected) throw new BlobError('invalid_input', { message: `expected ${expected} parts, ${list.length} landed` });
+      for (const p of list) {
+        if (!Number.isInteger(p?.n) || typeof p.etag !== 'string') throw new BlobError('invalid_input', { message: 'parts must be [{ n, etag }]' });
+      }
+      if (t.uploadId) {
+        try {
+          completedEtag = await r2.completeMultipart(t.path, t.uploadId, list);
+        } catch (e) {
+          // NoSuchUpload: gone, as above.
+          if (!BlobError.is(e) || e.code !== 'not_found') throw e;
+        }
       }
     }
 
     const head = await r2.head(t.path);
     if (!head) throw new BlobError('not_found', { message: 'the upload never landed' });
-    if (!t.uploadId) {
-      // A single PUT stored the object itself, so there is nothing to complete and a retried 'end'
-      // is idempotent for free -- but also nothing that says the object at this path came from this
-      // upload rather than from a stale token, a concurrent upload or whatever was there before.
-      // The marker signed into the PUT is that proof, and it is what a refusal below deletes on.
+    if (marked) {
+      // The proof the object at this path is this upload's, and for a single PUT what a refusal
+      // below deletes on. See UPLOAD_MARKER.
       if (head.metadata[UPLOAD_MARKER] !== t.id) throw new BlobError('not_found', { message: 'the upload never landed' });
       delete head.metadata[UPLOAD_MARKER];
-      completedEtag = head.etag;
     }
+    // Nothing to complete for a single PUT, so a retried 'end' is idempotent for free.
+    if (!t.uploadId) completedEtag = head.etag;
     // A refusal here deletes an object that is already stored and, on a public bucket, already
     // served: R2 commits at completeMultipart and the public host has no per-object access control,
     // so everything below runs on an object the world can already read. Deleting bounds that

@@ -355,9 +355,18 @@ class Task implements InternalTask {
       // A retry of an upload that already began: its presigns are stale and its parts are the
       // server's to report, so ask for fresh urls instead of beginning a second multipart.
       this.urls.clear();
-      await this.fetchBatch(this.firstMissing());
-    } else if (!(await this.tryResume())) {
-      await this.begin();
+      try {
+        await this.fetchBatch(this.firstMissing());
+      } catch (e) {
+        if (!isGone(e)) throw e;
+        this.status = 'finishing';
+        this.notify();
+        return await this.end(this.token, this.landed(), signal);
+      }
+    } else {
+      const resumed = await this.tryResume();
+      if (typeof resumed === 'object') return resumed;
+      if (!resumed) await this.begin();
     }
     // A cancel that lands while begin is in flight still gets its token here.
     if (signal.aborted) {
@@ -373,7 +382,11 @@ class Task implements InternalTask {
 
     this.status = 'finishing';
     this.notify();
-    const end = (await this.routeCall({ phase: 'end', completionToken: this.token, parts: landed }, signal)) as WireEndResponse | undefined;
+    return await this.end(this.token, landed, signal);
+  }
+
+  private async end(token: string | undefined, parts: WireLanded[], signal: AbortSignal): Promise<CompletedBlob & { data: unknown }> {
+    const end = (await this.routeCall({ phase: 'end', completionToken: token, parts }, signal)) as WireEndResponse | undefined;
     if (typeof end?.blob?.uploadedAt !== 'string') throw answerLost();
     return { ...end.blob, uploadedAt: new Date(end.blob.uploadedAt), data: end.data };
   }
@@ -403,11 +416,13 @@ class Task implements InternalTask {
 
   // The user picking the file again is the resume gesture: a fingerprint match asks the server,
   // which asks R2 what landed. Only an answer that the upload is gone (an unknown or expired token, a
-  // different size) starts a fresh one. A lookup that got no usable answer fails the task with the
-  // record kept, so retry() asks again instead of re-sending every part and orphaning the old upload;
-  // after MAX_LOOKUP_MISSES of those in a row the record is given up on, so a route that rewrites
-  // every error to one status cannot leave the file unable to upload at all.
-  private async tryResume(): Promise<boolean> {
+  // different size) starts a fresh one, and a not_found first asks 'end' again, since an upload whose
+  // last answer was lost is gone the same way: a blob back means it had already finished. A lookup
+  // that got no usable answer fails the task with the record kept, so retry() asks again instead of
+  // re-sending every part and orphaning the old upload; after MAX_LOOKUP_MISSES of those in a row the
+  // record is given up on, so a route that rewrites every error to one status cannot leave the file
+  // unable to upload at all.
+  private async tryResume(): Promise<boolean | (CompletedBlob & { data: unknown })> {
     const rec = readPending(this.storeKey);
     // A retry() after a failed lookup holds the claim again already: that token is this task's own.
     if (!rec || rec.completionToken !== this.picked || (Task.live.has(rec.completionToken) && this.claim !== rec.completionToken)) return false;
@@ -418,17 +433,29 @@ class Task implements InternalTask {
       res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal)) as WirePartsResponse;
       if (!Array.isArray(res?.parts) || !Array.isArray(res.landed)) throw new BlobError('request_failed', { message: "the upload route's answer to the resume lookup was not one", status: 502 });
     } catch (e) {
+      let failure = e;
+      if (isGone(e)) {
+        try {
+          return await this.end(rec.completionToken, [], this.cancelController.signal);
+        } catch (endError) {
+          // A 2xx means the upload is recorded, and an 'end' that never got a real answer may have
+          // been: either way a fresh upload could be a second copy, so the record is kept, and an 'end'
+          // that keeps getting no answer counts as a miss, the same as a lookup that does.
+          if (this.accepted) throw endError;
+          if (isAbort(endError) || (BlobError.is(endError) && classify(endError.status) === 'retry')) failure = endError;
+        }
+      }
       const misses = (rec.misses ?? 0) + 1;
       // The claim stays on the task, so retry() can tell when a re-pick has since taken the upload
       // over; the error handler lets the token go.
-      if (BlobError.is(e) && e.status !== 403 && e.status !== 404 && misses < MAX_LOOKUP_MISSES) {
+      if (BlobError.is(failure) && failure.status !== 403 && failure.status !== 404 && misses < MAX_LOOKUP_MISSES) {
         // Only over its own record: a later pick may have begun a fresh upload under this key since.
         if (readPending(this.storeKey)?.completionToken === rec.completionToken) writePending(this.storeKey, { completionToken: rec.completionToken, misses });
-        throw e;
+        throw failure;
       }
       Task.live.delete(rec.completionToken);
       this.claim = undefined;
-      if (!BlobError.is(e)) throw e;
+      if (!BlobError.is(failure)) throw failure;
       clearPending(this.storeKey, rec.completionToken);
       return false;
     }
@@ -750,6 +777,13 @@ class Task implements InternalTask {
     }
     throw last ?? new BlobError('request_failed');
   }
+}
+
+// A multipart that no longer exists. Most often the 'end' that failed did complete it and only its
+// answer was lost, so 'end' is asked again: the route answers the stored object if it is this
+// upload's, and not_found if the upload was aborted instead.
+function isGone(e: unknown): boolean {
+  return BlobError.is(e) && e.code === 'not_found';
 }
 
 // 502 and not the 500 of a bug: the route did its part, it is its answer that went missing.
