@@ -37,6 +37,8 @@ const ROUTE_ATTEMPTS = 3;
 const PRESIGN_STALE_MS = 60_000;
 // How many batches one part may wait through before the route is simply not signing it.
 const MAX_URL_BATCHES = 4;
+// Resume lookups in a row, each with the route's own retries, before a saved upload is given up on.
+const MAX_LOOKUP_MISSES = 3;
 
 type Status = UploadSnapshot['status'];
 
@@ -393,8 +395,10 @@ class Task implements InternalTask {
 
   // The user picking the file again is the resume gesture: a fingerprint match asks the server,
   // which asks R2 what landed. Only an answer that the upload is gone (an unknown or expired token, a
-  // different size) starts a fresh one. A lookup that never got an answer fails the task with the
-  // record kept, so retry() asks again instead of re-sending every part and orphaning the old upload.
+  // different size) starts a fresh one. A lookup that got no usable answer fails the task with the
+  // record kept, so retry() asks again instead of re-sending every part and orphaning the old upload;
+  // after MAX_LOOKUP_MISSES of those in a row the record is given up on, so a route that rewrites
+  // every error to one status cannot leave the file unable to upload at all.
   private async tryResume(): Promise<boolean> {
     const rec = readPending(this.storeKey);
     if (!rec || rec.completionToken !== this.picked || Task.live.has(rec.completionToken)) return false;
@@ -402,20 +406,26 @@ class Task implements InternalTask {
     let res: WirePartsResponse;
     try {
       res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal)) as WirePartsResponse;
+      if (!Array.isArray(res?.parts) || !Array.isArray(res.landed)) throw new BlobError('request_failed', { message: "the upload route's answer to the resume lookup was not one", status: 502 });
     } catch (e) {
       Task.live.delete(rec.completionToken);
       this.claim = undefined;
-      if (isAbort(e)) throw e;
-      if (!BlobError.is(e) || (e.status !== 403 && e.status !== 404)) throw e;
+      if (!BlobError.is(e)) throw e;
+      const misses = (rec.misses ?? 0) + 1;
+      if (e.status !== 403 && e.status !== 404 && misses < MAX_LOOKUP_MISSES) {
+        writePending(this.storeKey, { completionToken: rec.completionToken, misses });
+        throw e;
+      }
       clearPending(this.storeKey, rec.completionToken);
       return false;
     }
-    if (res?.size !== this.file.size) {
+    if (res.size !== this.file.size) {
       Task.live.delete(rec.completionToken);
       this.claim = undefined;
       clearPending(this.storeKey, rec.completionToken);
       return false;
     }
+    if (rec.misses) writePending(this.storeKey, { completionToken: rec.completionToken });
     this.token = rec.completionToken;
     this.partSize = res.partSize;
     this.multipart = res.multipart !== false;
