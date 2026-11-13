@@ -191,8 +191,9 @@ export class ServerUploadTask<TResponse = unknown> {
     this.notify();
   }
 
-  // Status changes go out on the next microtask, never on an animation frame: a queue starts its
-  // next file and fires onDone off them, and a background tab paints no frames.
+  // Everything but byte progress goes out on the next microtask, never on an animation frame: a
+  // queue starts its next file and fires onDone off status changes, and a background tab paints no
+  // frames.
   private notify(): void {
     this.cached = undefined;
     this.dirty = true;

@@ -174,8 +174,9 @@ class Task implements InternalTask {
     };
   }
 
-  // Status changes go out on the next microtask, never on an animation frame: a queue starts its
-  // next file and fires onDone off them, and a background tab paints no frames.
+  // Everything but byte progress goes out on the next microtask, never on an animation frame: a
+  // queue starts its next file and fires onDone off status changes, and a background tab paints no
+  // frames.
   private notify(): void {
     this.cached = undefined;
     this.dirty = true;
@@ -423,8 +424,8 @@ class Task implements InternalTask {
         const n = pending.shift()!;
         const part = this.parts.get(n)!;
         try {
+          // putWithRetry notifies on its way out, once the part's etag is banked.
           await this.putWithRetry(n, part.size, this.file.slice((n - 1) * this.partSize, (n - 1) * this.partSize + part.size));
-          this.notify();
         } catch (e) {
           // An abort that is not the cancel is a pause, even if resume() already ran.
           if (isAbort(e) && !this.cancelController.signal.aborted) {
