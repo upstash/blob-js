@@ -401,21 +401,25 @@ class Task implements InternalTask {
   // every error to one status cannot leave the file unable to upload at all.
   private async tryResume(): Promise<boolean> {
     const rec = readPending(this.storeKey);
-    if (!rec || rec.completionToken !== this.picked || Task.live.has(rec.completionToken)) return false;
+    // A retry() after a failed lookup holds the claim again already: that token is this task's own.
+    if (!rec || rec.completionToken !== this.picked || (Task.live.has(rec.completionToken) && this.claim !== rec.completionToken)) return false;
     Task.live.add((this.claim = rec.completionToken));
     let res: WirePartsResponse;
     try {
       res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal)) as WirePartsResponse;
       if (!Array.isArray(res?.parts) || !Array.isArray(res.landed)) throw new BlobError('request_failed', { message: "the upload route's answer to the resume lookup was not one", status: 502 });
     } catch (e) {
+      const misses = (rec.misses ?? 0) + 1;
+      // The claim stays on the task, so retry() can tell when a re-pick has since taken the upload
+      // over; the error handler lets the token go.
+      if (BlobError.is(e) && e.status !== 403 && e.status !== 404 && misses < MAX_LOOKUP_MISSES) {
+        // Only over its own record: a later pick may have begun a fresh upload under this key since.
+        if (readPending(this.storeKey)?.completionToken === rec.completionToken) writePending(this.storeKey, { completionToken: rec.completionToken, misses });
+        throw e;
+      }
       Task.live.delete(rec.completionToken);
       this.claim = undefined;
       if (!BlobError.is(e)) throw e;
-      const misses = (rec.misses ?? 0) + 1;
-      if (e.status !== 403 && e.status !== 404 && misses < MAX_LOOKUP_MISSES) {
-        writePending(this.storeKey, { completionToken: rec.completionToken, misses });
-        throw e;
-      }
       clearPending(this.storeKey, rec.completionToken);
       return false;
     }
@@ -425,7 +429,7 @@ class Task implements InternalTask {
       clearPending(this.storeKey, rec.completionToken);
       return false;
     }
-    if (rec.misses) writePending(this.storeKey, { completionToken: rec.completionToken });
+    if (rec.misses && readPending(this.storeKey)?.completionToken === rec.completionToken) writePending(this.storeKey, { completionToken: rec.completionToken });
     this.token = rec.completionToken;
     this.partSize = res.partSize;
     this.multipart = res.multipart !== false;

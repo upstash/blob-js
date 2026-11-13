@@ -1017,6 +1017,55 @@ describe('multipart', () => {
     await settle();
   });
 
+  test('retry() on a task whose resume lookup failed is refused once a re-pick resumed that upload', async () => {
+    const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
+    memory.set(key, JSON.stringify({ completionToken: 'old-5' }));
+    const route = defaultRoute(SIZE, [{ n: 1, etag: '"e1"' }]);
+    let down = true;
+    onPhase = (body) => (body.phase === 'parts' && down ? new Response('unavailable', { status: 503 }) : route(body));
+    const file = big(SIZE);
+    const first = upload(file, { route: '/api/upload/large' });
+    await wake();
+    await wake();
+    expect(first.snapshot().status).toBe('error');
+    down = false;
+    calls = [];
+    const again = upload(file, { route: '/api/upload/large' });
+    await settle();
+    expect(calls.map((c) => [c.phase, c.body.completionToken])).toEqual([['parts', 'old-5']]);
+    // The re-pick carries on the upload, so retrying the failed task must not begin a second one.
+    calls = [];
+    expect(first.retry()).toBe(false);
+    await settle();
+    expect(calls.filter((c) => c.phase === 'begin')).toEqual([]);
+    again.cancel();
+    await settle();
+  });
+
+  test("a failing resume lookup never writes over the record of a later pick's fresh upload", async () => {
+    const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
+    memory.set(key, JSON.stringify({ completionToken: 'old-6' }));
+    let n = 0;
+    const base = defaultRoute(SIZE);
+    onPhase = (body) => {
+      if (body.phase === 'parts' && body.completionToken === 'old-6') return new Response('unavailable', { status: 503 });
+      return body.phase === 'begin' ? { ...multipartBegin(SIZE), completionToken: `new-${++n}` } : base(body);
+    };
+    const file = big(SIZE);
+    const first = upload(file, { route: '/api/upload/large' });
+    await settle();
+    // Its lookup is waiting out a backoff, so the old upload is still claimed: this pick begins fresh.
+    const second = upload(file, { route: '/api/upload/large' });
+    await settle();
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'new-1' }));
+    await wake();
+    await wake();
+    expect(first.snapshot().status).toBe('error');
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'new-1' }));
+    second.cancel();
+    await settle();
+  });
+
   test('an expired token or a different size falls back to a fresh begin', async () => {
     const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
     for (const answer of [Response.json({ code: 'forbidden', error: 'completionToken has expired' }, { status: 403 }), Response.json({ partSize: 5 * MIB, size: SIZE + 1, multipart: true, parts: [], landed: [] })]) {
