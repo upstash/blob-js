@@ -166,6 +166,42 @@ export interface UploadTask {
   retry(): boolean;
 }
 
+type NotJson = undefined | void | symbol | ((...args: any[]) => unknown);
+
+/**
+ * What `T` becomes after JSON.stringify and JSON.parse, the form onUploadComplete's return value
+ * reaches the browser in: toJSON() is applied (a Date becomes its ISO string), undefined, function
+ * and symbol members are dropped from objects and become null in arrays, a Map or Set becomes `{}`.
+ * A member that may be undefined becomes optional. A bigint is never: JSON.stringify throws on it.
+ */
+export type Jsonify<T> = 0 extends 1 & T
+  ? any
+  : unknown extends T
+    ? unknown
+    : T extends { toJSON(...args: any[]): infer R }
+      ? Jsonify<R>
+      : T extends string | number | boolean | null
+        ? T
+        : T extends NotJson
+          ? undefined
+          : T extends bigint
+            ? never
+            : T extends ReadonlyMap<unknown, unknown> | ReadonlySet<unknown>
+              ? Record<never, never>
+              : T extends readonly unknown[]
+                ? { [K in keyof T]: T[K] extends NotJson ? null : Jsonify<T[K]> }
+                : JsonObject<T>;
+
+type JsonObject<T> = Flatten<
+  { [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'maybe' ? K : never]?: Jsonify<Exclude<T[K], NotJson>> } & {
+    [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'never' ? K : never]: Jsonify<T[K]>;
+  }
+>;
+
+/** Whether JSON.stringify drops a member holding a `V`: always, sometimes or never. */
+type Dropped<V> = 0 extends 1 & V ? 'never' : [V] extends [NotJson] ? 'always' : [Extract<V, NotJson>] extends [never] ? 'never' : 'maybe';
+type Flatten<T> = { [K in keyof T]: T[K] };
+
 /** Phantom types carried by an upload route so the hooks can infer its input and completion data. */
 export interface UploadRouteTypes<TInput, TData, TRoute extends string = string> {
   input: TInput;
