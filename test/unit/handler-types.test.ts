@@ -435,9 +435,51 @@ function _useUploadCaveat(value: Bucket) {
   bound('/api/upload');
 }
 
+// blob.data is what onUploadComplete returned after a JSON round trip, so it is typed that way.
+function _jsonData(value: Bucket) {
+  const _json = uploadHandler({
+    bucket: value,
+    onBeforeUpload: () => ({ path: 'x' }),
+    onUploadComplete: () => ({
+      at: new Date(),
+      when: [new Date()] as const,
+      list: [new Date(), undefined],
+      maybe: undefined as Date | undefined,
+      gone: undefined,
+      run: () => 1,
+      seen: new Set<string>(),
+      nested: { at: new Date(), n: 1 as number | null },
+    }),
+  });
+  const { useUpload: bound } = uploadHooks<typeof _json>();
+  bound({
+    onDone: ({ blob: { data } }) => {
+      void (data.at satisfies string);
+      // @ts-expect-error a Date reaches the browser as its ISO string
+      void (data.at satisfies Date);
+      void (data.when satisfies readonly [string]);
+      // An undefined array slot is written as null.
+      void (data.list satisfies (string | null)[]);
+      // @ts-expect-error not undefined
+      void (data.list satisfies (string | undefined)[]);
+      void (data.maybe satisfies string | undefined);
+      // A key whose value may be undefined is optional: JSON drops it when it is.
+      void ({ at: '', when: [''], list: [], seen: {}, nested: { at: '', n: null } } satisfies typeof data);
+      // @ts-expect-error JSON drops undefined values
+      void data.gone;
+      // @ts-expect-error JSON drops functions
+      void data.run;
+      // @ts-expect-error a Set serializes to an empty object
+      void data.seen.size;
+      void (data.nested.at satisfies string);
+      void (data.nested.n satisfies number | null);
+    },
+  });
+}
+
 test('the handler types compile', () => {
   expect(typeof uploadHandler).toBe('function');
   expect(typeof useServerUpload).toBe('function');
-  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _singleState, _routesState, _routesStateGeneric, _wrappedState, _routeUnions, _escapeHatches, _useUploadCaveat];
+  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _singleState, _routesState, _routesStateGeneric, _wrappedState, _routeUnions, _escapeHatches, _useUploadCaveat, _jsonData];
   void ({} as UploadCompleteArgs<Uploads>);
 });
