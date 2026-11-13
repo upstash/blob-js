@@ -59,6 +59,43 @@ function defaultRoute(size: number, landed: { n: number; etag: string }[] = []) 
   };
 }
 
+// defaultRoute that remembers when it signed each generation of urls, and storage that refuses a url
+// past its life the way the browser sees it: the 403 carries no CORS header, so it is a network
+// error with no status. `expiresS` is written into the urls the way storage signs them.
+function expiringRoute(size: number, expiresS?: number) {
+  const base = defaultRoute(size);
+  const issued: number[] = [];
+  const route = (body: any) => {
+    const out: any = base(body);
+    const plan = body.phase === 'begin' ? out.upload : body.phase === 'parts' ? out : undefined;
+    if (plan) {
+      issued.push(clock.now());
+      if (expiresS) plan.parts = plan.parts.map((p: any) => ({ ...p, url: `${p.url}&X-Amz-Expires=${expiresS}` }));
+    }
+    return out;
+  };
+  const storage = (x: ManualXhr, beforeOk?: () => void) => {
+    const gen = Number(new URL(x.url).searchParams.get('g'));
+    if (clock.now() - issued[gen]! >= (expiresS ?? 600) * 1000) {
+      x.progress(1);
+      x.fail();
+      return;
+    }
+    beforeOk?.();
+    x.respond(200, { etag: `"e${new URL(x.url).pathname.split('/').pop()}"` });
+  };
+  return { route, storage };
+}
+
+/** Wakes every backoff and answers every PUT on the wire, until the task settles. */
+async function drive(task: { snapshot(): { pending: boolean } }, answer: (x: ManualXhr) => void, rounds = 80) {
+  for (let i = 0; i < rounds && task.snapshot().pending; i++) {
+    await wake();
+    for (const x of [...ManualXhr.pending]) answer(x);
+  }
+  await settle();
+}
+
 beforeAll(() => {
   (globalThis as any).localStorage = {
     getItem: (k: string) => memory.get(k) ?? null,
@@ -460,6 +497,85 @@ describe('a single PUT', () => {
       await task.done;
     } finally {
       clock.now = realNow;
+    }
+  });
+
+  test('a url that died while the laptop slept is renewed instead of re-sent until the budget runs out', async () => {
+    const realNow = clock.now;
+    let t = 1_000_000;
+    clock.now = () => t;
+    let task: ReturnType<typeof upload> | undefined;
+    try {
+      const { route, storage } = expiringRoute(3);
+      onPhase = route;
+      task = upload(png(), { route: '/api/upload' });
+      await settle();
+      // The lid closes with the PUT on the wire and opens eleven minutes later.
+      t += 11 * 60_000;
+      ManualXhr.pending[0]!.progress(1);
+      ManualXhr.pending[0]!.fail();
+      await drive(task, (x) => storage(x));
+      expect(await task.done).toMatchObject({ size: 3 });
+      expect(calls.map((c) => c.phase)).toEqual(['begin', 'parts', 'end']);
+    } finally {
+      clock.now = realNow;
+      task?.cancel();
+      await settle();
+    }
+  });
+
+  test('a renewal the route cannot answer yet is backed off from like a dropped link', async () => {
+    const realNow = clock.now;
+    let t = 1_000_000;
+    clock.now = () => t;
+    let task: ReturnType<typeof upload> | undefined;
+    try {
+      const { route, storage } = expiringRoute(3);
+      let refused = 0;
+      // Woken before its network is back: two renewals, three calls each, never reach the route.
+      onPhase = (body) => {
+        if (body.phase === 'parts' && refused++ < 6) throw new TypeError('Failed to fetch');
+        return route(body);
+      };
+      task = upload(png(), { route: '/api/upload' });
+      await settle();
+      // The lid closes before a byte leaves.
+      t += 11 * 60_000;
+      ManualXhr.pending[0]!.fail();
+      // The first PUT on the fresh url drops too: the failed renewals do not count against the PUT.
+      let dropped = false;
+      await drive(task, (x) => (dropped ? storage(x) : ((dropped = true), x.fail())));
+      expect(await task.done).toMatchObject({ size: 3 });
+      expect(calls.filter((c) => c.phase === 'parts').length).toBe(7);
+    } finally {
+      clock.now = realNow;
+      task?.cancel();
+      await settle();
+    }
+  });
+
+  test("a url is renewed before its own X-Amz-Expires runs out, not after ten minutes", async () => {
+    const realNow = clock.now;
+    let t = 1_000_000;
+    clock.now = () => t;
+    let task: ReturnType<typeof upload> | undefined;
+    try {
+      const { route } = expiringRoute(3, 120);
+      onPhase = route;
+      task = upload(png(), { route: '/api/upload' });
+      await settle();
+      ManualXhr.pending[0]!.respond(503);
+      await tick();
+      t += 110_000;
+      await wake();
+      expect(calls.map((c) => c.phase)).toEqual(['begin', 'parts']);
+      expect(ManualXhr.pending[0]!.url).toContain('g=1');
+      ManualXhr.pending[0]!.respond(200, { etag: '"x"' });
+      await task.done;
+    } finally {
+      clock.now = realNow;
+      task?.cancel();
+      await settle();
     }
   });
 
@@ -1245,6 +1361,79 @@ describe('multipart', () => {
     expect(ManualXhr.pending.find((x) => x.url.includes('/part/3'))!.url).toContain('g=1');
     task.cancel();
     await settle();
+  });
+
+  test('resuming after a pause longer than a url lives renews the urls before sending', async () => {
+    const realNow = clock.now;
+    let t = 1_000_000;
+    clock.now = () => t;
+    let task: ReturnType<typeof upload> | undefined;
+    try {
+      const { route } = expiringRoute(SIZE);
+      onPhase = route;
+      task = upload(big(SIZE), { route: '/api/upload/large' });
+      await settle();
+      expect(task.pause()).toBe(true);
+      await settle();
+      t += 11 * 60_000;
+      expect(task.resume()).toBe(true);
+      await settle();
+      expect(calls.filter((c) => c.phase === 'parts').map((c) => c.body.from)).toEqual([1]);
+      expect(ManualXhr.pending.map((x) => new URL(x.url).searchParams.get('g'))).toEqual(['1', '1', '1', '1']);
+      task.cancel();
+      await settle();
+    } finally {
+      clock.now = realNow;
+      task?.cancel();
+      await settle();
+    }
+  });
+
+  test('a part that waited out its url for a connection slot renews it before sending', async () => {
+    const realNow = clock.now;
+    let t = 1_000_000;
+    clock.now = () => t;
+    const tasks: ReturnType<typeof upload>[] = [];
+    try {
+      onPhase = expiringRoute(SIZE).route;
+      tasks.push(upload(big(SIZE), { route: '/api/upload/large' }), upload(big(SIZE), { route: '/api/upload/large' }));
+      await settle();
+      expect(poolState()).toEqual({ active: 6, waiting: 2 });
+      t += 11 * 60_000;
+      ManualXhr.pending[0]!.respond(200, { etag: '"e"' });
+      await settle();
+      const after = ManualXhr.sentUrls.slice(6);
+      expect(after.length).toBeGreaterThan(0);
+      expect(after.filter((u) => u.includes('g=0'))).toEqual([]);
+    } finally {
+      clock.now = realNow;
+      for (const task of tasks) task.cancel();
+      await settle();
+    }
+  });
+
+  test('on a link slower than a batch of urls lives, the later parts get fresh urls', async () => {
+    const realNow = clock.now;
+    let t = 1_000_000;
+    clock.now = () => t;
+    let task: ReturnType<typeof upload> | undefined;
+    try {
+      const { route, storage } = expiringRoute(SIZE);
+      onPhase = route;
+      task = upload(big(SIZE), { route: '/api/upload/large' });
+      await settle();
+      // Each part takes 40s to land, so part 16 of the first batch starts past the ten minutes.
+      await drive(task, (x) => storage(x, () => (t += 40_000)));
+      const blob = await task.done;
+      expect((blob.data as { parts: unknown[] }).parts.length).toBe(21);
+      // One renewal covers the rest of the file: only the part that outlived its url is sent twice.
+      expect(calls.filter((c) => c.phase === 'parts').map((c) => c.body.from)).toEqual([16]);
+      expect(ManualXhr.sentUrls.length).toBe(22);
+    } finally {
+      clock.now = realNow;
+      task?.cancel();
+      await settle();
+    }
   });
 
   test('the global cap of 6 holds across tasks', async () => {
