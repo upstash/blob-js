@@ -656,9 +656,10 @@ export class Bucket {
    */
   async move(from: string, to: string, options: CopyOptions = {}): Promise<BlobObject> {
     const blob = await this.copy(from, to, options);
-    // Storage keeps one object for every Unicode spelling of a name (NFC and NFD of "café" are one
-    // path), so the source is compared the same way: deleting it would delete the copy just written.
-    if (from.normalize('NFC') === to.normalize('NFC')) return blob;
+    // Canonically equivalent spellings of a name (NFC and NFD of "café") are one object, and so are
+    // spellings that encode to the same bytes (a lone surrogate is sent as U+FFFD). Compared that way,
+    // since deleting the source would delete the copy just written.
+    if (encodeKey(from.normalize('NFC')) === encodeKey(to.normalize('NFC'))) return blob;
     try {
       await this.del(from);
     } catch (e) {

@@ -1678,10 +1678,11 @@ describe('copy and move', () => {
     expect(r2Calls().find((c) => c.method === 'PUT')!.headers.get('content-type')).toBe('text/markdown');
   });
 
-  test('move onto the same path, in any Unicode spelling, copies and never deletes', async () => {
+  test('move onto the same path, in any spelling of it, copies and never deletes', async () => {
     for (const [from, to] of [
       ['a.txt', 'a.txt'],
       ['caf\u00e9.txt', 'cafe\u0301.txt'],
+      ['y\ud800.txt', 'y\ufffd.txt'],
     ]) {
       resetCredentialCaches();
       calls = [];
