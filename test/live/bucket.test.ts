@@ -253,6 +253,17 @@ describe('write verbs', () => {
     await expect(priv.copy(p('missing'), p('x'), { cache: '1m' })).rejects.toMatchObject({ code: 'not_found' });
   });
 
+  test('move onto the same path keeps the file', async () => {
+    await priv.put(p('self.txt'), 'keepme', { contentType: 'text/plain' });
+    const moved = await priv.move(p('self.txt'), p('self.txt'));
+    expect(moved.path).toBe(p('self.txt'));
+    expect(await new Response((await priv.get(p('self.txt'))).body).text()).toBe('keepme');
+    // NFC and NFD spellings of one name are one object.
+    await priv.put(p('caf\u00e9.txt'), 'keepme');
+    await priv.move(p('caf\u00e9.txt'), p('cafe\u0301.txt'), { contentType: 'text/markdown' });
+    expect((await priv.info(p('caf\u00e9.txt'))).contentType).toBe('text/markdown');
+  });
+
   test('copy options: one given, the other two carried over from the source', async () => {
     await priv.put(p('c/src.txt'), 'copyme', { contentType: 'text/plain', metadata: { origin: 'src' } });
     await priv.copy(p('c/src.txt'), p('c/typed.md'), { contentType: 'text/markdown' });
