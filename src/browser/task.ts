@@ -409,17 +409,22 @@ class Task implements InternalTask {
       res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal)) as WirePartsResponse;
       if (!Array.isArray(res?.parts) || !Array.isArray(res.landed)) throw new BlobError('request_failed', { message: "the upload route's answer to the resume lookup was not one", status: 502 });
     } catch (e) {
+      const canceled = this.cancelController.signal.aborted;
       const misses = (rec.misses ?? 0) + 1;
       // The claim stays on the task, so retry() can tell when a re-pick has since taken the upload
       // over; the error handler lets the token go.
-      if (BlobError.is(e) && e.status !== 403 && e.status !== 404 && misses < MAX_LOOKUP_MISSES) {
+      if (!canceled && BlobError.is(e) && e.status !== 403 && e.status !== 404 && misses < MAX_LOOKUP_MISSES) {
         // Only over its own record: a later pick may have begun a fresh upload under this key since.
-        if (readPending(this.storeKey)?.completionToken === rec.completionToken) writePending(this.storeKey, { completionToken: rec.completionToken, misses });
-        throw e;
+        const ours = readPending(this.storeKey)?.completionToken === rec.completionToken;
+        if (ours) writePending(this.storeKey, { completionToken: rec.completionToken, misses });
+        // A count that could not be saved (a full localStorage) would never reach the give-up.
+        if (!ours || readPending(this.storeKey)?.misses === misses) throw e;
       }
+      // A canceled task's error handler never runs, so the claim goes here. Its record stays for the
+      // next pick: a cancel is not a miss.
       Task.live.delete(rec.completionToken);
       this.claim = undefined;
-      if (!BlobError.is(e)) throw e;
+      if (canceled || !BlobError.is(e)) throw e;
       clearPending(this.storeKey, rec.completionToken);
       return false;
     }

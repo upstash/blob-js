@@ -1066,6 +1066,49 @@ describe('multipart', () => {
     await settle();
   });
 
+  test('a cancel during the resume lookup is not a miss and leaves the upload for the next pick', async () => {
+    const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
+    memory.set(key, JSON.stringify({ completionToken: 'old-7' }));
+    onPhase = defaultRoute(SIZE, [{ n: 1, etag: '"e1"' }]);
+    let refuse!: (e: Error) => void;
+    const pending = new Promise<never>((_, reject) => (refuse = reject));
+    const file = big(SIZE);
+    // The app's headers() is still out when the user cancels, then fails (a token refresh that died).
+    const first = upload(file, { route: '/api/upload/large', headers: () => pending });
+    await settle();
+    first.cancel();
+    refuse(new Error('refresh failed'));
+    await settle();
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'old-7' }));
+    const again = upload(file, { route: '/api/upload/large' });
+    await settle();
+    expect(calls.map((c) => [c.phase, c.body.completionToken])).toEqual([['parts', 'old-7']]);
+    again.cancel();
+    await settle();
+  });
+
+  test('a miss that cannot be saved (localStorage full) gives the record up instead of failing every pick', async () => {
+    const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
+    memory.set(key, JSON.stringify({ completionToken: 'old-8' }));
+    const storage = (globalThis as any).localStorage;
+    const setItem = storage.setItem;
+    storage.setItem = (k: string, v: string) => {
+      if (k === key && v.includes('old-8')) throw new DOMException('full', 'QuotaExceededError');
+      return setItem(k, v);
+    };
+    try {
+      const route = defaultRoute(SIZE);
+      onPhase = (body) => (body.phase === 'parts' ? Response.json({ error: 'nope' }, { status: 400 }) : route(body));
+      const task = upload(big(SIZE), { route: '/api/upload/large' });
+      await settle();
+      expect(calls.map((c) => c.phase)).toEqual(['parts', 'begin']);
+      task.cancel();
+      await settle();
+    } finally {
+      storage.setItem = setItem;
+    }
+  });
+
   test('an expired token or a different size falls back to a fresh begin', async () => {
     const key = `upstash-blob:v1:/api/upload/large|big.bin|${SIZE}|2`;
     for (const answer of [Response.json({ code: 'forbidden', error: 'completionToken has expired' }, { status: 403 }), Response.json({ partSize: 5 * MIB, size: SIZE + 1, multipart: true, parts: [], landed: [] })]) {
