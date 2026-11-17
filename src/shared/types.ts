@@ -174,14 +174,15 @@ type NotJson = undefined | void | symbol | ((...args: any[]) => unknown);
  * and symbol members are dropped from objects and become null in arrays, a Map or Set becomes `{}`.
  * A member that may be undefined becomes optional. A bigint is never: JSON.stringify throws on it.
  */
-export type Jsonify<T> = 0 extends 1 & T
-  ? any
-  : unknown extends T
-    ? // Without strictNullChecks unknown also fits any object whose members are all optional.
-      [keyof T] extends [never]
-      ? unknown
-      : JsonObject<T>
-    : T extends { toJSON(...args: any[]): infer R }
+export type Jsonify<T> = 0 extends 1 & T ? any : T extends unknown ? JsonifyOne<T> : never;
+
+// One arm of a union at a time, so the arms are never mixed into one object.
+type JsonifyOne<T> = unknown extends T
+  ? // Without strictNullChecks unknown also fits any object whose members are all optional.
+    [keyof T] extends [never]
+    ? unknown
+    : JsonObject<T>
+  : T extends { toJSON(...args: any[]): infer R }
       ? Jsonify<R>
       : T extends string | number | boolean | null
         ? T
@@ -196,8 +197,14 @@ export type Jsonify<T> = 0 extends 1 & T
                   ? T extends unknown[]
                     ? JsonElement<T[number]>[]
                     : readonly JsonElement<T[number]>[]
-                  : { [K in keyof T]: JsonElement<T[K]> }
+                  : T extends readonly [...infer U]
+                    ? T extends unknown[]
+                      ? JsonTuple<U>
+                      : Readonly<JsonTuple<U>>
+                    : never
                 : JsonObject<T>;
+
+type JsonTuple<T> = { [K in keyof T]: JsonElement<T[K]> };
 
 /** An array slot JSON.stringify cannot write holds null instead. */
 type JsonElement<V> = 0 extends 1 & V ? any : Jsonify<Exclude<V, NotJson>> | (Dropped<V> extends 'never' ? never : null);
@@ -205,6 +212,10 @@ type JsonElement<V> = 0 extends 1 & V ? any : Jsonify<Exclude<V, NotJson>> | (Dr
 type JsonObject<T> = Flatten<
   { [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'never' ? K : never]: Jsonify<T[K]> } & {
     [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'maybe' ? K : never]?: Jsonify<Exclude<T[K], NotJson>>;
+  } & {
+    // TypeScript widens branch-dependent returns to `{ a; b?: undefined } | { b; a?: undefined }`;
+    // keeping those `?: undefined` members lets `data.b` still be read on the union.
+    [K in keyof T as K extends symbol ? never : [T[K]] extends [undefined] ? (Record<never, never> extends Pick<T, K> ? K : never) : never]?: undefined;
   }
 >;
 

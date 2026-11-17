@@ -477,9 +477,31 @@ function _jsonData(value: Bucket) {
   });
 }
 
+// A return whose shape depends on a branch is widened to a union with `?: undefined` members; each
+// arm keeps its own shape, and the members the other arm has stay readable.
+function _jsonBranches(value: Bucket, ok: boolean) {
+  const _branches = uploadHandler({
+    bucket: value,
+    onBeforeUpload: () => ({ path: 'x' }),
+    onUploadComplete: () => (ok ? { id: 1, at: new Date(), pair: [new Date(), 1] as [Date, number] } : { error: 'nope' }),
+  });
+  const { useUpload: bound } = uploadHooks<typeof _branches>();
+  bound({
+    onDone: ({ blob: { data } }) => {
+      if (data.error) void (data.error satisfies string);
+      else if (data.id !== undefined) {
+        void (data.at satisfies string | undefined);
+        void (data.pair satisfies [string, number] | undefined);
+      }
+      // @ts-expect-error the arms are not mixed into one object
+      void (data satisfies { id: number; error: string });
+    },
+  });
+}
+
 test('the handler types compile', () => {
   expect(typeof uploadHandler).toBe('function');
   expect(typeof useServerUpload).toBe('function');
-  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _singleState, _routesState, _routesStateGeneric, _wrappedState, _routeUnions, _escapeHatches, _useUploadCaveat, _jsonData];
+  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _singleState, _routesState, _routesStateGeneric, _wrappedState, _routeUnions, _escapeHatches, _useUploadCaveat, _jsonData, _jsonBranches];
   void ({} as UploadCompleteArgs<Uploads>);
 });
