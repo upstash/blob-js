@@ -208,7 +208,7 @@ export interface UploadRouteOptions<TCtx, TSchema extends StandardSchema<any, an
 export interface UploadBuilder<TCtx> {
   <TSchema extends StandardSchema<any, any> | undefined = undefined, TState = undefined, TData = void>(
     options: UploadRouteOptions<TCtx, TSchema, TState, TData>,
-  ): UploadRouteDefinition<NoInfer<RouteInputOf<TSchema>>, NoInfer<TData>>;
+  ): UploadRouteDefinition<NoInfer<RouteInputOf<TSchema>>, NoInferState<TData>>;
 }
 
 /**

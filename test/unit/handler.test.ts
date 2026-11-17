@@ -285,6 +285,18 @@ describe('defaults', () => {
     expect((await began(uploads, 'avatar', { name: 'a.png', type: 'image/png', size: 4 })).path).toBe('avatar/stable');
   });
 
+  test('onUploadComplete data reaches the client as JSON', async () => {
+    const at = new Date('2026-01-02T03:04:05.000Z');
+    const uploads = uploadHandler({
+      bucket: bucket(),
+      onBeforeUpload: () => ({ path: 'a.png' }),
+      onUploadComplete: () => ({ at, gone: undefined, run: () => 1, seen: new Set(['a']), list: [at, undefined] }),
+    });
+    const begin = await began(uploads, undefined, { name: 'a.png', type: 'image/png', size: 4 });
+    const end = await post(uploads, undefined, { phase: 'end', completionToken: begin.completionToken, parts: [{ n: 1, etag: '"p1"' }] });
+    expect((await end.json()).data).toStrictEqual({ at: '2026-01-02T03:04:05.000Z', seen: {}, list: ['2026-01-02T03:04:05.000Z', null] });
+  });
+
   test('onUploadComplete is inherited, and a route with its own answers with its own data', async () => {
     const seen: unknown[] = [];
     const uploads = uploadHandler({

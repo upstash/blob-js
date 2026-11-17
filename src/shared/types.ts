@@ -166,6 +166,63 @@ export interface UploadTask {
   retry(): boolean;
 }
 
+type NotJson = undefined | void | symbol | ((...args: any[]) => unknown);
+
+/**
+ * What `T` becomes after JSON.stringify and JSON.parse, the form onUploadComplete's return value
+ * reaches the browser in: toJSON() is applied (a Date becomes its ISO string), undefined, function
+ * and symbol members are dropped from objects and become null in arrays, a Map or Set becomes `{}`.
+ * A member that may be undefined becomes optional. A bigint is never: JSON.stringify throws on it.
+ */
+export type Jsonify<T> = 0 extends 1 & T ? any : T extends unknown ? JsonifyOne<T> : never;
+
+// One arm of a union at a time, so the arms are never mixed into one object.
+type JsonifyOne<T> = unknown extends T
+  ? // Without strictNullChecks unknown also fits any object whose members are all optional.
+    [keyof T] extends [never]
+    ? unknown
+    : JsonObject<T>
+  : T extends { toJSON(...args: any[]): infer R }
+      ? Jsonify<R>
+      : T extends string | number | boolean | null
+        ? T
+        : T extends NotJson
+          ? undefined
+          : T extends bigint
+            ? never
+            : T extends ReadonlyMap<unknown, unknown> | ReadonlySet<unknown>
+              ? Record<never, never>
+              : T extends readonly unknown[]
+                ? number extends T['length']
+                  ? T extends unknown[]
+                    ? JsonElement<T[number]>[]
+                    : readonly JsonElement<T[number]>[]
+                  : T extends readonly [...infer U]
+                    ? T extends unknown[]
+                      ? JsonTuple<U>
+                      : Readonly<JsonTuple<U>>
+                    : never
+                : JsonObject<T>;
+
+type JsonTuple<T> = { [K in keyof T]: JsonElement<T[K]> };
+
+/** An array slot JSON.stringify cannot write holds null instead. */
+type JsonElement<V> = 0 extends 1 & V ? any : Jsonify<Exclude<V, NotJson>> | (Dropped<V> extends 'never' ? never : null);
+
+type JsonObject<T> = Flatten<
+  { [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'never' ? K : never]: Jsonify<T[K]> } & {
+    [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'maybe' ? K : never]?: Jsonify<Exclude<T[K], NotJson>>;
+  } & {
+    // TypeScript widens branch-dependent returns to `{ a; b?: undefined } | { b; a?: undefined }`;
+    // keeping those `?: undefined` members lets `data.b` still be read on the union.
+    [K in keyof T as K extends symbol ? never : [T[K]] extends [undefined] ? (Record<never, never> extends Pick<T, K> ? K : never) : never]?: undefined;
+  }
+>;
+
+/** Whether JSON.stringify drops a member holding a `V`: always, sometimes or never. */
+type Dropped<V> = 0 extends 1 & V ? 'never' : [V] extends [NotJson] ? 'always' : [Extract<V, NotJson>] extends [never] ? 'never' : 'maybe';
+type Flatten<T> = { [K in keyof T]: T[K] } & {};
+
 /** Phantom types carried by an upload route so the hooks can infer its input and completion data. */
 export interface UploadRouteTypes<TInput, TData, TRoute extends string = string> {
   input: TInput;

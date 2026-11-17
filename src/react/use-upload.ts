@@ -2,15 +2,15 @@ import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
 import { createTask, type HeadersProvider, type InternalTask } from '../browser/task.ts';
 import type { BlobError } from '../shared/errors.ts';
-import type { CompletedBlob, UploadRoute, UploadRouteTypes, ServedConstraints } from '../shared/types.ts';
+import type { CompletedBlob, Jsonify, UploadRoute, UploadRouteTypes, ServedConstraints } from '../shared/types.ts';
 import { deny, useConstraints } from './constraints.ts';
 import { resolveRouteUrl, type AnyUploadRoute } from './routes.ts';
 import { useTaskList, type ListEntry } from './task-list.ts';
 
 /** The input schema of an upload route, or undefined when it has none. */
 export type RouteInput<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<infer TInput, any, any> } ? TInput : undefined;
-/** What onUploadComplete returned, which reaches the browser as blob.data. */
-export type RouteData<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<any, infer TData, any> } ? TData : unknown;
+/** What onUploadComplete returned, as the JSON it reaches the browser in: blob.data. A Date is a string here. */
+export type RouteData<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<any, infer TData, any> } ? Jsonify<TData> : unknown;
 /** The URL declared by a branded route, or any string for an unbound route. */
 export type RoutePath<R> = R extends { readonly __upstashUploadRoute: UploadRouteTypes<any, any, infer TRoute> } ? (string extends TRoute ? string : TRoute) : string;
 
