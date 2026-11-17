@@ -103,7 +103,9 @@ class Task implements InternalTask {
   private started = false;
   private listeners = new Set<() => void>();
   private cached: UploadSnapshot | undefined;
-  private frameQueued = false;
+  private dirty = false;
+  private notifyQueued = false;
+  private progressQueued = false;
   private resolveDone!: (b: CompletedBlob & { data: unknown }) => void;
   private rejectDone!: (e: unknown) => void;
   private donePromise!: Promise<CompletedBlob & { data: unknown }>;
@@ -172,14 +174,36 @@ class Task implements InternalTask {
     };
   }
 
+  // Everything but byte progress goes out on the next microtask, never on an animation frame: a
+  // queue starts its next file and fires onDone off status changes, and a background tab paints no
+  // frames.
   private notify(): void {
     this.cached = undefined;
-    if (this.frameQueued) return;
-    this.frameQueued = true;
-    clock.frame(() => {
-      this.frameQueued = false;
-      for (const l of [...this.listeners]) l();
+    this.dirty = true;
+    if (this.notifyQueued) return;
+    this.notifyQueued = true;
+    queueMicrotask(() => {
+      this.notifyQueued = false;
+      this.emit();
     });
+  }
+
+  /** Bytes on the wire: many events a second, so these are coalesced on clock.frame. */
+  private progress(): void {
+    this.cached = undefined;
+    this.dirty = true;
+    if (this.progressQueued) return;
+    this.progressQueued = true;
+    clock.frame(() => {
+      this.progressQueued = false;
+      this.emit();
+    });
+  }
+
+  private emit(): void {
+    if (!this.dirty) return;
+    this.dirty = false;
+    for (const l of [...this.listeners]) l();
   }
 
   /* ----------------------------------------------------------- controls */
@@ -400,8 +424,8 @@ class Task implements InternalTask {
         const n = pending.shift()!;
         const part = this.parts.get(n)!;
         try {
+          // putWithRetry notifies on its way out, once the part's etag is banked.
           await this.putWithRetry(n, part.size, this.file.slice((n - 1) * this.partSize, (n - 1) * this.partSize + part.size));
-          this.notify();
         } catch (e) {
           // An abort that is not the cancel is a pause, even if resume() already ran.
           if (isAbort(e) && !this.cancelController.signal.aborted) {
@@ -486,7 +510,7 @@ class Task implements InternalTask {
             onUploadProgress: (loaded) => {
               if (loaded > 0) sentBytes = true;
               state.loaded = Math.min(loaded, size);
-              this.notify();
+              this.progress();
             },
             stallTimeoutMs: STALL_TIMEOUT_MS,
           });

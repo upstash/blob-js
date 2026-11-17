@@ -47,7 +47,9 @@ export class ServerUploadTask<TResponse = unknown> {
   private readonly controller = new AbortController();
   private readonly listeners = new Set<() => void>();
   private cached: ServerUploadSnapshot<TResponse> | undefined;
-  private frameQueued = false;
+  private dirty = false;
+  private notifyQueued = false;
+  private progressQueued = false;
 
   constructor(private readonly options: ServerUploadTaskOptions) {
     requireXhr();
@@ -131,7 +133,7 @@ export class ServerUploadTask<TResponse = unknown> {
         onUploadProgress: (loaded, total) => {
           this.loaded = loaded;
           if (total > 0) this.total = total;
-          this.notify();
+          this.progress();
         },
         onUploadDone: () => {
           if (this.status === 'uploading') this.status = 'finishing';
@@ -189,13 +191,35 @@ export class ServerUploadTask<TResponse = unknown> {
     this.notify();
   }
 
+  // Everything but byte progress goes out on the next microtask, never on an animation frame: a
+  // queue starts its next file and fires onDone off status changes, and a background tab paints no
+  // frames.
   private notify(): void {
     this.cached = undefined;
-    if (this.frameQueued) return;
-    this.frameQueued = true;
-    clock.frame(() => {
-      this.frameQueued = false;
-      for (const listener of [...this.listeners]) listener();
+    this.dirty = true;
+    if (this.notifyQueued) return;
+    this.notifyQueued = true;
+    queueMicrotask(() => {
+      this.notifyQueued = false;
+      this.emit();
     });
+  }
+
+  /** Bytes on the wire: many events a second, so these are coalesced on clock.frame. */
+  private progress(): void {
+    this.cached = undefined;
+    this.dirty = true;
+    if (this.progressQueued) return;
+    this.progressQueued = true;
+    clock.frame(() => {
+      this.progressQueued = false;
+      this.emit();
+    });
+  }
+
+  private emit(): void {
+    if (!this.dirty) return;
+    this.dirty = false;
+    for (const listener of [...this.listeners]) listener();
   }
 }
