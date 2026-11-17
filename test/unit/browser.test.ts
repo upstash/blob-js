@@ -1330,6 +1330,22 @@ describe('multipart', () => {
     expect(memory.size).toBe(0);
   });
 
+  test("a repeated 'end' that onUploadComplete refuses keeps the record instead of uploading a second copy", async () => {
+    const size = 17 * MIB;
+    const { route, state } = completedRoute(size);
+    state.completed = true;
+    state.dropping = false;
+    // A non-idempotent onUploadComplete refusing the duplicate row with its own status.
+    onPhase = (body) => (body.phase === 'end' ? Response.json({ error: 'duplicate row' }, { status: 409 }) : route(body));
+    const key = `upstash-blob:v1:/api/upload/large|big.bin|${size}|2`;
+    memory.set(key, JSON.stringify({ completionToken: 'tok-lost-4' }));
+    const task = upload(big(size), { route: '/api/upload/large' });
+    await settle();
+    expect(calls.map((c) => c.phase)).toEqual(['parts', 'end']);
+    await expect(task.done).rejects.toMatchObject({ status: 409 });
+    expect(memory.get(key)).toBe(JSON.stringify({ completionToken: 'tok-lost-4', misses: 1 }));
+  });
+
   test("a repeated 'end' that never gets an answer is given up on after three picks, like a lookup", async () => {
     const size = 17 * MIB;
     const { route, state } = completedRoute(size);
