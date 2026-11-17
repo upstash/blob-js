@@ -177,7 +177,10 @@ type NotJson = undefined | void | symbol | ((...args: any[]) => unknown);
 export type Jsonify<T> = 0 extends 1 & T
   ? any
   : unknown extends T
-    ? unknown
+    ? // Without strictNullChecks unknown also fits any object whose members are all optional.
+      [keyof T] extends [never]
+      ? unknown
+      : JsonObject<T>
     : T extends { toJSON(...args: any[]): infer R }
       ? Jsonify<R>
       : T extends string | number | boolean | null
@@ -200,8 +203,8 @@ export type Jsonify<T> = 0 extends 1 & T
 type JsonElement<V> = 0 extends 1 & V ? any : Jsonify<Exclude<V, NotJson>> | (Dropped<V> extends 'never' ? never : null);
 
 type JsonObject<T> = Flatten<
-  { [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'maybe' ? K : never]?: Jsonify<Exclude<T[K], NotJson>> } & {
-    [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'never' ? K : never]: Jsonify<T[K]>;
+  { [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'never' ? K : never]: Jsonify<T[K]> } & {
+    [K in keyof T as K extends symbol ? never : Dropped<T[K]> extends 'maybe' ? K : never]?: Jsonify<Exclude<T[K], NotJson>>;
   }
 >;
 
