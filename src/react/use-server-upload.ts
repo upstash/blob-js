@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react';
 import { clock } from '../browser/clock.ts';
-import type { HeadersProvider } from '../browser/task.ts';
+import { resolveHeaders, type HeadersProvider } from '../browser/task.ts';
 import type { BlobError } from '../shared/errors.ts';
 import type { ServedConstraints } from '../shared/types.ts';
 import { deny, useConstraints } from './constraints.ts';
@@ -148,7 +148,7 @@ export function useServerUpload<R = unknown>(route: string, options: UseServerUp
       const payload = payloadOf(args, fieldRef.current);
       if (!payload) return null;
       const refusal = payload.file ? deny(payload.file, constraintsRef.current) : undefined;
-      const entry = refusal ? refusedEntry<TResponse>(payload.file!, refusal) : serverUploadEntry(new ServerUploadTask<TResponse>({ route, headers: headersRef.current, ...payload }));
+      const entry = refusal ? refusedEntry<TResponse>(payload.file!, refusal) : serverUploadEntry(new ServerUploadTask<TResponse>({ route, headers: () => resolveHeaders(headersRef.current), ...payload }));
       return add([entry])[0] ?? null;
     },
     [add, route, constraintsRef],
