@@ -170,7 +170,7 @@ export function handleUpload(options: InternalUploadOptions): InternalUploadHand
     const cache = cacheControl(decided.cache ?? r2.defaultCache, r2.visibility());
     const metadata = decided.metadata ?? {};
     details.metadata = metadata;
-    if (Object.hasOwn(metadata, UPLOAD_MARKER)) {
+    if (Object.keys(metadata).some((k) => k.toLowerCase() === UPLOAD_MARKER)) {
       throw new BlobError('invalid_input', { message: `metadata.${UPLOAD_MARKER} is reserved by the SDK` });
     }
     const headers: Record<string, string> = { 'content-type': file.type, 'cache-control': cache, ...metaHeaders(metadata) };

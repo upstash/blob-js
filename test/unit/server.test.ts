@@ -1620,10 +1620,13 @@ describe('uploadHandler: the direct transport', () => {
   test('the marker key is the SDK\'s, and an app that writes it is told so at begin', async () => {
     resetCredentialCaches();
     r2Handler = beginR2;
-    const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png', metadata: { 'upstash-upload': 'mine' } }) });
-    const res = await post(route, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } });
-    expect(res.status).toBe(400);
-    expect((await res.json()).message).toContain('reserved');
+    // Metadata keys are stored lowercased, so any spelling of it is the same key.
+    for (const key of ['upstash-upload', 'Upstash-Upload']) {
+      const route = uploadHandler({ bucket: bucket(), onBeforeUpload: () => ({ path: 'a.png', metadata: { [key]: 'mine' } }) });
+      const res = await post(route, { phase: 'begin', file: { name: 'a.png', type: 'image/png', size: 10 } });
+      expect(res.status).toBe(400);
+      expect((await res.json()).message).toContain('reserved');
+    }
   });
 
   test('an unparseable multipart is a build error, not a 500 after onBeforeUpload has run', async () => {
