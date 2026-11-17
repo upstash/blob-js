@@ -488,20 +488,52 @@ function _jsonBranches(value: Bucket, ok: boolean) {
   const { useUpload: bound } = uploadHooks<typeof _branches>();
   bound({
     onDone: ({ blob: { data } }) => {
-      if (data.error) void (data.error satisfies string);
-      else if (data.id !== undefined) {
+      if (data.error) {
+        void (data.error satisfies string);
+        // The arms are not mixed into one object: the error arm has no id.
+        void (data.id satisfies undefined);
+      } else if (data.id !== undefined) {
         void (data.at satisfies string | undefined);
         void (data.pair satisfies [string, number] | undefined);
       }
-      // @ts-expect-error the arms are not mixed into one object
-      void (data satisfies { id: number; error: string });
     },
+  });
+}
+
+// The same holds for routes built with uploadRoute(), whose data type is carried differently.
+function _jsonRouteUnions(value: Bucket, ok: boolean) {
+  const _routes = uploadHandler({
+    bucket: value,
+    onBeforeUpload: () => ({ path: 'x' }),
+    routes: {
+      maybe: uploadRoute()({ onBeforeUpload: () => ({ path: 'm' }), onUploadComplete: async () => (ok ? { kind: 'ok' as const, at: new Date() } : null) }),
+      tagged: uploadRoute()({
+        onBeforeUpload: () => ({ path: 't' }),
+        onUploadComplete: (): { kind: 'a'; at: Date } | { kind: 'b'; n: number } => (ok ? { kind: 'a', at: new Date() } : { kind: 'b', n: 1 }),
+      }),
+      when: uploadRoute()({ onBeforeUpload: () => ({ path: 'w' }), onUploadComplete: () => (ok ? new Date() : null) }),
+    },
+  });
+  const { useUpload: bound } = uploadHooks<typeof _routes>();
+  bound('maybe', {
+    onDone: ({ blob: { data } }) => {
+      if (data) void (data.at satisfies string);
+    },
+  });
+  bound('tagged', {
+    onDone: ({ blob: { data } }) => {
+      if (data.kind === 'a') void (data.at satisfies string);
+      else void (data.n satisfies number);
+    },
+  });
+  bound('when', {
+    onDone: ({ blob: { data } }) => void (data satisfies string | null),
   });
 }
 
 test('the handler types compile', () => {
   expect(typeof uploadHandler).toBe('function');
   expect(typeof useServerUpload).toBe('function');
-  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _singleState, _routesState, _routesStateGeneric, _wrappedState, _routeUnions, _escapeHatches, _useUploadCaveat, _jsonData, _jsonBranches];
+  void [_ctx, _contextInference, _contextBelowRoutes, _routeShapes, _boundHooks, _single, _singleState, _routesState, _routesStateGeneric, _wrappedState, _routeUnions, _escapeHatches, _useUploadCaveat, _jsonData, _jsonBranches, _jsonRouteUnions];
   void ({} as UploadCompleteArgs<Uploads>);
 });
