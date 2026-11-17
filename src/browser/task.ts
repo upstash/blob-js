@@ -72,13 +72,28 @@ export function isAbort(e: unknown): boolean {
 }
 
 class Task implements InternalTask {
+  // The completion tokens tasks in this page are uploading under. Two tasks on one token write the
+  // same object, and a cancel from either deletes what the other finished, so a pending record whose
+  // token is here belongs to another task: the same file picked twice uploads twice. A finished or
+  // canceled task keeps its token here for good; only an error lets it go, so that picking the file
+  // again resumes.
+  private static readonly live = new Set<string>();
+
   readonly id = `u${++counter}-${clock.now().toString(36)}`;
 
   private status: Status = 'queued';
   private error: BlobError | undefined;
   private blob: (CompletedBlob & { data: unknown }) | undefined;
   private token: string | undefined;
-  private storeKey: string;
+  private storeKey: string | undefined;
+  /** The token this task put in `live`, taken before the resume check so two picks cannot both win it. */
+  private claim: string | undefined;
+  /**
+   * The token of the record that was free when the file was picked, the only one this task resumes:
+   * a pick made while another task here held the record is a second upload, even if that task fails
+   * before this one starts.
+   */
+  private readonly picked: string | undefined;
   private partSize = 0;
   /**
    * The protocol on the last answer to arrive. Calls overlap, so this is not a gate: a feature reads
@@ -114,7 +129,9 @@ class Task implements InternalTask {
     readonly file: File,
     private readonly options: UploadOptions,
   ) {
-    this.storeKey = fingerprint(options.route, file);
+    this.storeKey = fingerprint(options.route, file, options.input);
+    const rec = readPending(this.storeKey);
+    this.picked = rec && !Task.live.has(rec.completionToken) ? rec.completionToken : undefined;
     this.freshDone();
   }
 
@@ -241,6 +258,9 @@ class Task implements InternalTask {
   // already rejected.
   retry(): boolean {
     if (this.status !== 'error' || this.accepted) return false;
+    // Picked again since the error, so that task resumed this upload and this one must not run it too.
+    if (this.claim !== undefined && Task.live.has(this.claim)) return false;
+    if (this.claim !== undefined) Task.live.add(this.claim);
     this.error = undefined;
     this.status = 'queued';
     this.inflight.clear();
@@ -267,7 +287,7 @@ class Task implements InternalTask {
     const waiters = this.resumeWaiters;
     this.resumeWaiters = [];
     for (const w of waiters) w();
-    if (finishing) clearPending(this.storeKey);
+    if (finishing) clearPending(this.storeKey, this.claim);
     else this.abortServerSide();
     this.inflight.clear();
     this.notify();
@@ -278,10 +298,12 @@ class Task implements InternalTask {
   // A multipart upload the server already created is storage nothing else can see, and a single PUT
   // that landed is an object no callback accepted, so the token is spent on a cancel either way.
   private abortServerSide(): void {
-    clearPending(this.storeKey);
     const token = this.token;
+    // No token yet is a cancel during the resume check, which leaves the record as it was: the upload
+    // is still the failed task's to retry, or the next pick's to resume.
     if (!token) return;
     this.token = undefined;
+    clearPending(this.storeKey, token);
     this.routeCall({ phase: 'cancel', completionToken: token }, undefined, 1).catch(() => {});
   }
 
@@ -299,7 +321,7 @@ class Task implements InternalTask {
         if (this.status === 'canceled') return;
         this.blob = blob;
         this.status = 'done';
-        clearPending(this.storeKey);
+        clearPending(this.storeKey, this.claim);
         this.notify();
         this.resolveDone(blob);
       },
@@ -309,6 +331,7 @@ class Task implements InternalTask {
         // What is not is a bug, and that is not a 503 the caller should wait out.
         this.error = BlobError.is(e) ? e : new BlobError('request_failed', { message: e instanceof Error ? e.message : String(e), cause: e });
         this.status = 'error';
+        if (this.claim !== undefined) Task.live.delete(this.claim);
         this.inflight.clear();
         this.notify();
         this.rejectDone(this.error);
@@ -358,7 +381,8 @@ class Task implements InternalTask {
       // Never retried: begin runs onBeforeUpload, which inserts the app's row.
       1,
     )) as WireBeginResponse;
-    this.token = res.completionToken;
+    this.token = this.claim = res.completionToken;
+    Task.live.add(this.token);
     this.partSize = res.upload.partSize;
     this.multipart = res.upload.multipart !== false;
     this.layoutParts();
@@ -371,7 +395,8 @@ class Task implements InternalTask {
   // which asks R2 what landed. Anything else is a fresh upload, never an error.
   private async tryResume(): Promise<boolean> {
     const rec = readPending(this.storeKey);
-    if (!rec) return false;
+    if (!rec || rec.completionToken !== this.picked || Task.live.has(rec.completionToken)) return false;
+    Task.live.add((this.claim = rec.completionToken));
     try {
       const res = (await this.routeCall({ phase: 'parts', completionToken: rec.completionToken, from: 1 }, this.cancelController.signal, 1)) as WirePartsResponse;
       if (res.size !== this.file.size) throw new Error('not resumable');
@@ -382,8 +407,10 @@ class Task implements InternalTask {
       this.applyBatch(res);
       return true;
     } catch (e) {
+      Task.live.delete(rec.completionToken);
+      this.claim = undefined;
       if (isAbort(e)) throw e;
-      clearPending(this.storeKey);
+      clearPending(this.storeKey, rec.completionToken);
       return false;
     }
   }
@@ -618,7 +645,7 @@ class Task implements InternalTask {
       const ended = res.ok && body.phase === 'end';
       if (ended) {
         this.accepted = true;
-        clearPending(this.storeKey);
+        clearPending(this.storeKey, this.claim);
       }
       let text: string;
       try {

@@ -289,8 +289,8 @@ What the SDK already does, so you do not have to:
   by path makes the second run a no-op.
 - `cancel()` during `finishing` is local only and the file may still be recorded, which is why the
   recipe hides Cancel there.
-- Picking a file again after a failure resumes the same upload; `context` still checks every
-  request.
+- Picking the same file again with the same `input` after a failure resumes the same upload;
+  another `input` starts a new one, and `context` still checks every request.
 - A closed tab, or a cancel request that never arrives, can leave a stored file with no row (under
   16 MB) or an unfinished multipart. Neither shows, since the list comes from rows; see
   [Incomplete uploads](#incomplete-uploads).
